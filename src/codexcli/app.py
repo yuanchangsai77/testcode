@@ -64,10 +64,29 @@ def create_app() -> CLI:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="codexcli: LLM-driven CLI workbench scaffold")
-    parser.add_argument("prompt", nargs="+", help="Task to send into the CLI workbench")
-    args = parser.parse_args()
+    try:
+        parser = argparse.ArgumentParser(description="codexcli: LLM-driven CLI workbench scaffold")
+        parser.add_argument("prompt", nargs="*", help="Task to send into the CLI workbench")
+        parser.add_argument(
+            "--once",
+            action="store_true",
+            help="Run a single turn and exit instead of entering long conversation mode.",
+        )
+        args = parser.parse_args()
 
-    request = UserRequest(prompt=" ".join(args.prompt), cwd=os.getcwd())
-    app = create_app()
-    app.run(request)
+        app = create_app()
+        cwd = os.getcwd()
+        initial_prompt = " ".join(args.prompt).strip() or None
+
+        if args.once:
+            prompt = initial_prompt or input("codexcli> ").strip()
+            if not prompt:
+                return
+            request = UserRequest(prompt=prompt, cwd=cwd)
+            app.run(request)
+            return
+
+        app.chat(cwd=cwd, initial_prompt=initial_prompt)
+    except KeyboardInterrupt:
+        print()
+        return

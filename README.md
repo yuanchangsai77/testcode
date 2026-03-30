@@ -35,6 +35,18 @@ python -m codexcli "summarize this repository"
 
 The current implementation is a scaffold. It wires the architecture together and can run a minimal request flow with a stub model and toolchain.
 
+Long conversation mode:
+
+```bash
+PYTHONPATH=src python3 -m codexcli
+```
+
+Single turn only:
+
+```bash
+PYTHONPATH=src python3 -m codexcli --once "summarize this repository"
+```
+
 ## Connect To The Local LLM Proxy
 
 If you want `codexcli` to use the OpenAI-compatible proxy running in `/opt/repos/test`, start that project first and then configure `.env`:
@@ -58,6 +70,8 @@ Run:
 ```bash
 PYTHONPATH=src python3 -m codexcli "summarize this repository"
 ```
+
+If you pass an initial prompt without `--once`, `codexcli` answers that prompt and then stays in interactive conversation mode. Type `exit` or `quit` to leave.
 
 ## Core Tools
 

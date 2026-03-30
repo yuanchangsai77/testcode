@@ -80,6 +80,7 @@ class OpenAICompatibleModelClient:
         return reply
 
     def _build_messages(self, session: SessionContext) -> list[dict[str, object]]:
+        conversation = session.request.metadata.get("conversation", [])
         system_lines = [
             "You are the model integration layer for codexcli.",
             "You must decide whether to answer directly or request tool calls.",
@@ -100,6 +101,14 @@ class OpenAICompatibleModelClient:
             f"User request: {session.request.prompt}",
             "Available tools:",
         ]
+
+        if conversation:
+            user_lines.append("Conversation history:")
+            for item in conversation:
+                if isinstance(item, dict):
+                    role = str(item.get("role", "unknown"))
+                    content = str(item.get("content", ""))
+                    user_lines.append(f"- {role}: {content}")
 
         for tool in session.available_tools:
             user_lines.append(f"- {tool.name}: {tool.description}")
