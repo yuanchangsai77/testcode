@@ -31,6 +31,9 @@ coverage.xml
 # Local tooling state
 .python-version
 .codexcli/
+.env
+.env.*
+!.env.example
 
 # Runtime logs
 *.log

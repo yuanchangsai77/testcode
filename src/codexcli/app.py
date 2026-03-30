@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from .interaction.cli import CLI
 from .interaction.presenter import ConsolePresenter
@@ -12,6 +13,34 @@ from .safety.guardrails import Guardrails
 from .safety.policy import DefaultPolicy
 from .tools.builtin import build_builtin_registry
 from .types import UserRequest
+
+
+def load_dotenv() -> None:
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+
+        if (
+            (value.startswith('"') and value.endswith('"')) or
+            (value.startswith("'") and value.endswith("'"))
+        ):
+            value = value[1:-1]
+
+        os.environ[key] = value
+
+
+load_dotenv()
 
 
 def create_model_client(logger) -> StubModelClient | OpenAICompatibleModelClient:

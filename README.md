@@ -37,21 +37,27 @@ The current implementation is a scaffold. It wires the architecture together and
 
 ## Connect To The Local LLM Proxy
 
-If you want `codexcli` to use the OpenAI-compatible proxy running in `/opt/repos/test`, start that project first and then set:
+If you want `codexcli` to use the OpenAI-compatible proxy running in `/opt/repos/test`, start that project first and then configure `.env`:
 
-```bash
-export CODEXCLI_MODEL_BASE_URL=http://127.0.0.1:3000
-export CODEXCLI_MODEL_NAME=gpt-5.4
-python -m codexcli "summarize this repository"
+```env
+CODEXCLI_MODEL_BASE_URL=http://127.0.0.1:3000
+CODEXCLI_MODEL_NAME=gpt-5.4
 ```
 
 Behavior:
 
-- If `CODEXCLI_MODEL_BASE_URL` is not set, `codexcli` keeps using `StubModelClient`
+- `codexcli` automatically loads `.env` from the repository root
+- If `CODEXCLI_MODEL_BASE_URL` is still not set, `codexcli` keeps using `StubModelClient`
 - If `CODEXCLI_MODEL_BASE_URL` is set, `codexcli` sends requests to `POST /v1/chat/completions`
 - The proxy in `/opt/repos/test` remains responsible for the real upstream base URL and API key
 - The real-model path now supports tool-call loops: the model can request built-in tools, receive tool results, and continue until it produces a final answer
 - Each run automatically writes observability logs under `.codexcli/runs/<timestamp>/`, including `events.jsonl` and a layered `details.log`
+
+Run:
+
+```bash
+PYTHONPATH=src python3 -m codexcli "summarize this repository"
+```
 
 ## Core Tools
 
