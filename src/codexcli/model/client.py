@@ -20,7 +20,7 @@ class StubModelClient:
         if not session.tool_results:
             return ModelReply(
                 message="I need workspace context before answering.",
-                actions=[ToolAction(name="workspace_summary", arguments={"cwd": session.request.cwd})],
+                actions=[ToolAction(name="inspect", arguments={"path": session.request.cwd})],
                 done=False,
             )
 
@@ -37,10 +37,11 @@ class StubModelClient:
 class OpenAICompatibleModelClient:
     """Minimal OpenAI-compatible chat client backed by the local proxy."""
 
-    def __init__(self, base_url: str, model: str = "gpt-5.4", timeout: float = 60.0) -> None:
+    def __init__(self, base_url: str, model: str = "gpt-5.4", timeout: float = 60.0, logger=None) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.logger = logger
 
     def respond(self, session: SessionContext) -> ModelReply:
         messages = self._build_messages(session)
@@ -49,9 +50,34 @@ class OpenAICompatibleModelClient:
             "messages": messages,
             "stream": False,
         }
-        data = self._post_json(f"{self.base_url}/v1/chat/completions", payload)
+        url = f"{self.base_url}/v1/chat/completions"
+        if self.logger is not None:
+            self.logger.record(
+                "model.request",
+                {
+                    "url": url,
+                    "model": self.model,
+                    "messages": messages,
+                },
+            )
+        data = self._post_json(url, payload)
+        if self.logger is not None:
+            self.logger.record("model.response", data)
         message = data["choices"][0]["message"]["content"]
-        return self._parse_reply(self._normalize_content(message))
+        reply = self._parse_reply(self._normalize_content(message))
+        if self.logger is not None:
+            self.logger.record(
+                "model.parsed_reply",
+                {
+                    "message": reply.message,
+                    "done": reply.done,
+                    "actions": [
+                        {"name": action.name, "arguments": action.arguments}
+                        for action in reply.actions
+                    ],
+                },
+            )
+        return reply
 
     def _build_messages(self, session: SessionContext) -> list[dict[str, object]]:
         system_lines = [
@@ -66,6 +92,7 @@ class OpenAICompatibleModelClient:
             "- Do not use markdown fences.",
             "- Only use tool names from the provided tool list.",
             "- Keep message concise and user-facing.",
+            "- Do not repeat the same tool call if the session history already contains the needed result.",
         ]
 
         user_lines = [
@@ -101,16 +128,30 @@ class OpenAICompatibleModelClient:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as error:
             body = error.read().decode("utf-8", errors="replace")
+            if self.logger is not None:
+                self.logger.record(
+                    "model.http_error",
+                    {"url": url, "status": error.code, "body": body},
+                )
             raise RuntimeError(f"Model request failed with HTTP {error.code}: {body}") from error
         except urllib.error.URLError as error:
+            if self.logger is not None:
+                self.logger.record(
+                    "model.network_error",
+                    {"url": url, "reason": str(error.reason)},
+                )
             raise RuntimeError(f"Model request failed: {error.reason}") from error
 
         try:
             data = json.loads(body)
         except json.JSONDecodeError as error:
+            if self.logger is not None:
+                self.logger.record("model.invalid_json", {"url": url, "body": body})
             raise RuntimeError(f"Model response was not valid JSON: {body}") from error
 
         if "choices" not in data:
+            if self.logger is not None:
+                self.logger.record("model.invalid_shape", {"url": url, "body": data})
             raise RuntimeError(f"Model response missing choices: {data}")
 
         return data

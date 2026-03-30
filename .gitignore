@@ -30,6 +30,10 @@ coverage.xml
 
 # Local tooling state
 .python-version
+.codexcli/
+
+# Runtime logs
+*.log
 
 # Editors and OS files
 .idea/

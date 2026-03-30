@@ -14,13 +14,13 @@ from .tools.builtin import build_builtin_registry
 from .types import UserRequest
 
 
-def create_model_client() -> StubModelClient | OpenAICompatibleModelClient:
+def create_model_client(logger) -> StubModelClient | OpenAICompatibleModelClient:
     base_url = os.getenv("CODEXCLI_MODEL_BASE_URL", "").strip()
     if not base_url:
         return StubModelClient()
 
     model = os.getenv("CODEXCLI_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4"
-    return OpenAICompatibleModelClient(base_url=base_url, model=model)
+    return OpenAICompatibleModelClient(base_url=base_url, model=model, logger=logger)
 
 
 def create_app() -> CLI:
@@ -28,10 +28,10 @@ def create_app() -> CLI:
     policy = DefaultPolicy()
     guardrails = Guardrails(policy=policy, logger=logger)
     tools = build_builtin_registry(logger=logger)
-    model = create_model_client()
+    model = create_model_client(logger)
     engine = ExecutionEngine(model=model, tools=tools, guardrails=guardrails, logger=logger)
     presenter = ConsolePresenter()
-    return CLI(engine=engine, presenter=presenter)
+    return CLI(engine=engine, presenter=presenter, logger=logger)
 
 
 def main() -> None:

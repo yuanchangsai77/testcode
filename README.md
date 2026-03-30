@@ -51,3 +51,14 @@ Behavior:
 - If `CODEXCLI_MODEL_BASE_URL` is set, `codexcli` sends requests to `POST /v1/chat/completions`
 - The proxy in `/opt/repos/test` remains responsible for the real upstream base URL and API key
 - The real-model path now supports tool-call loops: the model can request built-in tools, receive tool results, and continue until it produces a final answer
+- Each run automatically writes observability logs under `.codexcli/runs/<timestamp>/`, including `events.jsonl` and a layered `details.log`
+
+## Core Tools
+
+The built-in tool set is intentionally small:
+
+- `inspect`: inspect a directory or read a file
+- `scratchpad`: write temporary text to a scratch file
+- `apply_change`: write text content to a target file
+
+The model ends a run by returning `done: true`. There is no separate `finish` tool.
