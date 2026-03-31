@@ -41,6 +41,30 @@ Long conversation mode:
 PYTHONPATH=src python3 -m codexcli
 ```
 
+List saved conversations:
+
+```bash
+PYTHONPATH=src python3 -m codexcli --list
+```
+
+Choose a saved conversation interactively:
+
+```bash
+PYTHONPATH=src python3 -m codexcli --resume
+```
+
+Resume the most recent conversation:
+
+```bash
+PYTHONPATH=src python3 -m codexcli --last
+```
+
+Resume a specific conversation by id:
+
+```bash
+PYTHONPATH=src python3 -m codexcli --resume 20260331041240862413-588cbf9b
+```
+
 Single turn only:
 
 ```bash
@@ -72,6 +96,16 @@ PYTHONPATH=src python3 -m codexcli "summarize this repository"
 ```
 
 If you pass an initial prompt without `--once`, `codexcli` answers that prompt and then stays in interactive conversation mode. Type `exit` or `quit` to leave.
+
+Interactive conversations are saved under `.codexcli/sessions/`. Use `--list` to inspect saved session ids, `--resume <session_id>` to continue a specific conversation, or `--last` to reopen the most recently updated one.
+
+If you prefer interactive selection, run `PYTHONPATH=src python3 -m codexcli --resume` without an id and pick a numbered session from the list.
+
+For bash completion of `codexcli` flags, source [`contrib/codexcli-completion.bash`](/opt/repos/testcode/contrib/codexcli-completion.bash):
+
+```bash
+source /opt/repos/testcode/contrib/codexcli-completion.bash
+```
 
 ## Core Tools
 

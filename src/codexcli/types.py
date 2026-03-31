@@ -42,3 +42,24 @@ class ToolResult:
 class ExecutionSummary:
     final_message: str
     tool_results: list[ToolResult]
+
+
+@dataclass(slots=True)
+class SessionRecord:
+    session_id: str
+    cwd: str
+    created_at: str
+    updated_at: str
+    status: str
+    message_count: int
+    preview: str
+
+
+@dataclass(slots=True)
+class StoredSession:
+    session_id: str
+    cwd: str
+    created_at: str
+    updated_at: str
+    status: str
+    messages: list[dict[str, str]] = field(default_factory=list)

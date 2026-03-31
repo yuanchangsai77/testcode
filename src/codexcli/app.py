@@ -11,6 +11,7 @@ from .observability.logger import InMemoryLogger
 from .orchestration.engine import ExecutionEngine
 from .safety.guardrails import Guardrails
 from .safety.policy import DefaultPolicy
+from .session_store import SessionStore
 from .tools.builtin import build_builtin_registry
 from .types import UserRequest
 
@@ -60,7 +61,8 @@ def create_app() -> CLI:
     model = create_model_client(logger)
     engine = ExecutionEngine(model=model, tools=tools, guardrails=guardrails, logger=logger)
     presenter = ConsolePresenter()
-    return CLI(engine=engine, presenter=presenter, logger=logger)
+    session_store = SessionStore()
+    return CLI(engine=engine, presenter=presenter, logger=logger, session_store=session_store)
 
 
 def main() -> None:
@@ -72,21 +74,68 @@ def main() -> None:
             action="store_true",
             help="Run a single turn and exit instead of entering long conversation mode.",
         )
+        parser.add_argument(
+            "--list",
+            action="store_true",
+            help="List saved conversations. You can optionally pick one to resume.",
+        )
+        parser.add_argument(
+            "--resume",
+            nargs="?",
+            help="Resume a saved conversation by session id.",
+        )
+        parser.add_argument(
+            "--last",
+            action="store_true",
+            help="Resume the most recently updated saved conversation.",
+        )
         args = parser.parse_args()
 
         app = create_app()
-        cwd = os.getcwd()
         initial_prompt = " ".join(args.prompt).strip() or None
+
+        resume_requested = args.resume is not None
+        if resume_requested and args.last:
+            raise SystemExit("Use either --resume or --last, not both.")
+
+        resumed_session = None
+        if resume_requested:
+            if args.resume:
+                resumed_session = app.load_session(args.resume)
+                if resumed_session is None:
+                    raise SystemExit(f"Unknown session id: {args.resume}")
+            else:
+                resumed_session = app.choose_session()
+                if resumed_session is None:
+                    return
+        elif args.last:
+            resumed_session = app.latest_session()
+            if resumed_session is None:
+                raise SystemExit("No saved sessions found.")
+        elif args.list:
+            app.presenter.show_session_list(app.list_sessions())
+            return
+
+        cwd = resumed_session.cwd if resumed_session is not None else os.getcwd()
 
         if args.once:
             prompt = initial_prompt or input("codexcli> ").strip()
             if not prompt:
                 return
-            request = UserRequest(prompt=prompt, cwd=cwd)
+            metadata = {}
+            if resumed_session is not None:
+                metadata["conversation"] = list(resumed_session.messages)
+                metadata["session_id"] = resumed_session.session_id
+            request = UserRequest(prompt=prompt, cwd=cwd, metadata=metadata)
             app.run(request)
             return
 
-        app.chat(cwd=cwd, initial_prompt=initial_prompt)
+        app.chat(
+            cwd=cwd,
+            initial_prompt=initial_prompt,
+            conversation=resumed_session.messages if resumed_session is not None else None,
+            session_id=resumed_session.session_id if resumed_session is not None else None,
+        )
     except KeyboardInterrupt:
         print()
         return

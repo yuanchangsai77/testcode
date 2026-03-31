@@ -1,4 +1,7 @@
 from codexcli.app import create_app
+from codexcli.interaction.cli import CLI
+from codexcli.interaction.presenter import ConsolePresenter
+from codexcli.session_store import SessionStore
 from codexcli.types import UserRequest
 
 
@@ -26,3 +29,39 @@ def test_run_returns_message_when_model_request_fails(tmp_path, monkeypatch):
     assert "Connection refused" in summary.final_message
     assert "keep this session open and try again" in summary.final_message
     assert summary.tool_results == []
+
+
+def test_session_store_lists_latest_first(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    first = store.create(cwd="/repo/a", messages=[{"role": "user", "content": "first prompt"}])
+    second = store.create(cwd="/repo/b", messages=[{"role": "user", "content": "second prompt"}])
+
+    sessions = store.list_sessions()
+
+    assert [item.session_id for item in sessions] == [second.session_id, first.session_id]
+    assert sessions[0].preview == "second prompt"
+
+
+def test_chat_persists_and_closes_session(tmp_path, monkeypatch):
+    store = SessionStore(base_dir=tmp_path)
+    cli = CLI(engine=None, presenter=ConsolePresenter(), logger=None, session_store=store)
+
+    answers = iter(["hello", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(
+        cli,
+        "_run_once",
+        lambda request: type("Summary", (), {"final_message": f"echo:{request.prompt}", "tool_results": []})(),
+    )
+
+    cli.chat(cwd=str(tmp_path))
+
+    sessions = store.list_sessions()
+    assert len(sessions) == 1
+    stored = store.load(sessions[0].session_id)
+    assert stored is not None
+    assert stored.status == "closed"
+    assert stored.messages == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "echo:hello"},
+    ]
