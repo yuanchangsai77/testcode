@@ -51,7 +51,18 @@ class CLI:
         if self.logger is not None:
             self.logger.start_run(request)
         self.presenter.show_start(request)
-        summary = self.engine.execute(request)
+        try:
+            summary = self.engine.execute(request)
+        except RuntimeError as error:
+            if self.logger is not None:
+                self.logger.record("run.error", {"message": str(error)})
+            summary = ExecutionSummary(
+                final_message=(
+                    "Model API is unavailable right now. "
+                    f"{error}. You can keep this session open and try again."
+                ),
+                tool_results=[],
+            )
         self.presenter.show_summary(summary)
         if self.logger is not None:
             self.logger.finalize(request, summary)
