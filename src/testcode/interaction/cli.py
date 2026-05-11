@@ -43,7 +43,7 @@ class CLI:
         while True:
             if prompt is None:
                 try:
-                    prompt = input("codexcli> ").strip()
+                    prompt = input("testcode> ").strip()
                 except KeyboardInterrupt:
                     print()
                     self._close_session(session, conversation)
@@ -104,14 +104,14 @@ class CLI:
             if not raw:
                 return None
             if not raw.isdigit():
-                print("[codexcli] enter a session number")
+                print("[testcode] enter a session number")
                 continue
 
             index = int(raw)
             if 1 <= index <= len(sessions):
                 return self.load_session(sessions[index - 1].session_id)
 
-            print(f"[codexcli] choose a number between 1 and {len(sessions)}")
+            print(f"[testcode] choose a number between 1 and {len(sessions)}")
 
     def _run_once(self, request: UserRequest) -> ExecutionSummary:
         if self.logger is not None:

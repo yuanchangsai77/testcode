@@ -1,4 +1,4 @@
-"""codexcli package."""
+"""testcode package."""
 
 from .app import create_app
 

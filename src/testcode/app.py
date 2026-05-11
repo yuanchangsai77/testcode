@@ -45,11 +45,11 @@ load_dotenv()
 
 
 def create_model_client(logger) -> StubModelClient | OpenAICompatibleModelClient:
-    base_url = os.getenv("CODEXCLI_MODEL_BASE_URL", "").strip()
+    base_url = os.getenv("TESTCODE_MODEL_BASE_URL", "").strip()
     if not base_url:
         return StubModelClient()
 
-    model = os.getenv("CODEXCLI_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4"
+    model = os.getenv("TESTCODE_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4"
     return OpenAICompatibleModelClient(base_url=base_url, model=model, logger=logger)
 
 
@@ -67,7 +67,7 @@ def create_app() -> CLI:
 
 def main() -> None:
     try:
-        parser = argparse.ArgumentParser(description="codexcli: LLM-driven CLI workbench scaffold")
+        parser = argparse.ArgumentParser(description="testcode: LLM-driven CLI workbench scaffold")
         parser.add_argument("prompt", nargs="*", help="Task to send into the CLI workbench")
         parser.add_argument(
             "--once",
@@ -119,7 +119,7 @@ def main() -> None:
         cwd = resumed_session.cwd if resumed_session is not None else os.getcwd()
 
         if args.once:
-            prompt = initial_prompt or input("codexcli> ").strip()
+            prompt = initial_prompt or input("testcode> ").strip()
             if not prompt:
                 return
             metadata = {}

@@ -1,8 +1,8 @@
-# codexcli Core Architecture
+# testcode Core Architecture
 
 ## 1. Product Positioning
 
-`codexcli` is a large-model-driven CLI workbench. It is not an autonomous decision engine. Its responsibility is to:
+`testcode` is a large-model-driven CLI workbench. It is not an autonomous decision engine. Its responsibility is to:
 
 - receive user intent from the command line
 - collect execution context from the local environment
@@ -35,8 +35,8 @@ Responsibilities:
 
 Core files:
 
-- `src/codexcli/interaction/cli.py`
-- `src/codexcli/interaction/presenter.py`
+- `src/testcode/interaction/cli.py`
+- `src/testcode/interaction/presenter.py`
 
 ### 3.2 Session Orchestration Layer
 
@@ -49,8 +49,8 @@ Responsibilities:
 
 Core files:
 
-- `src/codexcli/orchestration/session.py`
-- `src/codexcli/orchestration/engine.py`
+- `src/testcode/orchestration/session.py`
+- `src/testcode/orchestration/engine.py`
 
 ### 3.3 Model Integration Layer
 
@@ -63,8 +63,8 @@ Responsibilities:
 
 Core files:
 
-- `src/codexcli/model/protocol.py`
-- `src/codexcli/model/client.py`
+- `src/testcode/model/protocol.py`
+- `src/testcode/model/client.py`
 
 ### 3.4 Tool Execution Layer
 
@@ -76,9 +76,9 @@ Responsibilities:
 
 Core files:
 
-- `src/codexcli/tools/base.py`
-- `src/codexcli/tools/registry.py`
-- `src/codexcli/tools/builtin.py`
+- `src/testcode/tools/base.py`
+- `src/testcode/tools/registry.py`
+- `src/testcode/tools/builtin.py`
 
 ### 3.5 Safety Layer
 
@@ -90,8 +90,8 @@ Responsibilities:
 
 Core files:
 
-- `src/codexcli/safety/policy.py`
-- `src/codexcli/safety/guardrails.py`
+- `src/testcode/safety/policy.py`
+- `src/testcode/safety/guardrails.py`
 
 ### 3.6 Observability Layer
 
@@ -103,8 +103,8 @@ Responsibilities:
 
 Core files:
 
-- `src/codexcli/observability/events.py`
-- `src/codexcli/observability/logger.py`
+- `src/testcode/observability/events.py`
+- `src/testcode/observability/logger.py`
 
 ## 4. Runtime Flow
 

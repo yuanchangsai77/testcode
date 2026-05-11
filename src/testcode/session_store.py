@@ -11,7 +11,7 @@ from .types import SessionRecord, StoredSession
 class SessionStore:
     def __init__(self, base_dir: str | Path | None = None) -> None:
         root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[2]
-        self.base_dir = root / ".codexcli" / "sessions"
+        self.base_dir = root / ".testcode" / "sessions"
 
     def create(self, cwd: str, messages: list[dict[str, str]] | None = None) -> StoredSession:
         now = self._timestamp()

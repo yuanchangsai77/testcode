@@ -7,14 +7,14 @@ class ConsolePresenter:
     max_tool_output = 120
 
     def show_start(self, request: UserRequest) -> None:
-        print(f"[codexcli] task: {request.prompt}")
-        print(f"[codexcli] cwd: {request.cwd}")
+        print(f"[testcode] task: {request.prompt}")
+        print(f"[testcode] cwd: {request.cwd}")
 
     def show_summary(self, summary: ExecutionSummary) -> None:
-        print("[codexcli] result:")
+        print("[testcode] result:")
         print(summary.final_message)
         if summary.tool_results:
-            print("[codexcli] tool results:")
+            print("[testcode] tool results:")
             for result in summary.tool_results:
                 status = "ok" if result.success else "blocked"
                 output = self._summarize_tool_output(result.output)
@@ -28,15 +28,15 @@ class ConsolePresenter:
 
     def show_session_state(self, session: StoredSession, resumed: bool) -> None:
         action = "resumed" if resumed else "started"
-        print(f"[codexcli] session {action}: {session.session_id}")
-        print(f"[codexcli] session cwd: {session.cwd}")
+        print(f"[testcode] session {action}: {session.session_id}")
+        print(f"[testcode] session cwd: {session.cwd}")
 
     def show_session_list(self, sessions: list[SessionRecord]) -> None:
         if not sessions:
-            print("[codexcli] no saved sessions")
+            print("[testcode] no saved sessions")
             return
 
-        print("[codexcli] saved sessions:")
+        print("[testcode] saved sessions:")
         for index, session in enumerate(sessions, start=1):
             preview = session.preview or "(no user messages yet)"
             print(

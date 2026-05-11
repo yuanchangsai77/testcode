@@ -65,7 +65,7 @@ def _inspect(action: ToolAction) -> ToolResult:
 def _scratchpad(action: ToolAction) -> ToolResult:
     name = str(action.arguments.get("name", "scratch.txt")).strip() or "scratch.txt"
     content = str(action.arguments.get("content", ""))
-    path = Path(gettempdir()) / "codexcli-scratch" / name
+    path = Path(gettempdir()) / "testcode-scratch" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     output = f"wrote scratch file: {path}"

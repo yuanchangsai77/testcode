@@ -30,7 +30,7 @@ coverage.xml
 
 # Local tooling state
 .python-version
-.codexcli/
+.testcode/
 .env
 .env.*
 !.env.example

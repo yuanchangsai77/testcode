@@ -27,7 +27,7 @@ class StubModelClient:
         summary = session.tool_results[-1].output
         return ModelReply(
             message=(
-                "codexcli architecture scaffold is ready. "
+                "testcode architecture scaffold is ready. "
                 f"Initial workspace inspection: {summary}"
             ),
             done=True,
@@ -82,7 +82,7 @@ class OpenAICompatibleModelClient:
     def _build_messages(self, session: SessionContext) -> list[dict[str, object]]:
         conversation = session.request.metadata.get("conversation", [])
         system_lines = [
-            "You are the model integration layer for codexcli.",
+            "You are the model integration layer for testcode.",
             "You must decide whether to answer directly or request tool calls.",
             "Always respond with strict JSON.",
             "Use exactly this schema:",

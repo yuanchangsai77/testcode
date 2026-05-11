@@ -1,8 +1,8 @@
-from codexcli.app import create_app
-from codexcli.interaction.cli import CLI
-from codexcli.interaction.presenter import ConsolePresenter
-from codexcli.session_store import SessionStore
-from codexcli.types import UserRequest
+from testcode.app import create_app
+from testcode.interaction.cli import CLI
+from testcode.interaction.presenter import ConsolePresenter
+from testcode.session_store import SessionStore
+from testcode.types import UserRequest
 
 
 def test_scaffold_runs_end_to_end(tmp_path):
