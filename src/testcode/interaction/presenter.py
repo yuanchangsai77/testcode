@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from ..types import ExecutionSummary, SessionRecord, StoredSession, UserRequest
 
 
@@ -19,6 +21,15 @@ class ConsolePresenter:
                 status = "ok" if result.success else "blocked"
                 output = self._summarize_tool_output(result.output)
                 print(f"- {result.name}: {status} -> {output}")
+
+    def confirm_tool_action(self, action, reason: str) -> bool:
+        print(f"[testcode] approval required: {action.name}")
+        print(f"[testcode] reason: {reason}")
+        if action.arguments:
+            arguments = json.dumps(action.arguments, ensure_ascii=False, sort_keys=True)
+            print(f"[testcode] arguments: {self._summarize_tool_output(arguments)}")
+        answer = input("Allow this tool call? [y/N] ").strip().lower()
+        return answer in {"y", "yes"}
 
     def _summarize_tool_output(self, output: str) -> str:
         single_line = " ".join(str(output).split())

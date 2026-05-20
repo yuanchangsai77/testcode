@@ -47,6 +47,8 @@ class InMemoryLogger:
                         "name": result.name,
                         "success": result.success,
                         "output": result.output,
+                        "error_code": result.error_code,
+                        "metadata": result.metadata,
                     }
                     for result in summary.tool_results
                 ],

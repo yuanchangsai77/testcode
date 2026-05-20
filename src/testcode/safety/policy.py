@@ -14,7 +14,7 @@ class PolicyDecision:
 class DefaultPolicy:
     """Static placeholder policy for the initial scaffold."""
 
-    blocked_tools = {"shell_exec", "delete_path"}
+    blocked_tools = {"shell_exec", "patch", "apply_change", "delete_path"}
 
     def evaluate(self, action: ToolAction) -> PolicyDecision:
         if action.name in self.blocked_tools:

@@ -73,12 +73,34 @@ Responsibilities:
 - expose callable tools to the orchestration engine
 - execute concrete operations such as shell, file, and search tasks
 - return normalized results to the orchestration loop
+- validate tool arguments against each tool's input schema before execution
+- keep tool paths bounded to the request workspace by default
 
 Core files:
 
 - `src/testcode/tools/base.py`
 - `src/testcode/tools/registry.py`
 - `src/testcode/tools/builtin.py`
+- `src/testcode/tools/shared.py`
+- `src/testcode/tools/builtins/`
+
+Tool structure:
+
+- `base.py` defines the common tool protocol, `SimpleTool`, and `ToolContext`.
+- `registry.py` owns registration, default tool exposure, schema validation, and normalized result logging.
+- `shared.py` contains reusable helpers for JSON-style schemas, workspace path resolution, subprocess execution, output clipping, and result retargeting.
+- `builtin.py` assembles the default registry only.
+- `builtins/<tool>.py` contains one concrete tool per file. Each module exports a `tool()` factory and keeps the tool's `run()` implementation local.
+
+Built-in tools:
+
+- `list_dir`, `read_file`, `file_info`
+- `find_files`, `search_text`
+- `shell_exec`, `run_tests`
+- `git_status`, `git_diff`, `git_show`
+- `patch`
+
+`apply_change` remains available internally as a deprecated tool, but it is not exposed in the default tool list.
 
 ### 3.5 Safety Layer
 
@@ -87,6 +109,7 @@ Responsibilities:
 - validate whether a requested action is allowed
 - require explicit approval for risky operations
 - keep runtime boundaries independent from model judgment
+- surface approval requests through the interaction layer
 
 Core files:
 
@@ -115,10 +138,12 @@ Core files:
    - a final answer
    - one or more tool actions
 5. Each requested tool action is checked by the safety layer.
-6. Allowed actions are executed by the tool layer.
-7. Tool results are logged by the observability layer and added back into session state.
-8. The orchestration loop continues until a final answer is produced.
-9. The interaction layer renders the answer and execution summary.
+6. If an action needs approval, the CLI asks the user before execution.
+7. Allowed or approved actions are executed by the tool layer.
+8. Tool results are logged by the observability layer and added back into session state.
+9. Successful duplicate tool actions in the same run are skipped to avoid repeated side effects.
+10. The orchestration loop continues until a final answer is produced.
+11. The interaction layer renders the answer and execution summary.
 
 ## 5. Repository Scaffold Decision
 

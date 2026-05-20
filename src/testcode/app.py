@@ -59,8 +59,14 @@ def create_app() -> CLI:
     guardrails = Guardrails(policy=policy, logger=logger)
     tools = build_builtin_registry(logger=logger)
     model = create_model_client(logger)
-    engine = ExecutionEngine(model=model, tools=tools, guardrails=guardrails, logger=logger)
     presenter = ConsolePresenter()
+    engine = ExecutionEngine(
+        model=model,
+        tools=tools,
+        guardrails=guardrails,
+        logger=logger,
+        approval_callback=presenter.confirm_tool_action,
+    )
     session_store = SessionStore()
     return CLI(engine=engine, presenter=presenter, logger=logger, session_store=session_store)
 

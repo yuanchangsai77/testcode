@@ -20,7 +20,7 @@ class StubModelClient:
         if not session.tool_results:
             return ModelReply(
                 message="I need workspace context before answering.",
-                actions=[ToolAction(name="inspect", arguments={"path": session.request.cwd})],
+                actions=[ToolAction(name="list_dir", arguments={"path": "."})],
                 done=False,
             )
 
@@ -94,6 +94,9 @@ class OpenAICompatibleModelClient:
             "- Only use tool names from the provided tool list.",
             "- Keep message concise and user-facing.",
             "- Do not repeat the same tool call if the session history already contains the needed result.",
+            "- If a tool result has error_code path_outside_workspace, explain that the path is outside the current workspace and ask the user to switch cwd or provide an in-workspace path.",
+            "- If a tool result has error_code approval_required, explain that the tool needs approval instead of retrying it.",
+            "- Do not retry a failed tool call with the same arguments unless the user gives new information.",
         ]
 
         user_lines = [
@@ -112,6 +115,7 @@ class OpenAICompatibleModelClient:
 
         for tool in session.available_tools:
             user_lines.append(f"- {tool.name}: {tool.description}")
+            user_lines.append(f"  risk: {tool.risk_level}")
             for name, description in tool.arguments.items():
                 user_lines.append(f"  argument {name}: {description}")
 

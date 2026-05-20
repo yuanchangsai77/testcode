@@ -33,7 +33,7 @@ src/testcode/
 python -m testcode "summarize this repository"
 ```
 
-The current implementation is a scaffold. It wires the architecture together and can run a minimal request flow with a stub model and toolchain.
+The current implementation wires the architecture together and supports a structured local tool loop for file inspection, search, shell execution, patching, test commands, and read-only git inspection.
 
 Long conversation mode:
 
@@ -109,10 +109,42 @@ source /opt/repos/testcode/contrib/testcode-completion.bash
 
 ## Core Tools
 
-The built-in tool set is intentionally small:
+The built-in tool set exposes structured schemas, risk levels, stable error
+codes, and workspace-bounded path handling:
 
-- `inspect`: inspect a directory or read a file
-- `scratchpad`: write temporary text to a scratch file
-- `apply_change`: write text content to a target file
+- `list_dir`, `read_file`, `file_info`: read-only workspace file inspection
+- `find_files`, `search_text`: bounded file and text search
+- `shell_exec`: execute a command in the workspace
+- `patch`: apply a validated unified diff in the workspace
+- `run_tests`: execute a test command with captured output and duration
+- `git_status`, `git_diff`, `git_show`: read-only git inspection
+
+`apply_change` is deprecated and is not exposed to the model by default.
+
+Concrete tool implementations live under `src/testcode/tools/builtins/`.
+Each built-in tool is described in its own module and exported through a
+`tool()` factory. Shared helpers for schema creation, workspace path resolution,
+process execution, and output clipping live in `src/testcode/tools/shared.py`.
+`src/testcode/tools/builtin.py` only assembles the default registry.
+
+Risky tools such as `shell_exec` and `patch` require interactive approval in
+the CLI before execution. If the same successful tool call is requested again
+within one run, the orchestration layer skips the duplicate instead of asking
+for approval and executing it again.
 
 The model ends a run by returning `done: true`. There is no separate `finish` tool.
+
+## Development
+
+Create a project-local virtual environment and install test dependencies:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install pytest
+```
+
+Run the test suite:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest -q
+```

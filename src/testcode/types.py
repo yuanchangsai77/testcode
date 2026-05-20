@@ -16,6 +16,8 @@ class ToolDefinition:
     name: str
     description: str
     arguments: dict[str, str] = field(default_factory=dict)
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = "read"
 
 
 @dataclass(slots=True)
@@ -36,6 +38,8 @@ class ToolResult:
     name: str
     success: bool
     output: str
+    error_code: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
