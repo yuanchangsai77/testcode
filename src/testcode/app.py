@@ -67,9 +67,9 @@ def _float_env(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-def create_app() -> CLI:
+def create_app(mode: str | None = None) -> CLI:
     logger = InMemoryLogger()
-    policy = DefaultPolicy()
+    policy = DefaultPolicy(mode=mode or os.getenv("TESTCODE_MODE", "confirm").strip() or "confirm")
     guardrails = Guardrails(policy=policy, logger=logger)
     tools = build_builtin_registry(logger=logger)
     model = create_model_client(logger)
@@ -109,9 +109,15 @@ def main() -> None:
             action="store_true",
             help="Resume the most recently updated saved conversation.",
         )
+        parser.add_argument(
+            "--mode",
+            choices=["readonly", "confirm", "auto"],
+            default=os.getenv("TESTCODE_MODE", "confirm").strip() or "confirm",
+            help="Safety mode for tool execution.",
+        )
         args = parser.parse_args()
 
-        app = create_app()
+        app = create_app(mode=args.mode)
         initial_prompt = " ".join(args.prompt).strip() or None
 
         resume_requested = args.resume is not None

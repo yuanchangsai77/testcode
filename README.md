@@ -71,6 +71,14 @@ Single turn only:
 PYTHONPATH=src python3 -m testcode --once "summarize this repository"
 ```
 
+Choose a safety mode:
+
+```bash
+PYTHONPATH=src python3 -m testcode --mode readonly "summarize this repository"
+PYTHONPATH=src python3 -m testcode --mode confirm "edit a file after approval"
+PYTHONPATH=src python3 -m testcode --mode auto "apply low-risk file edits automatically"
+```
+
 ## Connect To The Local LLM Proxy
 
 If you want `testcode` to use the OpenAI-compatible proxy running in `/opt/repos/test`, start that project first and then configure `.env`:
@@ -79,6 +87,7 @@ If you want `testcode` to use the OpenAI-compatible proxy running in `/opt/repos
 TESTCODE_MODEL_BASE_URL=http://127.0.0.1:3000
 TESTCODE_MODEL_NAME=gpt-5.4
 TESTCODE_MODEL_TIMEOUT=60
+TESTCODE_MODE=confirm
 ```
 
 Behavior:
@@ -87,6 +96,7 @@ Behavior:
 - If `TESTCODE_MODEL_BASE_URL` is still not set, `testcode` keeps using `StubModelClient`
 - If `TESTCODE_MODEL_BASE_URL` is set, `testcode` sends requests to `POST /v1/chat/completions`
 - `TESTCODE_MODEL_TIMEOUT` controls the model request timeout in seconds and defaults to 60
+- `TESTCODE_MODE` controls tool safety and defaults to `confirm`
 - The proxy in `/opt/repos/test` remains responsible for the real upstream base URL and API key
 - The real-model path now supports tool-call loops: the model can request built-in tools, receive tool results, and continue until it produces a final answer
 - Each run automatically writes observability logs under `.testcode/runs/<timestamp>/`, including `events.jsonl` and a layered `details.log`
@@ -130,9 +140,13 @@ process execution, and output clipping live in `src/testcode/tools/shared.py`.
 `src/testcode/tools/builtin.py` only assembles the default registry.
 
 Risky tools such as `shell_exec` and `patch` require interactive approval in
-the CLI before execution. If the same successful tool call is requested again
-within one run, the orchestration layer skips the duplicate instead of asking
-for approval and executing it again.
+the default `confirm` mode before execution. In `readonly` mode only read tools
+can run. In `auto` mode read and write tools can run without confirmation while
+execute, test, network, and destructive actions still require approval. Dangerous
+shell commands such as `rm -rf`, `git reset --hard`, and `git clean -fd` are
+classified as destructive. If the same successful tool call is requested again
+within one run, the orchestration layer skips the duplicate instead of asking for
+approval and executing it again.
 
 The model ends a run by returning `done: true`. There is no separate `finish` tool.
 

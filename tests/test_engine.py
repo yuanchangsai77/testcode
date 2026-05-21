@@ -95,6 +95,75 @@ def test_engine_executes_approved_patch_tool(tmp_path):
     assert (tmp_path / "hello_world.py").read_text(encoding="utf-8") == 'print("hello world")\n'
 
 
+def test_engine_blocks_patch_in_readonly_mode_without_prompting(tmp_path):
+    class PatchModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            return ModelReply(
+                message="try patch",
+                actions=[
+                    ToolAction(
+                        name="patch",
+                        arguments={
+                            "diff": "--- /dev/null\n+++ b/blocked.py\n@@ -0,0 +1 @@\n+print('blocked')\n"
+                        },
+                    )
+                ],
+                done=False,
+            )
+
+    approvals = []
+    logger = InMemoryLogger()
+    model = PatchModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="readonly"), logger=logger),
+        logger=logger,
+        approval_callback=lambda action, _reason: approvals.append(action.name) or True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="write file", cwd=str(tmp_path)))
+
+    assert model.calls == 2
+    assert approvals == []
+    assert summary.tool_results[-1].error_code == "blocked_by_policy"
+    assert not (tmp_path / "blocked.py").exists()
+
+
+def test_engine_allows_patch_in_auto_mode_without_prompting(tmp_path):
+    class PatchModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="created auto.py",
+                actions=[
+                    ToolAction(
+                        name="patch",
+                        arguments={"diff": "--- /dev/null\n+++ b/auto.py\n@@ -0,0 +1 @@\n+print('auto')\n"},
+                    )
+                ],
+                done=True,
+            )
+
+    approvals = []
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=PatchModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+        approval_callback=lambda action, _reason: approvals.append(action.name) or True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="write file", cwd=str(tmp_path)))
+
+    assert approvals == []
+    assert summary.tool_results[0].success is True
+    assert (tmp_path / "auto.py").read_text(encoding="utf-8") == "print('auto')\n"
+
+
 def test_engine_skips_duplicate_successful_tool_action(tmp_path):
     class DuplicateShellModel:
         calls = 0

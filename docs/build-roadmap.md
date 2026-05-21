@@ -152,6 +152,24 @@
 
 目标：让 runtime 独立于模型判断，能够阻止危险操作并要求用户确认。
 
+当前状态：
+
+- 已定义 `readonly`、`confirm`、`auto` 三种运行模式。
+- CLI 已支持 `--mode` 参数，环境变量支持 `TESTCODE_MODE`。
+- 策略判断已基于工具 `risk_level`，不再只靠硬编码工具名。
+- `confirm` 模式下 write、execute、test、network、destructive 风险需要确认。
+- `readonly` 模式下只允许 read 工具。
+- `auto` 模式下允许 read/write，execute/test/network/destructive 仍需确认。
+- 已识别 `rm -rf`、`git reset --hard`、`git clean -fd` 和写入敏感系统路径的 shell 重定向为 destructive。
+- blocked result 会写回 session，且不会执行被拒绝的 handler。
+
+仍待补齐：
+
+- 支持本次会话记住同类 action。
+- 非交互模式默认拒绝需要确认的操作仍需显式测试。
+- symlink 跳出 workspace 的写入保护仍需补测试。
+- 敏感文件读取和日志脱敏尚未实现。
+
 小 TODO：
 
 - 定义运行模式。

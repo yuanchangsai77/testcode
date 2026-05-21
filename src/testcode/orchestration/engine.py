@@ -9,7 +9,7 @@ from .session import SessionContext
 class ExecutionEngine:
     """Coordinates the model-think and tool-execute loop."""
 
-    non_retryable_error_codes = {"approval_required", "path_outside_workspace"}
+    non_retryable_error_codes = {"approval_required", "blocked_by_policy", "path_outside_workspace"}
 
     def __init__(self, model, tools, guardrails, logger, approval_callback=None) -> None:
         self.model = model
@@ -49,8 +49,9 @@ class ExecutionEngine:
                     turn_results.append(result)
                     continue
 
-                decision = self.guardrails.check(action)
-                if not decision.allowed:
+                definition = self.tools.definition_for(action.name)
+                decision = self.guardrails.check(action, definition)
+                if decision.requires_confirmation:
                     if self._approved(action, decision.reason):
                         result = self.tools.execute(action, cwd=request.cwd)
                         self._attach_action_metadata(result, action)
@@ -65,6 +66,18 @@ class ExecutionEngine:
                         success=False,
                         output=decision.reason,
                         error_code="approval_required",
+                    )
+                    self._attach_action_metadata(result, action)
+                    session.add_tool_result(result)
+                    turn_results.append(result)
+                    continue
+
+                if not decision.allowed:
+                    result = ToolResult(
+                        name=action.name,
+                        success=False,
+                        output=decision.reason,
+                        error_code="blocked_by_policy",
                     )
                     self._attach_action_metadata(result, action)
                     session.add_tool_result(result)

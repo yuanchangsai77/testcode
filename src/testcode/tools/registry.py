@@ -15,6 +15,12 @@ class ToolRegistry:
     def definitions(self) -> list[ToolDefinition]:
         return [tool.definition() for tool in self._tools.values() if getattr(tool, "exposed", True)]
 
+    def definition_for(self, name: str) -> ToolDefinition | None:
+        tool = self._tools.get(name)
+        if tool is None:
+            return None
+        return tool.definition()
+
     def execute(self, action: ToolAction, *, cwd: str = ".") -> ToolResult:
         tool = self._tools.get(action.name)
         if tool is None:

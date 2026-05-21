@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..types import ToolAction
+from ..types import ToolAction, ToolDefinition
 
 
 class Guardrails:
@@ -8,10 +8,17 @@ class Guardrails:
         self.policy = policy
         self.logger = logger
 
-    def check(self, action: ToolAction):
-        decision = self.policy.evaluate(action)
+    def check(self, action: ToolAction, definition: ToolDefinition | None = None):
+        decision = self.policy.evaluate(action, definition)
         self.logger.record(
             "safety.check",
-            {"tool": action.name, "allowed": decision.allowed, "reason": decision.reason},
+            {
+                "tool": action.name,
+                "risk_level": decision.risk_level,
+                "mode": getattr(self.policy, "mode", None),
+                "allowed": decision.allowed,
+                "requires_confirmation": decision.requires_confirmation,
+                "reason": decision.reason,
+            },
         )
         return decision
