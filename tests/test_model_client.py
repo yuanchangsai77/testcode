@@ -225,12 +225,53 @@ def test_parse_reply_converts_xmlish_content_tool_call():
     reply = client._parse_reply(content, allowed_tool_names={"shell_exec"})
 
     assert reply.done is False
-    assert reply.message == "Model requested tool calls."
+    assert reply.message == content
+    assert reply.metadata == {"thinking": "Need to search.", "cleaned_protocol_tags": True}
     assert len(reply.actions) == 1
     assert reply.actions[0].name == "shell_exec"
     assert reply.actions[0].arguments == {
         "command": 'grep -r "sqlite" src tests --include="*.py"'
     }
+
+
+def test_parse_reply_cleans_thinking_tags_from_final_message():
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    content = "<think>Need to inspect files first.</think>\n项目可以先保留 JSON。"
+
+    reply = client._parse_reply(content)
+
+    assert reply.done is True
+    assert reply.actions == []
+    assert reply.message == content
+    assert reply.metadata == {
+        "thinking": "Need to inspect files first.",
+        "cleaned_protocol_tags": True,
+    }
+
+
+def test_parse_response_cleans_thinking_from_native_tool_call_message():
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "content": "<think>Need README.</think>Reading file.",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"path": "README.md"}'},
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+    reply = client._parse_response(data, allowed_tool_names={"read_file"})
+
+    assert reply.message == "<think>Need README.</think>Reading file."
+    assert reply.metadata == {"thinking": "Need README.", "cleaned_protocol_tags": True}
+    assert reply.actions[0].name == "read_file"
 
 
 def test_parse_reply_treats_invalid_embedded_json_as_final_message():

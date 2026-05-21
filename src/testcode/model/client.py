@@ -18,6 +18,13 @@ class ModelClientConfig:
     timeout: float = 60.0
 
 
+@dataclass(frozen=True, slots=True)
+class CleanedContent:
+    message: str
+    thinking: str = ""
+    had_protocol_tags: bool = False
+
+
 class StubModelClient:
     """
     Minimal placeholder model client.
@@ -98,6 +105,7 @@ class OpenAICompatibleModelClient:
                 {
                     "message": reply.message,
                     "done": reply.done,
+                    "metadata": reply.metadata,
                     "actions": [
                         {"name": action.name, "arguments": action.arguments}
                         for action in reply.actions
@@ -270,11 +278,13 @@ class OpenAICompatibleModelClient:
             if not isinstance(raw_tool_calls, list):
                 raise RuntimeError(f"Model tool_calls must be a list: {message!r}")
             content = self._normalize_nullable_content(message.get("content"))
+            cleaned = self._clean_content(content)
             actions = self._parse_tool_calls(raw_tool_calls, allowed_tool_names=allowed_tool_names)
             return ModelReply(
                 message=content or "Model requested tool calls.",
                 actions=actions,
                 done=False,
+                metadata=self._cleaned_metadata(cleaned),
             )
 
         if "content" not in message:
@@ -337,15 +347,22 @@ class OpenAICompatibleModelClient:
         except json.JSONDecodeError:
             content_actions = self._parse_content_tool_calls(content, allowed_tool_names=allowed_tool_names)
             if content_actions:
+                cleaned = self._clean_content(content)
                 return ModelReply(
-                    message=self._content_message_without_tool_tags(content) or "Model requested tool calls.",
+                    message=content,
                     actions=content_actions,
                     done=False,
+                    metadata=self._cleaned_metadata(cleaned),
                 )
 
             candidate = self._extract_first_json_object(content)
             if candidate is None:
-                return ModelReply(message=content, done=True)
+                cleaned = self._clean_content(content)
+                return ModelReply(
+                    message=content,
+                    done=True,
+                    metadata=self._cleaned_metadata(cleaned),
+                )
             try:
                 payload = json.loads(candidate)
             except json.JSONDecodeError:
@@ -354,7 +371,12 @@ class OpenAICompatibleModelClient:
                         "model.invalid_reply_json",
                         {"content": content, "candidate": candidate},
                     )
-                return ModelReply(message=content, done=True)
+                cleaned = self._clean_content(content)
+                return ModelReply(
+                    message=content,
+                    done=True,
+                    metadata=self._cleaned_metadata(cleaned),
+                )
 
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
@@ -383,7 +405,13 @@ class OpenAICompatibleModelClient:
         if actions and done:
             done = False
 
-        return ModelReply(message=message, actions=actions, done=done)
+        cleaned = self._clean_content(message)
+        return ModelReply(
+            message=message,
+            actions=actions,
+            done=done,
+            metadata=self._cleaned_metadata(cleaned),
+        )
 
     def _validate_tool_name(self, name: str, allowed_tool_names: set[str] | None) -> None:
         if allowed_tool_names is not None and name not in allowed_tool_names:
@@ -412,12 +440,42 @@ class OpenAICompatibleModelClient:
             actions.append(ToolAction(name=name, arguments=arguments))
         return actions
 
-    def _content_message_without_tool_tags(self, content: str) -> str:
-        without_think = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-        without_parameters = re.sub(r"<parameter\s+name=\"[^\"]+\"\s*>.*?</parameter>", "", without_think, flags=re.DOTALL)
+    def _clean_content(self, content: str) -> CleanedContent:
+        thinking_parts = [
+            unescape(match.group(1)).strip()
+            for match in re.finditer(r"<think\b[^>]*>(.*?)</think>", content, flags=re.DOTALL | re.IGNORECASE)
+            if match.group(1).strip()
+        ]
+        without_think = re.sub(r"<think\b[^>]*>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
+        without_parameters = re.sub(
+            r"<parameter\s+name=\"[^\"]+\"\s*>.*?</parameter>",
+            "",
+            without_think,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
         without_tags = re.sub(r"</?[\w:.-]+[^>]*>", "", without_parameters)
         without_tool_attrs = re.sub(r'-?\s*tool="[^"]+"\s*>?', "", without_tags)
-        return " ".join(without_tool_attrs.split())
+        message = " ".join(unescape(without_tool_attrs).split())
+        return CleanedContent(
+            message=message,
+            thinking="\n".join(thinking_parts),
+            had_protocol_tags=self._has_protocol_tags(content),
+        )
+
+    def _has_protocol_tags(self, content: str) -> bool:
+        return re.search(
+            r"</?(?:think|invoke|tool_call|[\w.-]+:tool_call|parameter)\b|tool=\"[^\"]+\"",
+            content,
+            flags=re.IGNORECASE,
+        ) is not None
+
+    def _cleaned_metadata(self, cleaned: CleanedContent) -> dict[str, object]:
+        metadata: dict[str, object] = {}
+        if cleaned.thinking:
+            metadata["thinking"] = cleaned.thinking
+        if cleaned.had_protocol_tags:
+            metadata["cleaned_protocol_tags"] = True
+        return metadata
 
     def _extract_first_json_object(self, content: str) -> str | None:
         start = content.find("{")

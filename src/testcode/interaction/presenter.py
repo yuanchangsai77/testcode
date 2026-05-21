@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from html import unescape
 
 from ..types import ExecutionSummary, SessionRecord, StoredSession, UserRequest
 
@@ -13,8 +15,12 @@ class ConsolePresenter:
         print(f"[testcode] cwd: {request.cwd}")
 
     def show_summary(self, summary: ExecutionSummary) -> None:
+        thinking = self._extract_thinking(summary.final_message)
+        if thinking:
+            print("[testcode] thinking:")
+            print(thinking)
         print("[testcode] result:")
-        print(summary.final_message)
+        print(self._display_text(summary.final_message))
         if summary.tool_results:
             print("[testcode] tool results:")
             for result in summary.tool_results:
@@ -36,6 +42,26 @@ class ConsolePresenter:
         if len(single_line) <= self.max_tool_output:
             return single_line
         return f"{single_line[: self.max_tool_output - 3]}..."
+
+    def _display_text(self, value: str) -> str:
+        without_think = re.sub(r"<think\b[^>]*>.*?</think>", "", str(value), flags=re.DOTALL | re.IGNORECASE)
+        without_parameters = re.sub(
+            r"<parameter\s+name=\"[^\"]+\"\s*>.*?</parameter>",
+            "",
+            without_think,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        without_tags = re.sub(r"</?[\w:.-]+[^>]*>", "", without_parameters)
+        without_tool_attrs = re.sub(r'-?\s*tool="[^"]+"\s*>?', "", without_tags)
+        return " ".join(unescape(without_tool_attrs).split())
+
+    def _extract_thinking(self, value: str) -> str:
+        parts = [
+            unescape(match.group(1)).strip()
+            for match in re.finditer(r"<think\b[^>]*>(.*?)</think>", str(value), flags=re.DOTALL | re.IGNORECASE)
+            if match.group(1).strip()
+        ]
+        return "\n".join(parts)
 
     def show_session_state(self, session: StoredSession, resumed: bool) -> None:
         action = "resumed" if resumed else "started"

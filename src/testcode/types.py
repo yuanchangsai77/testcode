@@ -31,6 +31,7 @@ class ModelReply:
     message: str
     actions: list[ToolAction] = field(default_factory=list)
     done: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
