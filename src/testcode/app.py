@@ -50,7 +50,21 @@ def create_model_client(logger) -> StubModelClient | OpenAICompatibleModelClient
         return StubModelClient()
 
     model = os.getenv("TESTCODE_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4"
-    return OpenAICompatibleModelClient(base_url=base_url, model=model, logger=logger)
+    timeout = _float_env("TESTCODE_MODEL_TIMEOUT", 60.0)
+    return OpenAICompatibleModelClient(base_url=base_url, model=model, timeout=timeout, logger=logger)
+
+
+def _float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+
+    return value if value > 0 else default
 
 
 def create_app() -> CLI:

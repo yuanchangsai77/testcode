@@ -147,6 +147,13 @@ class OpenAICompatibleModelClient:
                     {"url": url, "status": error.code, "body": body},
                 )
             raise RuntimeError(f"Model request failed with HTTP {error.code}: {body}") from error
+        except TimeoutError as error:
+            if self.logger is not None:
+                self.logger.record(
+                    "model.timeout",
+                    {"url": url, "timeout": self.timeout},
+                )
+            raise RuntimeError(f"Model request timed out after {self.timeout:g} seconds") from error
         except urllib.error.URLError as error:
             if self.logger is not None:
                 self.logger.record(

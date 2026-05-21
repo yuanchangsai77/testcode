@@ -78,6 +78,7 @@ If you want `testcode` to use the OpenAI-compatible proxy running in `/opt/repos
 ```env
 TESTCODE_MODEL_BASE_URL=http://127.0.0.1:3000
 TESTCODE_MODEL_NAME=gpt-5.4
+TESTCODE_MODEL_TIMEOUT=60
 ```
 
 Behavior:
@@ -85,6 +86,7 @@ Behavior:
 - `testcode` automatically loads `.env` from the repository root
 - If `TESTCODE_MODEL_BASE_URL` is still not set, `testcode` keeps using `StubModelClient`
 - If `TESTCODE_MODEL_BASE_URL` is set, `testcode` sends requests to `POST /v1/chat/completions`
+- `TESTCODE_MODEL_TIMEOUT` controls the model request timeout in seconds and defaults to 60
 - The proxy in `/opt/repos/test` remains responsible for the real upstream base URL and API key
 - The real-model path now supports tool-call loops: the model can request built-in tools, receive tool results, and continue until it produces a final answer
 - Each run automatically writes observability logs under `.testcode/runs/<timestamp>/`, including `events.jsonl` and a layered `details.log`
