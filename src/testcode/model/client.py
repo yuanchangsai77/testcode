@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from html import unescape
 
 from ..orchestration.session import SessionContext
-from ..types import ModelReply, ToolAction
+from ..types import ModelReply, ToolAction, ToolDefinition
+
+
+@dataclass(frozen=True, slots=True)
+class ModelClientConfig:
+    base_url: str
+    model: str = "gpt-5.4"
+    timeout: float = 60.0
 
 
 class StubModelClient:
@@ -37,7 +47,21 @@ class StubModelClient:
 class OpenAICompatibleModelClient:
     """Minimal OpenAI-compatible chat client backed by the local proxy."""
 
-    def __init__(self, base_url: str, model: str = "gpt-5.4", timeout: float = 60.0, logger=None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str = "gpt-5.4",
+        timeout: float = 60.0,
+        logger=None,
+        config: ModelClientConfig | None = None,
+    ) -> None:
+        if config is not None:
+            base_url = config.base_url
+            model = config.model
+            timeout = config.timeout
+        if base_url is None:
+            raise ValueError("base_url is required")
+
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -50,6 +74,9 @@ class OpenAICompatibleModelClient:
             "messages": messages,
             "stream": False,
         }
+        tools = self._build_tools(session.available_tools)
+        if tools:
+            payload["tools"] = tools
         url = f"{self.base_url}/v1/chat/completions"
         if self.logger is not None:
             self.logger.record(
@@ -58,13 +85,13 @@ class OpenAICompatibleModelClient:
                     "url": url,
                     "model": self.model,
                     "messages": messages,
+                    "tools": [tool["function"]["name"] for tool in tools],
                 },
             )
         data = self._post_json(url, payload)
         if self.logger is not None:
             self.logger.record("model.response", data)
-        message = data["choices"][0]["message"]["content"]
-        reply = self._parse_reply(self._normalize_content(message))
+        reply = self._parse_response(data, allowed_tool_names={tool.name for tool in session.available_tools})
         if self.logger is not None:
             self.logger.record(
                 "model.parsed_reply",
@@ -90,6 +117,9 @@ class OpenAICompatibleModelClient:
             "Rules:",
             "- If you need more local context, set done to false and include one or more tool actions.",
             "- If you can answer the user, set done to true.",
+            "- If native tool calls are available, use the API tool_calls field.",
+            "- If you answer in content, use only the strict JSON schema above for tool actions.",
+            "- Never emit XML, HTML, <invoke>, <tool_call>, or <parameter> tags.",
             "- Do not use markdown fences.",
             "- Only use tool names from the provided tool list.",
             "- Keep message concise and user-facing.",
@@ -131,6 +161,33 @@ class OpenAICompatibleModelClient:
             for name in sorted(tool.arguments):
                 lines.append(f"  argument {name}: {tool.arguments[name]}")
         return lines
+
+    def _build_tools(self, definitions: list[ToolDefinition]) -> list[dict[str, object]]:
+        tools: list[dict[str, object]] = []
+        for definition in sorted(definitions, key=lambda item: item.name):
+            parameters = definition.input_schema or self._schema_from_arguments(definition)
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": definition.name,
+                        "description": definition.description,
+                        "parameters": parameters,
+                    },
+                }
+            )
+        return tools
+
+    def _schema_from_arguments(self, definition: ToolDefinition) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                name: {"type": "string", "description": description}
+                for name, description in sorted(definition.arguments.items())
+            },
+            "required": [],
+            "additionalProperties": False,
+        }
 
     def _post_json(self, url: str, payload: dict[str, object]) -> dict[str, object]:
         request = urllib.request.Request(
@@ -195,10 +252,97 @@ class OpenAICompatibleModelClient:
 
         raise RuntimeError(f"Unsupported model content format: {content!r}")
 
-    def _parse_reply(self, content: str) -> ModelReply:
+    def _parse_response(self, data: dict[str, object], *, allowed_tool_names: set[str] | None = None) -> ModelReply:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(f"Model response missing choices: {data}")
+
+        first = choices[0]
+        if not isinstance(first, dict):
+            raise RuntimeError(f"Model choice must be an object: {first!r}")
+
+        message = first.get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError(f"Model response missing message: {data}")
+
+        raw_tool_calls = message.get("tool_calls")
+        if raw_tool_calls:
+            if not isinstance(raw_tool_calls, list):
+                raise RuntimeError(f"Model tool_calls must be a list: {message!r}")
+            content = self._normalize_nullable_content(message.get("content"))
+            actions = self._parse_tool_calls(raw_tool_calls, allowed_tool_names=allowed_tool_names)
+            return ModelReply(
+                message=content or "Model requested tool calls.",
+                actions=actions,
+                done=False,
+            )
+
+        if "content" not in message:
+            raise RuntimeError(f"Model response missing content: {message!r}")
+
+        content = self._normalize_content(message.get("content"))
+        if not content.strip():
+            raise RuntimeError(f"Model response content was empty: {message!r}")
+        return self._parse_reply(content, allowed_tool_names=allowed_tool_names)
+
+    def _normalize_nullable_content(self, content: object) -> str:
+        if content is None:
+            return ""
+        return self._normalize_content(content)
+
+    def _parse_tool_calls(
+        self,
+        raw_tool_calls: list[object],
+        *,
+        allowed_tool_names: set[str] | None = None,
+    ) -> list[ToolAction]:
+        actions: list[ToolAction] = []
+        for item in raw_tool_calls:
+            if not isinstance(item, dict):
+                raise RuntimeError(f"Model tool_call must be an object: {item!r}")
+
+            if item.get("type", "function") != "function":
+                raise RuntimeError(f"Unsupported tool_call type: {item!r}")
+
+            function = item.get("function")
+            if not isinstance(function, dict):
+                raise RuntimeError(f"Model tool_call missing function: {item!r}")
+
+            name = function.get("name")
+            if not isinstance(name, str) or not name:
+                raise RuntimeError(f"Model tool_call missing function name: {item!r}")
+            self._validate_tool_name(name, allowed_tool_names)
+
+            raw_arguments = function.get("arguments", {})
+            if isinstance(raw_arguments, str):
+                try:
+                    arguments = json.loads(raw_arguments or "{}")
+                except json.JSONDecodeError as error:
+                    raise RuntimeError(f"Model tool_call arguments were not valid JSON: {item!r}") from error
+            elif isinstance(raw_arguments, dict):
+                arguments = raw_arguments
+            else:
+                raise RuntimeError(f"Model tool_call arguments must be an object: {item!r}")
+
+            if not isinstance(arguments, dict):
+                raise RuntimeError(f"Model tool_call arguments must decode to an object: {item!r}")
+
+            actions.append(ToolAction(name=name, arguments=arguments))
+
+        return actions
+
+    def _parse_reply(self, content: str, *, allowed_tool_names: set[str] | None = None) -> ModelReply:
         try:
             payload = json.loads(content)
         except json.JSONDecodeError:
+            content_actions = self._parse_content_tool_calls(content, allowed_tool_names=allowed_tool_names)
+            if content_actions:
+                return ModelReply(
+                    message=self._content_message_without_tool_tags(content) or "Model requested tool calls.",
+                    actions=content_actions,
+                    done=False,
+                )
+
             candidate = self._extract_first_json_object(content)
             if candidate is None:
                 return ModelReply(message=content, done=True)
@@ -230,6 +374,7 @@ class OpenAICompatibleModelClient:
             arguments = item.get("arguments", {})
             if not isinstance(name, str) or not name:
                 raise RuntimeError(f"Model action missing tool name: {item!r}")
+            self._validate_tool_name(name, allowed_tool_names)
             if not isinstance(arguments, dict):
                 raise RuntimeError(f"Model action arguments must be an object: {item!r}")
 
@@ -239,6 +384,40 @@ class OpenAICompatibleModelClient:
             done = False
 
         return ModelReply(message=message, actions=actions, done=done)
+
+    def _validate_tool_name(self, name: str, allowed_tool_names: set[str] | None) -> None:
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            raise RuntimeError(f"Model requested unknown tool: {name}")
+
+    def _parse_content_tool_calls(
+        self,
+        content: str,
+        *,
+        allowed_tool_names: set[str] | None = None,
+    ) -> list[ToolAction]:
+        tool_matches = list(re.finditer(r'(?:<[\w:.-]+[^>]*\btool="([^"]+)"[^>]*>|tool="([^"]+)")', content))
+        actions: list[ToolAction] = []
+        for index, match in enumerate(tool_matches):
+            name = match.group(1) or match.group(2)
+            self._validate_tool_name(name, allowed_tool_names)
+            end = tool_matches[index + 1].start() if index + 1 < len(tool_matches) else len(content)
+            block = content[match.end() : end]
+            arguments = {}
+            for parameter in re.finditer(
+                r'<parameter\s+name="([^"]+)"\s*>(.*?)</parameter>',
+                block,
+                flags=re.DOTALL,
+            ):
+                arguments[parameter.group(1)] = unescape(parameter.group(2)).strip()
+            actions.append(ToolAction(name=name, arguments=arguments))
+        return actions
+
+    def _content_message_without_tool_tags(self, content: str) -> str:
+        without_think = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+        without_parameters = re.sub(r"<parameter\s+name=\"[^\"]+\"\s*>.*?</parameter>", "", without_think, flags=re.DOTALL)
+        without_tags = re.sub(r"</?[\w:.-]+[^>]*>", "", without_parameters)
+        without_tool_attrs = re.sub(r'-?\s*tool="[^"]+"\s*>?', "", without_tags)
+        return " ".join(without_tool_attrs.split())
 
     def _extract_first_json_object(self, content: str) -> str | None:
         start = content.find("{")

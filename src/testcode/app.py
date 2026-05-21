@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .interaction.cli import CLI
 from .interaction.presenter import ConsolePresenter
-from .model.client import OpenAICompatibleModelClient, StubModelClient
+from .model.client import ModelClientConfig, OpenAICompatibleModelClient, StubModelClient
 from .observability.logger import InMemoryLogger
 from .orchestration.engine import ExecutionEngine
 from .safety.guardrails import Guardrails
@@ -51,7 +51,8 @@ def create_model_client(logger) -> StubModelClient | OpenAICompatibleModelClient
 
     model = os.getenv("TESTCODE_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4"
     timeout = _float_env("TESTCODE_MODEL_TIMEOUT", 60.0)
-    return OpenAICompatibleModelClient(base_url=base_url, model=model, timeout=timeout, logger=logger)
+    config = ModelClientConfig(base_url=base_url, model=model, timeout=timeout)
+    return OpenAICompatibleModelClient(config=config, logger=logger)
 
 
 def _float_env(name: str, default: float) -> float:
