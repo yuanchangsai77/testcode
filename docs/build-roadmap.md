@@ -13,6 +13,12 @@
 
 目标：让模型调用从“自定义 JSON 文本约定”升级为稳定、可恢复、可观测的 agent protocol。
 
+当前状态：
+
+- 模型请求会把完整工具描述放在稳定 system prompt 前缀中，动态的 cwd、当前请求、conversation history 和 session history 放在后续 user message 中。
+- 多轮对话每次请求只包含一份完整工具描述，不会把历史轮次的工具描述累积进 conversation。
+- 工具描述按工具名和参数名稳定排序，便于 provider 对重复前缀做 prompt/KV cache。
+
 小 TODO：
 
 - 拆分 provider 接口。

@@ -97,12 +97,13 @@ class OpenAICompatibleModelClient:
             "- If a tool result has error_code path_outside_workspace, explain that the path is outside the current workspace and ask the user to switch cwd or provide an in-workspace path.",
             "- If a tool result has error_code approval_required, explain that the tool needs approval instead of retrying it.",
             "- Do not retry a failed tool call with the same arguments unless the user gives new information.",
+            "Available tools:",
         ]
+        system_lines.extend(self._format_tool_definitions(session))
 
         user_lines = [
             f"Current working directory: {session.request.cwd}",
             f"User request: {session.request.prompt}",
-            "Available tools:",
         ]
 
         if conversation:
@@ -113,12 +114,6 @@ class OpenAICompatibleModelClient:
                     content = str(item.get("content", ""))
                     user_lines.append(f"- {role}: {content}")
 
-        for tool in session.available_tools:
-            user_lines.append(f"- {tool.name}: {tool.description}")
-            user_lines.append(f"  risk: {tool.risk_level}")
-            for name, description in tool.arguments.items():
-                user_lines.append(f"  argument {name}: {description}")
-
         if session.history:
             user_lines.append("Session history:")
             user_lines.extend(f"- {item}" for item in session.history)
@@ -127,6 +122,15 @@ class OpenAICompatibleModelClient:
             {"role": "system", "content": "\n".join(system_lines)},
             {"role": "user", "content": "\n".join(user_lines)},
         ]
+
+    def _format_tool_definitions(self, session: SessionContext) -> list[str]:
+        lines: list[str] = []
+        for tool in sorted(session.available_tools, key=lambda item: item.name):
+            lines.append(f"- {tool.name}: {tool.description}")
+            lines.append(f"  risk: {tool.risk_level}")
+            for name in sorted(tool.arguments):
+                lines.append(f"  argument {name}: {tool.arguments[name]}")
+        return lines
 
     def _post_json(self, url: str, payload: dict[str, object]) -> dict[str, object]:
         request = urllib.request.Request(
@@ -198,7 +202,15 @@ class OpenAICompatibleModelClient:
             candidate = self._extract_first_json_object(content)
             if candidate is None:
                 return ModelReply(message=content, done=True)
-            payload = json.loads(candidate)
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                if self.logger is not None:
+                    self.logger.record(
+                        "model.invalid_reply_json",
+                        {"content": content, "candidate": candidate},
+                    )
+                return ModelReply(message=content, done=True)
 
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
