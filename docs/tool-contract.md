@@ -29,6 +29,49 @@
 
 工具参数和 schema 会进入模型上下文。参数说明应短而准确，不要把长文档塞进 `description`、`arguments` 或 `input_schema`。
 
+## 实际案例：`read_file`
+
+`read_file` 是当前内置工具之一，定义在 `src/testcode/tools/builtins/read_file.py`。它的契约可以作为新增读取类工具的参考。
+
+工具定义：
+
+- `name` 是 `read_file`，进入模型上下文，模型通过这个名字发起调用。
+- `description` 是 “Read a UTF-8 text file from the workspace.”，只用于告诉模型何时使用该工具。
+- `arguments` 描述 `path` 和 `max_bytes`，给模型理解参数含义。
+- `input_schema` 要求 `path` 必填，`max_bytes` 可选，并通过 `additionalProperties: false` 拒绝额外参数。
+- 未显式设置 `risk_level`，使用 `SimpleTool` 默认值 `read`。
+
+一次成功调用示例：
+
+```python
+ToolAction(
+    name="read_file",
+    arguments={"path": "README.md", "max_bytes": 4096},
+)
+```
+
+工具读取文件后返回：
+
+```python
+ToolResult(
+    name="read_file",
+    success=True,
+    output="<README.md 的文本内容>",
+    metadata={
+        "path": "/home/changsai/testcode/README.md",
+        "bytes": 4096,
+        "truncated": True,
+    },
+)
+```
+
+字段流向：
+
+- `output` 放文件内容，因为模型需要继续基于文件内容推理；它会进入 session history。
+- `metadata.path`、`metadata.bytes`、`metadata.truncated` 给 runtime、日志和 summarizer 使用；普通 metadata 不会进入模型上下文。
+- `read_file_summary()` 基于 metadata 生成用户 run summary，例如 `read /home/changsai/testcode/README.md (4096 bytes truncated)`；这个摘要不写回 `ToolResult.output`。
+- 如果读取的是二进制文件，工具返回 `success=False`、`error_code="binary_file"`，`output` 放模型可见的失败原因，`metadata` 保留路径和文件大小供日志/摘要使用。
+
 ## 新增 Tool Checklist
 
 新增 tool 时逐项确认：
