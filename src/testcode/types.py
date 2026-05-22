@@ -13,6 +13,8 @@ class UserRequest:
 
 @dataclass(slots=True)
 class ToolDefinition:
+    """Model-visible tool contract used for prompting, API tool schema, and policy checks."""
+
     name: str
     description: str
     arguments: dict[str, str] = field(default_factory=dict)
@@ -36,6 +38,13 @@ class ModelReply:
 
 @dataclass(slots=True)
 class ToolResult:
+    """Tool execution result.
+
+    `output` is model-visible session history. Ordinary `metadata` is structured
+    runtime/log/test data and is not prompt-visible, except keys explicitly copied
+    by the session layer such as `action_arguments`.
+    """
+
     name: str
     success: bool
     output: str
