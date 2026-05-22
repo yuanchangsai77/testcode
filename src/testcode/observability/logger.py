@@ -11,6 +11,8 @@ class InMemoryLogger:
         self.events: list[Event] = []
         self.base_dir = Path(base_dir or ".testcode/runs")
         self.run_dir: Path | None = None
+        self.run_id: str | None = None
+        self.last_run_id: str | None = None
 
     def record(self, name: str, payload: dict) -> None:
         event = Event(name=name, payload=payload)
@@ -21,13 +23,17 @@ class InMemoryLogger:
         if self.run_dir is not None:
             return
 
+        self.events = []
         timestamp = Event(name="run.init", payload={}).timestamp
         safe_timestamp = timestamp.replace(":", "-")
+        self.run_id = safe_timestamp
+        self.last_run_id = safe_timestamp
         self.run_dir = self.base_dir / safe_timestamp
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.record(
             "run.start",
             {
+                "run_id": safe_timestamp,
                 "prompt": request.prompt,
                 "cwd": request.cwd,
                 "metadata": request.metadata,
@@ -41,6 +47,7 @@ class InMemoryLogger:
         self.record(
             "run.finish",
             {
+                "run_id": self.run_id,
                 "final_message": summary.final_message,
                 "tool_results": [
                     {
@@ -55,6 +62,8 @@ class InMemoryLogger:
             },
         )
         self._write_details_log(request, summary)
+        self.run_dir = None
+        self.run_id = None
 
     def _append_event(self, event: Event) -> None:
         if self.run_dir is None:
@@ -81,6 +90,7 @@ class InMemoryLogger:
         turns = self._group_turns()
         lines = [
             "Overview",
+            f"- run_id: {self.run_id}",
             f"- prompt: {request.prompt}",
             f"- cwd: {request.cwd}",
             f"- total events: {len(self.events)}",

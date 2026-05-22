@@ -75,6 +75,7 @@ class CLI:
             if session is not None:
                 session.messages = list(conversation)
                 session.status = "active"
+                self._attach_last_run_id(session)
                 self.session_store.save(session)
             prompt = None
 
@@ -138,5 +139,11 @@ class CLI:
         if session is None or self.session_store is None:
             return
         session.status = "closed"
+        self._attach_last_run_id(session)
         session.messages = list(conversation)
         self.session_store.save(session)
+
+    def _attach_last_run_id(self, session: StoredSession) -> None:
+        run_id = getattr(self.logger, "last_run_id", None)
+        if isinstance(run_id, str) and run_id and run_id not in session.run_ids:
+            session.run_ids.append(run_id)

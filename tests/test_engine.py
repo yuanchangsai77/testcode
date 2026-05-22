@@ -12,6 +12,7 @@ from testcode.types import ModelReply, ToolAction, UserRequest
 
 def test_scaffold_runs_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    monkeypatch.chdir(tmp_path)
     (tmp_path / "README.md").write_text("hello", encoding="utf-8")
     app = create_app()
     summary = app.run(UserRequest(prompt="inspect workspace", cwd=str(tmp_path)))
@@ -22,6 +23,7 @@ def test_scaffold_runs_end_to_end(tmp_path, monkeypatch):
 
 
 def test_run_returns_message_when_model_request_fails(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     app = create_app()
 
     def fail(_request):
@@ -208,6 +210,19 @@ def test_session_store_lists_latest_first(tmp_path):
     assert sessions[0].preview == "second prompt"
 
 
+def test_session_store_loads_legacy_session_without_run_ids(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd="/repo", messages=[{"role": "user", "content": "hello"}])
+    path = store.base_dir / f"{session.session_id}.json"
+    payload = path.read_text(encoding="utf-8")
+    path.write_text(payload.replace(',\n  "run_ids": []', ""), encoding="utf-8")
+
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert loaded.run_ids == []
+
+
 def test_chat_persists_and_closes_session(tmp_path, monkeypatch):
     store = SessionStore(base_dir=tmp_path)
     cli = CLI(engine=None, presenter=ConsolePresenter(), logger=None, session_store=store)
@@ -231,3 +246,51 @@ def test_chat_persists_and_closes_session(tmp_path, monkeypatch):
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "echo:hello"},
     ]
+
+
+def test_cli_creates_one_run_directory_per_request(tmp_path):
+    class EchoEngine:
+        def execute(self, request):
+            return type("Summary", (), {"final_message": f"echo:{request.prompt}", "tool_results": []})()
+
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    cli = CLI(engine=EchoEngine(), presenter=ConsolePresenter(), logger=logger)
+
+    cli.run(UserRequest(prompt="first", cwd=str(tmp_path)))
+    first_run_id = logger.last_run_id
+    cli.run(UserRequest(prompt="second", cwd=str(tmp_path)))
+    second_run_id = logger.last_run_id
+
+    assert first_run_id is not None
+    assert second_run_id is not None
+    assert first_run_id != second_run_id
+    assert (tmp_path / "runs" / first_run_id / "events.jsonl").exists()
+    assert (tmp_path / "runs" / second_run_id / "events.jsonl").exists()
+    assert "first" in (tmp_path / "runs" / first_run_id / "details.log").read_text(encoding="utf-8")
+    assert "second" in (tmp_path / "runs" / second_run_id / "details.log").read_text(encoding="utf-8")
+
+
+def test_chat_persists_run_ids_on_session(tmp_path, monkeypatch):
+    class EchoEngine:
+        def execute(self, request):
+            return type("Summary", (), {"final_message": f"echo:{request.prompt}", "tool_results": []})()
+
+    store = SessionStore(base_dir=tmp_path)
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    cli = CLI(
+        engine=EchoEngine(),
+        presenter=ConsolePresenter(),
+        logger=logger,
+        session_store=store,
+    )
+
+    answers = iter(["hello", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    cli.chat(cwd=str(tmp_path))
+
+    sessions = store.list_sessions()
+    stored = store.load(sessions[0].session_id)
+    assert stored is not None
+    assert stored.run_ids == [logger.last_run_id]
+    assert (tmp_path / "runs" / stored.run_ids[0] / "events.jsonl").exists()

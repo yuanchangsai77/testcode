@@ -22,6 +22,7 @@ class SessionStore:
             updated_at=now,
             status="active",
             messages=list(messages or []),
+            run_ids=[],
         )
         self.save(session)
         return session
@@ -37,6 +38,7 @@ class SessionStore:
             "updated_at": updated_at,
             "status": session.status,
             "messages": session.messages,
+            "run_ids": session.run_ids,
         }
         path = self.base_dir / f"{session.session_id}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -55,6 +57,7 @@ class SessionStore:
             updated_at=str(payload["updated_at"]),
             status=str(payload.get("status", "active")),
             messages=messages,
+            run_ids=self._normalize_run_ids(payload.get("run_ids", [])),
         )
 
     def list_sessions(self) -> list[SessionRecord]:
@@ -111,6 +114,11 @@ class SessionStore:
             if isinstance(role, str) and isinstance(content, str):
                 normalized.append({"role": role, "content": content})
         return normalized
+
+    def _normalize_run_ids(self, run_ids: object) -> list[str]:
+        if not isinstance(run_ids, list):
+            return []
+        return [item for item in run_ids if isinstance(item, str) and item]
 
     def _preview(self, text: str, limit: int = 60) -> str:
         single_line = " ".join(text.split())

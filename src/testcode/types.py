@@ -68,3 +68,4 @@ class StoredSession:
     updated_at: str
     status: str
     messages: list[dict[str, str]] = field(default_factory=list)
+    run_ids: list[str] = field(default_factory=list)
