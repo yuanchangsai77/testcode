@@ -40,7 +40,7 @@ def create_app(mode: str | None = None) -> CLI:
     guardrails = Guardrails(policy=policy, logger=logger)
     tools = build_builtin_registry(logger=logger)
     model = create_model_client(logger)
-    presenter = ConsolePresenter()
+    presenter = ConsolePresenter(tool_result_summarizer=tools.summarize_result)
     engine = ExecutionEngine(
         model=model,
         tools=tools,

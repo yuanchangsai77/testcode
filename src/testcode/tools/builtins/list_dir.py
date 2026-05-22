@@ -3,6 +3,7 @@ from __future__ import annotations
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import path_error, positive_int, resolve_workspace_path, retarget, schema
+from ..summary import list_dir_summary
 
 MAX_LIST_ENTRIES = 200
 
@@ -22,6 +23,7 @@ def tool() -> SimpleTool:
             }
         ),
         handler=run,
+        summarizer=list_dir_summary,
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import path_error, resolve_workspace_path, retarget, run_command, schema
+from ..summary import process_result_summary
 
 
 def tool() -> SimpleTool:
@@ -24,6 +25,7 @@ def tool() -> SimpleTool:
         ),
         risk_level="execute",
         handler=run,
+        summarizer=process_result_summary,
     )
 
 

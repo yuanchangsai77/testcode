@@ -5,6 +5,7 @@ from pathlib import Path
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import resolve_workspace_path, retarget, run_command, schema
+from ..summary import git_diff_summary
 from .git_common import ensure_git_repository, git_failure
 
 
@@ -15,6 +16,7 @@ def tool() -> SimpleTool:
         arguments={"path": "Optional workspace-relative path to diff."},
         input_schema=schema({"path": {"type": "string"}}),
         handler=run,
+        summarizer=git_diff_summary,
     )
 
 

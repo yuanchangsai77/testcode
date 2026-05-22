@@ -3,6 +3,7 @@ from __future__ import annotations
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import path_error, positive_int, resolve_workspace_path, retarget, run_command, schema
+from ..summary import match_count_summary
 
 MAX_SEARCH_RESULTS = 200
 
@@ -25,6 +26,7 @@ def tool() -> SimpleTool:
             required=["query"],
         ),
         handler=run,
+        summarizer=match_count_summary,
     )
 
 
@@ -63,7 +65,11 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
         name=action.name,
         success=True,
         output="\n".join(lines) if lines else "no matches",
-        metadata={"count": len(lines), "truncated": len(result_lines) > len(lines), "matches": parsed},
+        metadata={
+            "count": len(lines),
+            "truncated": len(result_lines) > len(lines),
+            "matches": parsed,
+        },
     )
 
 

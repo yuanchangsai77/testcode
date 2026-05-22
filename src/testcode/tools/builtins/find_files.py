@@ -7,6 +7,7 @@ from pathlib import Path
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import positive_int, resolve_workspace_path, retarget, schema
+from ..summary import match_count_summary
 
 MAX_SEARCH_RESULTS = 200
 
@@ -27,6 +28,7 @@ def tool() -> SimpleTool:
             required=["pattern"],
         ),
         handler=run,
+        summarizer=match_count_summary,
     )
 
 

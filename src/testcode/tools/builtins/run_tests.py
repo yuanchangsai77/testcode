@@ -5,6 +5,7 @@ import time
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import schema
+from ..summary import run_tests_summary
 from .shell_exec import run as run_shell
 
 
@@ -27,6 +28,7 @@ def tool() -> SimpleTool:
         ),
         risk_level="test",
         handler=run,
+        summarizer=run_tests_summary,
     )
 
 

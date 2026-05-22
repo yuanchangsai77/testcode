@@ -4,11 +4,14 @@ import json
 import re
 from html import unescape
 
-from ..types import ExecutionSummary, SessionRecord, StoredSession, UserRequest
+from ..types import ExecutionSummary, SessionRecord, StoredSession, ToolResult, UserRequest
 
 
 class ConsolePresenter:
     max_tool_output = 120
+
+    def __init__(self, tool_result_summarizer=None) -> None:
+        self.tool_result_summarizer = tool_result_summarizer
 
     def show_start(self, request: UserRequest) -> None:
         print(f"[testcode] task: {request.prompt}")
@@ -25,8 +28,22 @@ class ConsolePresenter:
             print("[testcode] tool results:")
             for result in summary.tool_results:
                 status = "ok" if result.success else "blocked"
-                output = self._summarize_tool_output(result.output)
+                output = self._summarize_tool_result(result)
                 print(f"- {result.name}: {status} -> {output}")
+
+    def _summarize_tool_result(self, result: ToolResult) -> str:
+        if self.tool_result_summarizer is not None:
+            summary = self.tool_result_summarizer(result)
+            if isinstance(summary, str) and summary.strip() and summary != result.output:
+                text = self._summarize_tool_output(summary)
+                return f"{result.error_code}: {text}" if result.error_code else text
+
+        if not result.success:
+            if result.error_code:
+                return f"{result.error_code}: {self._summarize_tool_output(result.output)}"
+            return self._summarize_tool_output(result.output)
+
+        return self._summarize_tool_output(result.output)
 
     def confirm_tool_action(self, action, reason: str) -> bool:
         print(f"[testcode] approval required: {action.name}")

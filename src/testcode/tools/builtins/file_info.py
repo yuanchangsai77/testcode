@@ -3,6 +3,7 @@ from __future__ import annotations
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import path_error, resolve_workspace_path, retarget, schema
+from ..summary import file_info_summary
 
 
 def tool() -> SimpleTool:
@@ -12,6 +13,7 @@ def tool() -> SimpleTool:
         arguments={"path": "Workspace-relative or absolute path."},
         input_schema=schema({"path": {"type": "string"}}, required=["path"]),
         handler=run,
+        summarizer=file_info_summary,
     )
 
 
@@ -33,5 +35,10 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
         name=action.name,
         success=True,
         output=f"{kind} {resolved.path} size={stat.st_size} mtime={int(stat.st_mtime)}",
-        metadata={"path": str(resolved.path), "type": kind, "size": stat.st_size, "mtime": stat.st_mtime},
+        metadata={
+            "path": str(resolved.path),
+            "type": kind,
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+        },
     )

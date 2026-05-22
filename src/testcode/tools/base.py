@@ -20,6 +20,9 @@ class Tool(Protocol):
     def definition(self) -> ToolDefinition:
         """Return the normalized tool definition."""
 
+    def summarize(self, result: ToolResult) -> str:
+        """Return a user-facing run summary for a result."""
+
 
 @dataclass(slots=True)
 class ToolContext:
@@ -35,6 +38,9 @@ class SimpleTool:
     input_schema: dict = field(default_factory=dict)
     risk_level: str = "read"
     exposed: bool = True
+    # User-facing run summary only. It is local display logic and must not be
+    # written into ToolResult output or metadata.
+    summarizer: Callable[[ToolResult], str] | None = None
 
     def run(self, action: ToolAction, context: ToolContext) -> ToolResult:
         return self.handler(action, context)
@@ -47,3 +53,8 @@ class SimpleTool:
             input_schema=dict(self.input_schema),
             risk_level=self.risk_level,
         )
+
+    def summarize(self, result: ToolResult) -> str:
+        if self.summarizer is None:
+            return result.output
+        return self.summarizer(result)

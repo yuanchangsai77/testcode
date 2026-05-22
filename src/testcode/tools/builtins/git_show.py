@@ -5,6 +5,7 @@ from pathlib import Path
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import run_command, schema
+from ..summary import git_show_summary
 from .git_common import ensure_git_repository, git_failure
 
 
@@ -15,6 +16,7 @@ def tool() -> SimpleTool:
         arguments={"revision": "Revision expression to show."},
         input_schema=schema({"revision": {"type": "string"}}, required=["revision"]),
         handler=run,
+        summarizer=git_show_summary,
     )
 
 

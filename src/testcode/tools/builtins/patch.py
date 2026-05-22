@@ -5,6 +5,7 @@ from pathlib import Path
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import resolve_workspace_path, retarget, run_command, schema
+from ..summary import patch_summary
 
 
 def tool() -> SimpleTool:
@@ -15,6 +16,7 @@ def tool() -> SimpleTool:
         input_schema=schema({"diff": {"type": "string"}}, required=["diff"]),
         risk_level="write",
         handler=run,
+        summarizer=patch_summary,
     )
 
 

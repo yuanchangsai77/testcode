@@ -43,6 +43,12 @@ class ToolRegistry:
         self._record_result(result)
         return result
 
+    def summarize_result(self, result: ToolResult) -> str:
+        tool = self._tools.get(result.name)
+        if tool is None:
+            return result.output
+        return tool.summarize(result)
+
     def _validate(self, action: ToolAction, schema: dict) -> ToolResult | None:
         required = set(schema.get("required", []))
         properties = set(schema.get("properties", {}).keys())

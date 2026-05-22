@@ -101,10 +101,13 @@ def test_shell_exec_reports_success_failure_and_timeout(tmp_path):
 
     assert success.success is True
     assert success.metadata["exit_code"] == 0
+    assert registry.summarize_result(success) == "exit 0; stdout 1"
     assert "ok" in success.output
     assert failure.error_code == "nonzero_exit"
     assert failure.metadata["exit_code"] == 7
+    assert registry.summarize_result(failure) == "exit 7"
     assert timeout.error_code == "timeout"
+    assert registry.summarize_result(timeout) == "timeout after 0.01s"
 
 
 def test_patch_applies_unified_diff_and_rejects_bad_context(tmp_path):
@@ -129,6 +132,7 @@ def test_patch_applies_unified_diff_and_rejects_bad_context(tmp_path):
 
     assert applied.success is True
     assert applied.metadata["changed_files"] == ["file.txt"]
+    assert registry.summarize_result(applied) == "changed file.txt"
     assert target.read_text(encoding="utf-8") == "after\n"
     assert rejected.error_code == "patch_context_mismatch"
 
@@ -212,11 +216,13 @@ def test_git_read_tools_report_non_git_and_dirty_repo(tmp_path):
     assert clean.success is True
     assert clean.metadata["clean"] is True
     assert clean.metadata["changed_files"] == []
+    assert registry.summarize_result(clean).endswith("; clean")
     assert "status: clean" in clean.output
     assert "exit_code:" not in clean.output
     assert clean_diff.success is True
     assert clean_diff.output == "no diff"
     assert clean_diff.metadata["has_changes"] is False
+    assert registry.summarize_result(clean_diff) == "no diff"
 
     (tmp_path / "tracked.txt").write_text("two\n", encoding="utf-8")
 
@@ -228,11 +234,14 @@ def test_git_read_tools_report_non_git_and_dirty_repo(tmp_path):
     assert status.success is True
     assert status.metadata["clean"] is False
     assert status.metadata["changed_files"] == [{"status": "M", "path": "tracked.txt"}]
+    assert registry.summarize_result(status).endswith("1 changed: M tracked.txt")
     assert "M tracked.txt" in status.output
     assert "exit_code:" not in status.output
     assert "-one" in diff.output
     assert "+two" in diff.output
     assert diff.metadata["has_changes"] is True
+    assert registry.summarize_result(diff) == "diff: +1/-1"
     assert show.success is True
     assert show.metadata["revision"] == "HEAD"
+    assert registry.summarize_result(show).startswith("HEAD: ")
     assert missing.error_code == "revision_not_found"
