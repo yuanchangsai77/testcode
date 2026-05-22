@@ -289,7 +289,7 @@ class OpenAICompatibleModelClient:
             cleaned = self._clean_content(content)
             actions = self._parse_tool_calls(raw_tool_calls, allowed_tool_names=allowed_tool_names)
             return ModelReply(
-                message=content or "Model requested tool calls.",
+                message=cleaned.message or "Model requested tool calls.",
                 actions=actions,
                 done=False,
                 metadata=self._cleaned_metadata(cleaned),
@@ -357,7 +357,7 @@ class OpenAICompatibleModelClient:
             if content_actions:
                 cleaned = self._clean_content(content)
                 return ModelReply(
-                    message=content,
+                    message=cleaned.message or "Model requested tool calls.",
                     actions=content_actions,
                     done=False,
                     metadata=self._cleaned_metadata(cleaned),
@@ -367,7 +367,7 @@ class OpenAICompatibleModelClient:
             if candidate is None:
                 cleaned = self._clean_content(content)
                 return ModelReply(
-                    message=content,
+                    message=cleaned.message or content,
                     done=True,
                     metadata=self._cleaned_metadata(cleaned),
                 )
@@ -381,7 +381,7 @@ class OpenAICompatibleModelClient:
                     )
                 cleaned = self._clean_content(content)
                 return ModelReply(
-                    message=content,
+                    message=cleaned.message or content,
                     done=True,
                     metadata=self._cleaned_metadata(cleaned),
                 )
@@ -415,7 +415,7 @@ class OpenAICompatibleModelClient:
 
         cleaned = self._clean_content(message)
         return ModelReply(
-            message=message,
+            message=cleaned.message or message,
             actions=actions,
             done=done,
             metadata=self._cleaned_metadata(cleaned),

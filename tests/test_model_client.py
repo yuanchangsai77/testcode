@@ -247,7 +247,7 @@ def test_parse_reply_converts_xmlish_content_tool_call():
     reply = client._parse_reply(content, allowed_tool_names={"shell_exec"})
 
     assert reply.done is False
-    assert reply.message == content
+    assert reply.message == "Model requested tool calls."
     assert reply.metadata == {"thinking": "Need to search.", "cleaned_protocol_tags": True}
     assert len(reply.actions) == 1
     assert reply.actions[0].name == "shell_exec"
@@ -264,7 +264,7 @@ def test_parse_reply_cleans_thinking_tags_from_final_message():
 
     assert reply.done is True
     assert reply.actions == []
-    assert reply.message == content
+    assert reply.message == "项目可以先保留 JSON。"
     assert reply.metadata == {
         "thinking": "Need to inspect files first.",
         "cleaned_protocol_tags": True,
@@ -291,9 +291,24 @@ def test_parse_response_cleans_thinking_from_native_tool_call_message():
 
     reply = client._parse_response(data, allowed_tool_names={"read_file"})
 
-    assert reply.message == "<think>Need README.</think>Reading file."
+    assert reply.message == "Reading file."
     assert reply.metadata == {"thinking": "Need README.", "cleaned_protocol_tags": True}
     assert reply.actions[0].name == "read_file"
+
+
+def test_parse_reply_cleans_thinking_from_json_message():
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    content = (
+        '{"message":"<think>Need to inspect.</think>我会先看 README。",'
+        '"done":true,"actions":[]}'
+    )
+
+    reply = client._parse_reply(content)
+
+    assert reply.done is True
+    assert reply.actions == []
+    assert reply.message == "我会先看 README。"
+    assert reply.metadata == {"thinking": "Need to inspect.", "cleaned_protocol_tags": True}
 
 
 def test_parse_reply_treats_invalid_embedded_json_as_final_message():
