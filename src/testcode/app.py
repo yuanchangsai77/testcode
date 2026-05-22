@@ -2,75 +2,41 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 
+from .config import load_dotenv, load_runtime_config
 from .interaction.cli import CLI
 from .interaction.presenter import ConsolePresenter
-from .model.client import ModelClientConfig, OpenAICompatibleModelClient, StubModelClient
+from .model.client import OpenAICompatibleModelClient, StubModelClient
+from .model.types import ModelClientConfig
 from .observability.logger import InMemoryLogger
 from .orchestration.engine import ExecutionEngine
 from .safety.guardrails import Guardrails
 from .safety.policy import DefaultPolicy
-from .session_store import SessionStore
+from .sessions import SessionStore
 from .tools.builtin import build_builtin_registry
 from .types import UserRequest
-
-
-def load_dotenv() -> None:
-    env_path = Path(__file__).resolve().parents[2] / ".env"
-    if not env_path.exists():
-        return
-
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if not key or key in os.environ:
-            continue
-
-        if (
-            (value.startswith('"') and value.endswith('"')) or
-            (value.startswith("'") and value.endswith("'"))
-        ):
-            value = value[1:-1]
-
-        os.environ[key] = value
 
 
 load_dotenv()
 
 
 def create_model_client(logger) -> StubModelClient | OpenAICompatibleModelClient:
-    base_url = os.getenv("TESTCODE_MODEL_BASE_URL", "").strip()
-    if not base_url:
+    config = load_runtime_config()
+    if not config.model_base_url:
         return StubModelClient()
 
-    model = os.getenv("TESTCODE_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4"
-    timeout = _float_env("TESTCODE_MODEL_TIMEOUT", 60.0)
-    config = ModelClientConfig(base_url=base_url, model=model, timeout=timeout)
-    return OpenAICompatibleModelClient(config=config, logger=logger)
-
-
-def _float_env(name: str, default: float) -> float:
-    raw_value = os.getenv(name, "").strip()
-    if not raw_value:
-        return default
-
-    try:
-        value = float(raw_value)
-    except ValueError:
-        return default
-
-    return value if value > 0 else default
+    model_config = ModelClientConfig(
+        base_url=config.model_base_url,
+        model=config.model_name,
+        timeout=config.model_timeout,
+    )
+    return OpenAICompatibleModelClient(config=model_config, logger=logger)
 
 
 def create_app(mode: str | None = None) -> CLI:
+    config = load_runtime_config(mode=mode)
     logger = InMemoryLogger()
-    policy = DefaultPolicy(mode=mode or os.getenv("TESTCODE_MODE", "confirm").strip() or "confirm")
+    policy = DefaultPolicy(mode=config.mode)
     guardrails = Guardrails(policy=policy, logger=logger)
     tools = build_builtin_registry(logger=logger)
     model = create_model_client(logger)

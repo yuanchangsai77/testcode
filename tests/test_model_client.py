@@ -3,7 +3,10 @@ import http.client
 import pytest
 
 from testcode.app import create_model_client
-from testcode.model.client import ModelClientConfig, OpenAICompatibleModelClient, StubModelClient
+from testcode.model.client import OpenAICompatibleModelClient, StubModelClient
+from testcode.model.parser import ModelReplyParser
+from testcode.model.prompt import ModelPromptBuilder
+from testcode.model.types import ModelClientConfig
 from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.session import SessionContext
 from testcode.types import ToolDefinition, UserRequest
@@ -78,7 +81,7 @@ def test_create_model_client_uses_stub_without_base_url(monkeypatch):
 
 
 def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    builder = ModelPromptBuilder()
     session = SessionContext(
         request=UserRequest(
             prompt="inspect tools",
@@ -107,7 +110,7 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
         history=["tool:read_file:ok: content"],
     )
 
-    messages = client._build_messages(session)
+    messages = builder.build_messages(session)
     system = str(messages[0]["content"])
     first_history = messages[1]
     second_history = messages[2]
@@ -193,7 +196,7 @@ def test_respond_sends_native_tool_schemas_and_parses_tool_calls(monkeypatch):
 
 
 def test_parse_response_rejects_unknown_native_tool_call():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    parser = ModelReplyParser()
     data = {
         "choices": [
             {
@@ -211,11 +214,11 @@ def test_parse_response_rejects_unknown_native_tool_call():
     }
 
     with pytest.raises(RuntimeError, match="unknown tool: missing_tool"):
-        client._parse_response(data, allowed_tool_names={"read_file"})
+        parser.parse_response(data, allowed_tool_names={"read_file"})
 
 
 def test_parse_response_rejects_invalid_native_tool_arguments():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    parser = ModelReplyParser()
     data = {
         "choices": [
             {
@@ -233,26 +236,26 @@ def test_parse_response_rejects_invalid_native_tool_arguments():
     }
 
     with pytest.raises(RuntimeError, match="arguments must decode to an object"):
-        client._parse_response(data, allowed_tool_names={"read_file"})
+        parser.parse_response(data, allowed_tool_names={"read_file"})
 
 
 def test_parse_response_rejects_empty_content_without_tool_calls():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    parser = ModelReplyParser()
     data = {"choices": [{"message": {"content": ""}}]}
 
     with pytest.raises(RuntimeError, match="content was empty"):
-        client._parse_response(data, allowed_tool_names=set())
+        parser.parse_response(data, allowed_tool_names=set())
 
 
 def test_parse_reply_converts_xmlish_content_tool_call():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    parser = ModelReplyParser()
     content = """<think>Need to search.</think>
 - tool="shell_exec">
 <parameter name="command">grep -r "sqlite" src tests --include="*.py"</parameter>
 </invoke>
 </minimax:tool_call>"""
 
-    reply = client._parse_reply(content, allowed_tool_names={"shell_exec"})
+    reply = parser.parse_reply(content, allowed_tool_names={"shell_exec"})
 
     assert reply.done is False
     assert reply.message == "Model requested tool calls."
@@ -265,10 +268,10 @@ def test_parse_reply_converts_xmlish_content_tool_call():
 
 
 def test_parse_reply_cleans_thinking_tags_from_final_message():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    parser = ModelReplyParser()
     content = "<think>Need to inspect files first.</think>\n项目可以先保留 JSON。"
 
-    reply = client._parse_reply(content)
+    reply = parser.parse_reply(content)
 
     assert reply.done is True
     assert reply.actions == []
@@ -280,7 +283,7 @@ def test_parse_reply_cleans_thinking_tags_from_final_message():
 
 
 def test_parse_response_cleans_thinking_from_native_tool_call_message():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    parser = ModelReplyParser()
     data = {
         "choices": [
             {
@@ -297,7 +300,7 @@ def test_parse_response_cleans_thinking_from_native_tool_call_message():
         ]
     }
 
-    reply = client._parse_response(data, allowed_tool_names={"read_file"})
+    reply = parser.parse_response(data, allowed_tool_names={"read_file"})
 
     assert reply.message == "Reading file."
     assert reply.metadata == {"thinking": "Need README.", "cleaned_protocol_tags": True}
@@ -305,13 +308,13 @@ def test_parse_response_cleans_thinking_from_native_tool_call_message():
 
 
 def test_parse_reply_cleans_thinking_from_json_message():
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    parser = ModelReplyParser()
     content = (
         '{"message":"<think>Need to inspect.</think>我会先看 README。",'
         '"done":true,"actions":[]}'
     )
 
-    reply = client._parse_reply(content)
+    reply = parser.parse_reply(content)
 
     assert reply.done is True
     assert reply.actions == []
@@ -321,9 +324,9 @@ def test_parse_reply_cleans_thinking_from_json_message():
 
 def test_parse_reply_treats_invalid_embedded_json_as_final_message():
     logger = InMemoryLogger()
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000", logger=logger)
+    parser = ModelReplyParser(logger=logger)
 
-    reply = client._parse_reply("工具说明如下：{name: read_file, arguments: {path: '.'}}")
+    reply = parser.parse_reply("工具说明如下：{name: read_file, arguments: {path: '.'}}")
 
     assert reply.done is True
     assert reply.actions == []
@@ -333,13 +336,13 @@ def test_parse_reply_treats_invalid_embedded_json_as_final_message():
 
 def test_parse_reply_retries_invalid_json_shaped_response():
     logger = InMemoryLogger()
-    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000", logger=logger)
+    parser = ModelReplyParser(logger=logger)
     content = (
         '{"message":"starting","done":false,'
         '"actions":[{"name":"find_files","parameter name="pattern">src/**/*.py"}]}'
     )
 
-    reply = client._parse_reply(content)
+    reply = parser.parse_reply(content)
 
     assert reply.done is False
     assert reply.actions == []

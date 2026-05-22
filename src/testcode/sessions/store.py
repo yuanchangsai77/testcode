@@ -5,12 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .types import SessionRecord, StoredSession
+from ..types import SessionRecord, StoredSession
 
 
 class SessionStore:
     def __init__(self, base_dir: str | Path | None = None) -> None:
-        root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[2]
+        root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[3]
         self.base_dir = root / ".testcode" / "sessions"
 
     def create(self, cwd: str, messages: list[dict[str, str]] | None = None) -> StoredSession:

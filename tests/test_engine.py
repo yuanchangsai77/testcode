@@ -5,7 +5,7 @@ from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.engine import ExecutionEngine
 from testcode.safety.guardrails import Guardrails
 from testcode.safety.policy import DefaultPolicy
-from testcode.session_store import SessionStore
+from testcode.sessions import SessionStore
 from testcode.tools.builtin import build_builtin_registry
 from testcode.types import ModelReply, ToolAction, UserRequest
 

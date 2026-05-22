@@ -19,9 +19,11 @@ Detailed design is in [docs/architecture.md](/opt/repos/testcode/docs/architectu
 
 ```text
 src/testcode/
+  config.py         Runtime configuration and .env loading
   interaction/     CLI input/output
   orchestration/   session state and agent loop
-  model/           LLM adapter and protocol
+  model/           LLM prompt, parser, adapter, and protocol
+  sessions/        Stored conversation persistence
   tools/           executable tool registry
   safety/          guardrails and policy checks
   observability/   logging and event capture
