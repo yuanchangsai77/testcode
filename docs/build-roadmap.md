@@ -62,6 +62,23 @@
 
 ### P0.2 可靠编辑工作流
 
+进展：
+
+- 已完成已有文件修改前必须先 `read_file`；新增文件仍允许直接 patch。
+- 已完成本次 `execute()` 运行内记录已读取文件的 path、mtime、sha256。
+- 已完成 patch 前重新计算 hash/mtime；文件被外部修改时返回 `file_changed_since_read`。
+- 已完成 patch 结果 metadata 返回 preview diff、changed files、行数统计。
+- 已完成 patch 文件数和 diff 行数上限。
+- 已补充未读拒绝、读后外部修改拒绝、上下文不匹配、创建文件、多文件修改、路径越界和超限拒绝测试。
+
+剩余：
+
+- session 持久化层尚未保存 read state，跨 run resume 后仍需要重新读取目标文件。
+- preview diff 目前在 metadata 中返回，CLI 还没有独立的人工确认前 preview 展示。
+- patch 失败诊断已覆盖主要 error_code，但 diff 语法错误还可以继续细分。
+
+原始待办：
+
 - 模型 patch 文件前必须先 `read_file` 目标文件。
 - session 记录已读取文件的 path、mtime、hash。
 - patch 前重新计算 hash，文件被外部修改时拒绝并要求重新读取。

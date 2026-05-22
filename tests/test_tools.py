@@ -68,6 +68,8 @@ def test_file_tools_handle_empty_directory_large_and_binary_files(tmp_path):
     assert listing.output == "empty directory"
     assert clipped.output == "abc"
     assert clipped.metadata["truncated"] is True
+    assert "sha256" in clipped.metadata
+    assert "mtime_ns" in clipped.metadata
     assert refused.error_code == "binary_file"
 
 
@@ -127,14 +129,58 @@ def test_patch_applies_unified_diff_and_rejects_bad_context(tmp_path):
 +after
 """
 
+    registry.execute(ToolAction(name="read_file", arguments={"path": "file.txt"}), cwd=str(tmp_path))
     applied = registry.execute(ToolAction(name="patch", arguments={"diff": diff}), cwd=str(tmp_path))
+    registry.execute(ToolAction(name="read_file", arguments={"path": "file.txt"}), cwd=str(tmp_path))
     rejected = registry.execute(ToolAction(name="patch", arguments={"diff": bad_diff}), cwd=str(tmp_path))
 
     assert applied.success is True
     assert applied.metadata["changed_files"] == ["file.txt"]
+    assert applied.metadata["preview"] == diff
+    assert applied.metadata["line_stats"] == {"added": 1, "removed": 1}
     assert registry.summarize_result(applied) == "changed file.txt"
     assert target.read_text(encoding="utf-8") == "after\n"
     assert rejected.error_code == "patch_context_mismatch"
+
+
+def test_patch_requires_read_for_existing_file_and_rejects_stale_read(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("before\n", encoding="utf-8")
+    registry = make_registry()
+    diff = """--- a/file.txt
++++ b/file.txt
+@@ -1 +1 @@
+-before
++after
+"""
+
+    unread = registry.execute(ToolAction(name="patch", arguments={"diff": diff}), cwd=str(tmp_path))
+    registry.execute(ToolAction(name="read_file", arguments={"path": "file.txt"}), cwd=str(tmp_path))
+    target.write_text("external\n", encoding="utf-8")
+    stale = registry.execute(ToolAction(name="patch", arguments={"diff": diff}), cwd=str(tmp_path))
+
+    assert unread.error_code == "file_not_read"
+    assert stale.error_code == "file_changed_since_read"
+    assert target.read_text(encoding="utf-8") == "external\n"
+
+
+def test_patch_rejects_file_count_and_line_count_limits(tmp_path):
+    registry = make_registry()
+    many_files = "\n".join(
+        f"--- /dev/null\n+++ b/file_{index}.txt\n@@ -0,0 +1 @@\n+{index}"
+        for index in range(21)
+    )
+    many_lines = "--- /dev/null\n+++ b/large.txt\n@@ -0,0 +1,2001 @@\n" + "\n".join(
+        f"+{index}" for index in range(2001)
+    )
+
+    too_many_files = registry.execute(ToolAction(name="patch", arguments={"diff": many_files}), cwd=str(tmp_path))
+    too_many_lines = registry.execute(ToolAction(name="patch", arguments={"diff": many_lines}), cwd=str(tmp_path))
+
+    assert too_many_files.error_code == "patch_too_large"
+    assert too_many_files.metadata["max_files"] == 20
+    assert too_many_lines.error_code == "patch_too_large"
+    assert too_many_lines.metadata["max_lines"] == 2000
 
 
 def test_patch_applies_multiple_files_and_rejects_outside_workspace(tmp_path):
@@ -159,6 +205,8 @@ def test_patch_applies_multiple_files_and_rejects_outside_workspace(tmp_path):
 +new
 """
 
+    registry.execute(ToolAction(name="read_file", arguments={"path": "a.txt"}), cwd=str(tmp_path))
+    registry.execute(ToolAction(name="read_file", arguments={"path": "b.txt"}), cwd=str(tmp_path))
     applied = registry.execute(ToolAction(name="patch", arguments={"diff": multi}), cwd=str(tmp_path))
     rejected = registry.execute(ToolAction(name="patch", arguments={"diff": outside}), cwd=str(tmp_path))
 

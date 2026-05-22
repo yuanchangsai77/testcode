@@ -166,6 +166,78 @@ def test_engine_allows_patch_in_auto_mode_without_prompting(tmp_path):
     assert (tmp_path / "auto.py").read_text(encoding="utf-8") == "print('auto')\n"
 
 
+def test_engine_keeps_read_state_within_single_execute(tmp_path):
+    (tmp_path / "target.txt").write_text("before\n", encoding="utf-8")
+
+    class ReadThenPatchModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="read target",
+                    actions=[ToolAction(name="read_file", arguments={"path": "target.txt"})],
+                    done=False,
+                )
+            return ModelReply(
+                message="patched",
+                actions=[
+                    ToolAction(
+                        name="patch",
+                        arguments={
+                            "diff": "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-before\n+after\n"
+                        },
+                    )
+                ],
+                done=True,
+            )
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=ReadThenPatchModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine.execute(UserRequest(prompt="update target", cwd=str(tmp_path)))
+
+    assert summary.final_message == "patched"
+    assert summary.tool_results[-1].success is True
+    assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "after\n"
+
+
+def test_engine_resets_read_state_between_executes(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+    diff = "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-before\n+after\n"
+
+    class SingleActionModel:
+        def __init__(self, action):
+            self.action = action
+
+        def respond(self, _session):
+            return ModelReply(message="run action", actions=[self.action], done=True)
+
+    logger = InMemoryLogger()
+    tools = build_builtin_registry(logger)
+    engine = ExecutionEngine(
+        model=SingleActionModel(ToolAction(name="read_file", arguments={"path": "target.txt"})),
+        tools=tools,
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    first = engine.execute(UserRequest(prompt="read target", cwd=str(tmp_path)))
+
+    engine.model = SingleActionModel(ToolAction(name="patch", arguments={"diff": diff}))
+    second = engine.execute(UserRequest(prompt="patch target", cwd=str(tmp_path)))
+
+    assert first.tool_results[0].success is True
+    assert second.tool_results[0].error_code == "file_not_read"
+    assert target.read_text(encoding="utf-8") == "before\n"
+
+
 def test_engine_skips_duplicate_successful_tool_action(tmp_path):
     class DuplicateShellModel:
         calls = 0

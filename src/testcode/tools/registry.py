@@ -8,9 +8,13 @@ class ToolRegistry:
     def __init__(self, logger) -> None:
         self._tools = {}
         self._logger = logger
+        self._state = {}
 
     def register(self, tool) -> None:
         self._tools[tool.name] = tool
+
+    def reset_state(self) -> None:
+        self._state = {}
 
     def definitions(self) -> list[ToolDefinition]:
         return [tool.definition() for tool in self._tools.values() if getattr(tool, "exposed", True)]
@@ -39,7 +43,7 @@ class ToolRegistry:
             return validation_error
 
         self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
-        result = tool.run(action, ToolContext(cwd=cwd))
+        result = tool.run(action, ToolContext(cwd=cwd, state=self._state))
         self._record_result(result)
         return result
 

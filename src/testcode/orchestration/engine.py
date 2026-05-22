@@ -20,6 +20,8 @@ class ExecutionEngine:
         self.max_turns = 100
 
     def execute(self, request: UserRequest) -> ExecutionSummary:
+        if hasattr(self.tools, "reset_state"):
+            self.tools.reset_state()
         session = SessionContext(request=request, available_tools=self.tools.definitions())
         consecutive_non_retryable_turns = 0
         completed_actions: dict[str, ToolResult] = {}

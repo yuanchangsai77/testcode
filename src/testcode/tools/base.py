@@ -27,6 +27,7 @@ class Tool(Protocol):
 @dataclass(slots=True)
 class ToolContext:
     cwd: str
+    state: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)

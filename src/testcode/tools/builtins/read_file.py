@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import looks_binary, path_error, positive_int, resolve_workspace_path, retarget, schema
@@ -48,9 +50,20 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
 
     chunk = data[:max_bytes]
     output = chunk.decode("utf-8", errors="replace")
+    stat = resolved.path.stat()
+    digest = hashlib.sha256(data).hexdigest()
+    metadata = {
+        "path": str(resolved.path),
+        "bytes": len(chunk),
+        "size": len(data),
+        "sha256": digest,
+        "mtime_ns": stat.st_mtime_ns,
+        "truncated": len(data) > len(chunk),
+    }
+    context.state.setdefault("read_files", {})[str(resolved.path)] = metadata
     return ToolResult(
         name=action.name,
         success=True,
         output=output,
-        metadata={"path": str(resolved.path), "bytes": len(chunk), "truncated": len(data) > len(chunk)},
+        metadata=metadata,
     )

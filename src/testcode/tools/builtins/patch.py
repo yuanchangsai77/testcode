@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import resolve_workspace_path, retarget, run_command, schema
 from ..summary import patch_summary
+
+MAX_PATCH_FILES = 20
+MAX_PATCH_LINES = 2_000
 
 
 def tool() -> SimpleTool:
@@ -22,9 +26,27 @@ def tool() -> SimpleTool:
 
 def run(action: ToolAction, context: ToolContext) -> ToolResult:
     diff = str(action.arguments["diff"])
+    lines = diff.splitlines()
+    if len(lines) > MAX_PATCH_LINES:
+        return ToolResult(
+            name=action.name,
+            success=False,
+            output=f"patch exceeds maximum line count: {len(lines)} > {MAX_PATCH_LINES}",
+            error_code="patch_too_large",
+            metadata={"line_count": len(lines), "max_lines": MAX_PATCH_LINES},
+        )
+
     changed_files = changed_files_from_diff(diff)
     if not changed_files:
         return ToolResult(name=action.name, success=False, output="diff contains no changed files", error_code="invalid_patch")
+    if len(changed_files) > MAX_PATCH_FILES:
+        return ToolResult(
+            name=action.name,
+            success=False,
+            output=f"patch changes too many files: {len(changed_files)} > {MAX_PATCH_FILES}",
+            error_code="patch_too_large",
+            metadata={"changed_files": changed_files, "max_files": MAX_PATCH_FILES},
+        )
 
     root = Path(context.cwd).expanduser().resolve()
     for path in changed_files:
@@ -32,6 +54,11 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
         if isinstance(resolved, ToolResult):
             return retarget(resolved, action.name)
         resolved.path.relative_to(root)
+        if resolved.path.exists():
+            read_error = validate_file_was_read(action.name, resolved.path, context.state)
+            if read_error is not None:
+                read_error.metadata.setdefault("changed_files", changed_files)
+                return read_error
 
     check = run_command(["git", "apply", "--check", "-"], root, input_text=diff, shell=False)
     if not check.success:
@@ -40,7 +67,7 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
             success=False,
             output=check.output,
             error_code="patch_context_mismatch",
-            metadata={"changed_files": changed_files},
+            metadata={"changed_files": changed_files, "preview": diff, "line_stats": line_stats(diff)},
         )
 
     applied = run_command(["git", "apply", "-"], root, input_text=diff, shell=False)
@@ -51,7 +78,7 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
         name=action.name,
         success=True,
         output="applied patch:\n" + "\n".join(changed_files),
-        metadata={"changed_files": changed_files},
+        metadata={"changed_files": changed_files, "preview": diff, "line_stats": line_stats(diff)},
     )
 
 
@@ -74,3 +101,49 @@ def changed_files_from_diff(diff: str) -> list[str]:
             if raw_path not in files:
                 files.append(raw_path)
     return sorted(set(files))
+
+
+def validate_file_was_read(tool_name: str, path: Path, state: dict) -> ToolResult | None:
+    read_files = state.get("read_files", {})
+    previous = read_files.get(str(path))
+    if not previous:
+        return ToolResult(
+            name=tool_name,
+            success=False,
+            output=f"patch target must be read before modification: {path}",
+            error_code="file_not_read",
+            metadata={"path": str(path)},
+        )
+
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    stat = path.stat()
+    if digest != previous.get("sha256") or stat.st_mtime_ns != previous.get("mtime_ns"):
+        return ToolResult(
+            name=tool_name,
+            success=False,
+            output=f"patch target changed after last read: {path}",
+            error_code="file_changed_since_read",
+            metadata={
+                "path": str(path),
+                "previous_sha256": previous.get("sha256"),
+                "current_sha256": digest,
+                "previous_mtime_ns": previous.get("mtime_ns"),
+                "current_mtime_ns": stat.st_mtime_ns,
+            },
+        )
+
+    return None
+
+
+def line_stats(diff: str) -> dict[str, int]:
+    added = 0
+    removed = 0
+    for line in diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return {"added": added, "removed": removed}
