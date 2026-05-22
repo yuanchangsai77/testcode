@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import re
 import urllib.error
 import urllib.request
@@ -230,6 +231,13 @@ class OpenAICompatibleModelClient:
                     {"url": url, "reason": str(error.reason)},
                 )
             raise RuntimeError(f"Model request failed: {error.reason}") from error
+        except http.client.RemoteDisconnected as error:
+            if self.logger is not None:
+                self.logger.record(
+                    "model.network_error",
+                    {"url": url, "reason": str(error)},
+                )
+            raise RuntimeError(f"Model request failed: {error}") from error
 
         try:
             data = json.loads(body)

@@ -1,3 +1,5 @@
+import http.client
+
 import pytest
 
 from testcode.app import create_model_client
@@ -25,6 +27,26 @@ def test_post_json_wraps_timeout_as_runtime_error(monkeypatch):
 
     assert logger.events[-1].name == "model.timeout"
     assert logger.events[-1].payload["timeout"] == 1.5
+
+
+def test_post_json_wraps_remote_disconnect_as_runtime_error(monkeypatch):
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        timeout=1.5,
+        logger=logger,
+    )
+
+    def fail_with_remote_disconnect(*_args, **_kwargs):
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_with_remote_disconnect)
+
+    with pytest.raises(RuntimeError, match="Remote end closed connection without response"):
+        client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
+
+    assert logger.events[-1].name == "model.network_error"
+    assert logger.events[-1].payload["reason"] == "Remote end closed connection without response"
 
 
 def test_create_model_client_reads_timeout_from_env(monkeypatch):
