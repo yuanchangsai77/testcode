@@ -133,6 +133,58 @@ def test_patch_applies_unified_diff_and_rejects_bad_context(tmp_path):
     assert rejected.error_code == "patch_context_mismatch"
 
 
+def test_patch_applies_multiple_files_and_rejects_outside_workspace(tmp_path):
+    (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")
+    registry = make_registry()
+    multi = """--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-a
++aa
+--- a/b.txt
++++ b/b.txt
+@@ -1 +1 @@
+-b
++bb
+"""
+    outside = """--- a/../outside.txt
++++ b/../outside.txt
+@@ -1 +1 @@
+-old
++new
+"""
+
+    applied = registry.execute(ToolAction(name="patch", arguments={"diff": multi}), cwd=str(tmp_path))
+    rejected = registry.execute(ToolAction(name="patch", arguments={"diff": outside}), cwd=str(tmp_path))
+
+    assert applied.success is True
+    assert applied.metadata["changed_files"] == ["a.txt", "b.txt"]
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "aa\n"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "bb\n"
+    assert rejected.error_code == "path_outside_workspace"
+
+
+def test_patch_rejects_empty_diff_and_symlink_escape(tmp_path):
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("old\n", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(outside)
+    registry = make_registry()
+    diff = """--- a/link.txt
++++ b/link.txt
+@@ -1 +1 @@
+-old
++new
+"""
+
+    empty = registry.execute(ToolAction(name="patch", arguments={"diff": "not a diff"}), cwd=str(tmp_path))
+    escaped = registry.execute(ToolAction(name="patch", arguments={"diff": diff}), cwd=str(tmp_path))
+
+    assert empty.error_code == "invalid_patch"
+    assert escaped.error_code == "path_outside_workspace"
+    assert outside.read_text(encoding="utf-8") == "old\n"
+
+
 def test_git_read_tools_report_non_git_and_dirty_repo(tmp_path):
     registry = make_registry()
 

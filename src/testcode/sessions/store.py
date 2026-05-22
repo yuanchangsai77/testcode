@@ -44,6 +44,9 @@ class SessionStore:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def load(self, session_id: str) -> StoredSession | None:
+        if not self._valid_session_id(session_id):
+            return None
+
         path = self.base_dir / f"{session_id}.json"
         if not path.exists():
             return None
@@ -119,6 +122,11 @@ class SessionStore:
         if not isinstance(run_ids, list):
             return []
         return [item for item in run_ids if isinstance(item, str) and item]
+
+    def _valid_session_id(self, session_id: str) -> bool:
+        if not session_id or session_id in {".", ".."}:
+            return False
+        return Path(session_id).name == session_id
 
     def _preview(self, text: str, limit: int = 60) -> str:
         single_line = " ".join(text.split())

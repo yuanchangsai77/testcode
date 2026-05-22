@@ -1,4 +1,6 @@
 import http.client
+import io
+import urllib.error
 
 import pytest
 
@@ -50,6 +52,63 @@ def test_post_json_wraps_remote_disconnect_as_runtime_error(monkeypatch):
 
     assert logger.events[-1].name == "model.network_error"
     assert logger.events[-1].payload["reason"] == "Remote end closed connection without response"
+
+
+def test_post_json_wraps_http_and_url_errors(monkeypatch):
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000", logger=logger)
+
+    def fail_with_http_error(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            url="http://127.0.0.1:3000/v1/chat/completions",
+            code=500,
+            msg="server error",
+            hdrs=None,
+            fp=io.BytesIO(b"boom"),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_with_http_error)
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
+    assert logger.events[-1].name == "model.http_error"
+
+    def fail_with_url_error(*_args, **_kwargs):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_with_url_error)
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
+    assert logger.events[-1].name == "model.network_error"
+
+
+def test_post_json_rejects_invalid_json_and_missing_choices(monkeypatch):
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000", logger=logger)
+
+    class FakeResponse:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self.body
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse(b"not-json"))
+    with pytest.raises(RuntimeError, match="not valid JSON"):
+        client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
+    assert logger.events[-1].name == "model.invalid_json"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse(b'{"id":"x"}'))
+    with pytest.raises(RuntimeError, match="missing choices"):
+        client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
+    assert logger.events[-1].name == "model.invalid_shape"
 
 
 def test_create_model_client_reads_timeout_from_env(monkeypatch):

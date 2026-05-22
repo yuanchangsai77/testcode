@@ -79,6 +79,7 @@ class InMemoryLogger:
                         "payload": event.payload,
                     },
                     ensure_ascii=False,
+                    default=repr,
                 )
             )
             handle.write("\n")

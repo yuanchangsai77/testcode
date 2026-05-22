@@ -223,6 +223,54 @@ def test_session_store_loads_legacy_session_without_run_ids(tmp_path):
     assert loaded.run_ids == []
 
 
+def test_session_store_skips_corrupt_records_and_rejects_path_traversal(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    valid = store.create(cwd="/repo", messages=[{"role": "user", "content": "valid"}])
+    store.base_dir.mkdir(parents=True, exist_ok=True)
+    (store.base_dir / "broken.json").write_text("{not json", encoding="utf-8")
+
+    sessions = store.list_sessions()
+
+    assert [item.session_id for item in sessions] == [valid.session_id]
+    assert store.load("../outside") is None
+    assert store.latest() is not None
+
+
+def test_session_store_latest_returns_none_when_empty(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+
+    assert store.list_sessions() == []
+    assert store.latest() is None
+
+
+def test_session_store_normalizes_invalid_messages_and_run_ids(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd="/repo")
+    path = store.base_dir / f"{session.session_id}.json"
+    payload = {
+        "session_id": session.session_id,
+        "cwd": "/repo",
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "status": "active",
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": 42},
+            "bad",
+        ],
+        "run_ids": ["run-1", "", 2],
+    }
+    import json
+
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert loaded.messages == [{"role": "user", "content": "hello"}]
+    assert loaded.run_ids == ["run-1"]
+
+
 def test_chat_persists_and_closes_session(tmp_path, monkeypatch):
     store = SessionStore(base_dir=tmp_path)
     cli = CLI(engine=None, presenter=ConsolePresenter(), logger=None, session_store=store)
