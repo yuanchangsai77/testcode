@@ -75,7 +75,7 @@
 
 - session 持久化层尚未保存 read state，跨 run resume 后仍需要重新读取目标文件。
 - preview diff 目前在 metadata 中返回，CLI 还没有独立的人工确认前 preview 展示。
-- patch 失败诊断已覆盖主要 error_code，但 diff 语法错误还可以继续细分。
+- `patch` 仍偏底层，依赖模型手写 unified diff；后续需要结构化编辑工具或由 runtime 自动生成 diff，降低 `patch_syntax_error` 重试失败率。
 
 原始待办：
 

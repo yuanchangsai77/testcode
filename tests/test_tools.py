@@ -143,6 +143,26 @@ def test_patch_applies_unified_diff_and_rejects_bad_context(tmp_path):
     assert rejected.error_code == "patch_context_mismatch"
 
 
+def test_patch_reports_syntax_error_for_corrupt_diff(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("before\n", encoding="utf-8")
+    registry = make_registry()
+    corrupt = """--- a/file.txt
++++ b/file.txt
+@@ -1,2 +1,3 @@
+ before
++after
+"""
+
+    registry.execute(ToolAction(name="read_file", arguments={"path": "file.txt"}), cwd=str(tmp_path))
+    result = registry.execute(ToolAction(name="patch", arguments={"diff": corrupt}), cwd=str(tmp_path))
+
+    assert result.error_code == "patch_syntax_error"
+    assert "patch syntax error" in result.output
+    assert "corrupt patch" in result.output
+    assert target.read_text(encoding="utf-8") == "before\n"
+
+
 def test_patch_requires_read_for_existing_file_and_rejects_stale_read(tmp_path):
     target = tmp_path / "file.txt"
     target.write_text("before\n", encoding="utf-8")

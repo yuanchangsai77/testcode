@@ -62,11 +62,12 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
 
     check = run_command(["git", "apply", "--check", "-"], root, input_text=diff, shell=False)
     if not check.success:
+        error_code = classify_git_apply_failure(check.output)
         return ToolResult(
             name=action.name,
             success=False,
-            output=check.output,
-            error_code="patch_context_mismatch",
+            output=format_patch_failure(check.output, error_code),
+            error_code=error_code,
             metadata={"changed_files": changed_files, "preview": diff, "line_stats": line_stats(diff)},
         )
 
@@ -134,6 +135,19 @@ def validate_file_was_read(tool_name: str, path: Path, state: dict) -> ToolResul
         )
 
     return None
+
+
+def classify_git_apply_failure(output: str) -> str:
+    lowered = output.lower()
+    if "corrupt patch" in lowered or "unrecognized input" in lowered:
+        return "patch_syntax_error"
+    return "patch_context_mismatch"
+
+
+def format_patch_failure(output: str, error_code: str) -> str:
+    if error_code == "patch_syntax_error":
+        return "patch syntax error; generate a valid unified diff and retry.\n" + output
+    return output
 
 
 def line_stats(diff: str) -> dict[str, int]:
