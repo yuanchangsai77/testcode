@@ -329,3 +329,23 @@ def test_parse_reply_treats_invalid_embedded_json_as_final_message():
     assert reply.actions == []
     assert "工具说明如下" in reply.message
     assert logger.events[-1].name == "model.invalid_reply_json"
+
+
+def test_parse_reply_retries_invalid_json_shaped_response():
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000", logger=logger)
+    content = (
+        '{"message":"starting","done":false,'
+        '"actions":[{"name":"find_files","parameter name="pattern">src/**/*.py"}]}'
+    )
+
+    reply = client._parse_reply(content)
+
+    assert reply.done is False
+    assert reply.actions == []
+    assert reply.message == (
+        "Model response was invalid JSON. Return strict JSON with "
+        "message, done, and actions fields only."
+    )
+    assert reply.metadata == {"invalid_reply_json": True}
+    assert logger.events[-1].name == "model.invalid_reply_json"

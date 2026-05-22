@@ -390,6 +390,15 @@ class OpenAICompatibleModelClient:
                         "model.invalid_reply_json",
                         {"content": content, "candidate": candidate},
                     )
+                if self._looks_like_json_reply(content):
+                    return ModelReply(
+                        message=(
+                            "Model response was invalid JSON. Return strict JSON with "
+                            "message, done, and actions fields only."
+                        ),
+                        done=False,
+                        metadata={"invalid_reply_json": True},
+                    )
                 cleaned = self._clean_content(content)
                 return ModelReply(
                     message=cleaned.message or content,
@@ -495,6 +504,15 @@ class OpenAICompatibleModelClient:
         if cleaned.had_protocol_tags:
             metadata["cleaned_protocol_tags"] = True
         return metadata
+
+    def _looks_like_json_reply(self, content: str) -> bool:
+        without_think = re.sub(
+            r"^\s*(?:<think\b[^>]*>.*?</think>\s*)+",
+            "",
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        return without_think.lstrip().startswith("{")
 
     def _extract_first_json_object(self, content: str) -> str | None:
         start = content.find("{")
