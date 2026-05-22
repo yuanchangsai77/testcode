@@ -2,6 +2,14 @@
 
 本文档用于指挥 `testcode` 从当前 CLI agent scaffold 演进为一个可扩展的智能脚手架：先具备稳定的多轮对话和本地工具执行能力，再接入标准 Skill、外部 MCP，最后扩展到 team/subagent 和 A2A。
 
+## 版本快照
+
+本文档是活文档，可以持续调整优先级和实现顺序。已经形成阶段性能力边界时，在 `docs/versions/` 下新建版本快照文件并固化下来，例如：
+
+- `docs/versions/v0.1.md`
+
+版本快照默认不回改。`v0.1` 记录当时已有功能；后续 `v0.2`、`v0.3` 等文件记录相对前一版本新增、优化或删除的内容。
+
 ## 目标边界
 
 当前优先级不是先做完整产品外壳，而是把核心 agent runtime 做稳：
@@ -18,7 +26,8 @@
 - CLI 单轮和多轮对话。
 - session 保存、列表、resume、latest。
 - OpenAI-compatible 模型客户端和 stub 模型客户端。
-- JSON content 格式的模型 action 解析。
+- 原生 `message.tool_calls` 解析。
+- JSON content 格式的模型 action fallback。
 - 内置工具 registry、结构化 `ToolDefinition.input_schema`、`risk_level`。
 - 文件读取、目录列表、文件信息、文本搜索、文件查找。
 - shell 执行、测试运行、unified diff patch。
@@ -31,7 +40,7 @@
 
 仍存在的关键缺口：
 
-- 模型协议仍主要依赖自定义 JSON 文本，缺少原生 tool calling。
+- 模型协议已有原生 tool calling，但协议提示、响应清洗和错误恢复还需要继续打磨。
 - 修改前读取、hash 防覆盖、diff preview、测试反馈闭环还不完整。
 - 上下文收集仍偏被动，缺少项目探测、AGENTS 规则、git/test 自动摘要。
 - 没有 Skill 加载机制。
@@ -43,16 +52,13 @@
 
 目标：让 `testcode` 能在多轮对话里稳定完成小型真实代码任务。
 
-### P0.1 原生 Tool Calling
+### P0.1 模型协议打磨
 
-- 定义 `ModelClient` protocol，统一 stub 和 OpenAI-compatible provider。
-- 为 provider 初始化增加配置对象，避免 env 读取散落在代码中。
-- 将内部 `ToolDefinition` 转换为 OpenAI-compatible `tools` schema。
-- 请求 payload 支持 `tools` 和 tool choice 默认策略。
-- 解析 `message.tool_calls` 为内部 `ToolAction`。
-- 保留当前 JSON content 解析作为 fallback。
+- 继续保留原生 `message.tool_calls` 和 JSON content fallback。
+- 清理模型输出中的协议噪声，避免 `<think>` 等内容进入用户可见的中间消息。
 - 强化响应校验：缺 `choices`、缺 `message`、空 content、非法 tool name、非法 arguments 都返回可读错误。
-- 增加测试：JSON fallback、原生 tool_calls、非法响应、混合异常。
+- 对模型网络错误、代理断连、非法响应形状提供稳定错误信息。
+- 增加测试：JSON fallback、原生 tool_calls、非法响应、混合异常、代理断连。
 
 ### P0.2 可靠编辑工作流
 
@@ -80,6 +86,14 @@
 - 对 symlink 跳出 workspace 的写入补测试。
 - 敏感文件规则：`.env`、私钥、`.pem`、token 类文件默认不直接返回内容。
 - 日志中对 token-like value 和敏感 env key 脱敏。
+
+### P0.5 工具输出质量
+
+- 清理 `git_status` 输出，避免把底层 `exit_code/stdout` 嵌入用户可见摘要。
+- 明确区分工具的 user-facing output 和结构化 metadata。
+- 为 `git_status`、`git_diff`、`git_show` 补稳定 error_code 和 metadata。
+- run summary 展示关键工具结果时做简洁摘要。
+- 增加 clean repo、dirty repo、non-git repo 的 git 工具测试。
 
 ## P1：主动上下文收集
 
@@ -277,15 +291,16 @@
 
 ## 近期推荐执行顺序
 
-1. P0.1 原生 tool calling。
-2. P0.2 可靠编辑工作流。
-3. P0.3 验证闭环。
-4. P1.1-P1.3 主动上下文收集。
-5. P2 Skill 系统。
-6. P3 MCP 接入。
-7. P4 本地 subagent/team。
-8. P5 A2A 远程 agent。
-9. P6/P7 体验、配置、日志、质量门禁持续补齐。
+1. P0.5 工具输出质量，先让模型看到干净、稳定的工作区状态。
+2. P1.1-P1.3 主动上下文收集，建立项目、Git、Workspace 摘要。
+3. P1.2 项目规则加载，支持 `AGENTS.md` 和按需规则文件。
+4. P1.4 显式上下文，支持用户指定文件或目录进入本轮上下文。
+5. P2 Skill 系统，先做最小发现、触发和 `SKILL.md` 加载。
+6. P0.2-P0.3 可靠编辑和验证闭环。
+7. P3 MCP 接入。
+8. P4 本地 subagent/team。
+9. P5 A2A 远程 agent。
+10. P6/P7 体验、配置、日志、质量门禁持续补齐。
 
 ## 第一阶段验收标准
 
