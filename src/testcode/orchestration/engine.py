@@ -17,7 +17,7 @@ class ExecutionEngine:
         self.guardrails = guardrails
         self.logger = logger
         self.approval_callback = approval_callback
-        self.max_turns = 8
+        self.max_turns = 100
 
     def execute(self, request: UserRequest) -> ExecutionSummary:
         session = SessionContext(request=request, available_tools=self.tools.definitions())
