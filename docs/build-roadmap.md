@@ -94,10 +94,11 @@
 - 已完成 `git_status` 输出清理：用户可见输出不再嵌入底层 `exit_code/stdout/stderr` 包装。
 - 已完成 `git_status`、`git_diff`、`git_show` 的稳定 error_code 和结构化 metadata 补齐。
 - 已补充 git 工具测试，覆盖 clean repo、dirty repo、non-git repo，以及无效 revision。
+- 已完成 run summary 关键工具结果简洁摘要，优先使用结构化 metadata，避免直接展示大段 stdout/stderr/diff。
 
 剩余：
 
-- run summary 展示关键工具结果时做简洁摘要。
+- 暂无。
 
 原始待办：
 
