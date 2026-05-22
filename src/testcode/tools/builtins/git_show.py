@@ -4,7 +4,8 @@ from pathlib import Path
 
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
-from ..shared import retarget, run_command, schema
+from ..shared import run_command, schema
+from .git_common import ensure_git_repository, git_failure
 
 
 def tool() -> SimpleTool:
@@ -18,5 +19,25 @@ def tool() -> SimpleTool:
 
 
 def run(action: ToolAction, context: ToolContext) -> ToolResult:
+    cwd = Path(context.cwd)
+    repository_error = ensure_git_repository(cwd, action.name)
+    if repository_error is not None:
+        return repository_error
+
     revision = str(action.arguments["revision"])
-    return retarget(run_command(["git", "show", "--stat", "--patch", revision], Path(context.cwd), shell=False), action.name)
+    result = run_command(["git", "show", "--stat", "--patch", revision], cwd, shell=False)
+    if not result.success:
+        return git_failure(action.name, result, "revision_not_found", "git show failed")
+
+    output = result.metadata.get("stdout", "")
+    return ToolResult(
+        name=action.name,
+        success=True,
+        output=output or "no output",
+        metadata={
+            "exit_code": result.metadata.get("exit_code"),
+            "revision": revision,
+            "stdout": output,
+            "stderr": result.metadata.get("stderr", ""),
+        },
+    )

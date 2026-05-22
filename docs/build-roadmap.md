@@ -89,6 +89,18 @@
 
 ### P0.5 工具输出质量
 
+进展：
+
+- 已完成 `git_status` 输出清理：用户可见输出不再嵌入底层 `exit_code/stdout/stderr` 包装。
+- 已完成 `git_status`、`git_diff`、`git_show` 的稳定 error_code 和结构化 metadata 补齐。
+- 已补充 git 工具测试，覆盖 clean repo、dirty repo、non-git repo，以及无效 revision。
+
+剩余：
+
+- run summary 展示关键工具结果时做简洁摘要。
+
+原始待办：
+
 - 清理 `git_status` 输出，避免把底层 `exit_code/stdout` 嵌入用户可见摘要。
 - 明确区分工具的 user-facing output 和结构化 metadata。
 - 为 `git_status`、`git_diff`、`git_show` 补稳定 error_code 和 metadata。

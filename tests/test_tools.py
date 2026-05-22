@@ -137,7 +137,12 @@ def test_git_read_tools_report_non_git_and_dirty_repo(tmp_path):
     registry = make_registry()
 
     non_git = registry.execute(ToolAction(name="git_status"), cwd=str(tmp_path))
+    non_git_diff = registry.execute(ToolAction(name="git_diff"), cwd=str(tmp_path))
+    non_git_show = registry.execute(ToolAction(name="git_show", arguments={"revision": "HEAD"}), cwd=str(tmp_path))
     assert non_git.error_code == "not_git_repository"
+    assert non_git.output == "not a git repository"
+    assert non_git_diff.error_code == "not_git_repository"
+    assert non_git_show.error_code == "not_git_repository"
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "tracked.txt").write_text("one\n", encoding="utf-8")
@@ -148,12 +153,34 @@ def test_git_read_tools_report_non_git_and_dirty_repo(tmp_path):
         check=True,
         capture_output=True,
     )
+
+    clean = registry.execute(ToolAction(name="git_status"), cwd=str(tmp_path))
+    clean_diff = registry.execute(ToolAction(name="git_diff"), cwd=str(tmp_path))
+
+    assert clean.success is True
+    assert clean.metadata["clean"] is True
+    assert clean.metadata["changed_files"] == []
+    assert "status: clean" in clean.output
+    assert "exit_code:" not in clean.output
+    assert clean_diff.success is True
+    assert clean_diff.output == "no diff"
+    assert clean_diff.metadata["has_changes"] is False
+
     (tmp_path / "tracked.txt").write_text("two\n", encoding="utf-8")
 
     status = registry.execute(ToolAction(name="git_status"), cwd=str(tmp_path))
     diff = registry.execute(ToolAction(name="git_diff"), cwd=str(tmp_path))
+    show = registry.execute(ToolAction(name="git_show", arguments={"revision": "HEAD"}), cwd=str(tmp_path))
+    missing = registry.execute(ToolAction(name="git_show", arguments={"revision": "missing"}), cwd=str(tmp_path))
 
     assert status.success is True
+    assert status.metadata["clean"] is False
+    assert status.metadata["changed_files"] == [{"status": "M", "path": "tracked.txt"}]
     assert "M tracked.txt" in status.output
+    assert "exit_code:" not in status.output
     assert "-one" in diff.output
     assert "+two" in diff.output
+    assert diff.metadata["has_changes"] is True
+    assert show.success is True
+    assert show.metadata["revision"] == "HEAD"
+    assert missing.error_code == "revision_not_found"
