@@ -83,7 +83,12 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
         request=UserRequest(
             prompt="inspect tools",
             cwd="/repo",
-            metadata={"conversation": [{"role": "user", "content": "previous turn"}]},
+            metadata={
+                "conversation": [
+                    {"role": "user", "content": "previous turn"},
+                    {"role": "assistant", "content": "previous answer"},
+                ]
+            },
         ),
         available_tools=[
             ToolDefinition(
@@ -104,14 +109,17 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
 
     messages = client._build_messages(session)
     system = str(messages[0]["content"])
-    user = str(messages[1]["content"])
+    first_history = messages[1]
+    second_history = messages[2]
+    user = str(messages[3]["content"])
 
     assert "Available tools:" in system
     assert "- patch: Apply a unified diff." in system
     assert "- read_file: Read a workspace file." in system
     assert "argument path: File path." in system
+    assert first_history == {"role": "user", "content": "previous turn"}
+    assert second_history == {"role": "assistant", "content": "previous answer"}
     assert "User request: inspect tools" in user
-    assert "Conversation history:" in user
     assert "Session history:" in user
     assert "Available tools:" not in user
     assert "- read_file: Read a workspace file." not in user

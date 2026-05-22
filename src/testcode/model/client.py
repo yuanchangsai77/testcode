@@ -145,22 +145,33 @@ class OpenAICompatibleModelClient:
             f"User request: {session.request.prompt}",
         ]
 
-        if conversation:
-            user_lines.append("Conversation history:")
-            for item in conversation:
-                if isinstance(item, dict):
-                    role = str(item.get("role", "unknown"))
-                    content = str(item.get("content", ""))
-                    user_lines.append(f"- {role}: {content}")
-
         if session.history:
             user_lines.append("Session history:")
             user_lines.extend(f"- {item}" for item in session.history)
 
         return [
             {"role": "system", "content": "\n".join(system_lines)},
+            *self._format_conversation_messages(conversation),
             {"role": "user", "content": "\n".join(user_lines)},
         ]
+
+    def _format_conversation_messages(self, conversation: object) -> list[dict[str, object]]:
+        if not isinstance(conversation, list):
+            return []
+
+        messages: list[dict[str, object]] = []
+        for item in conversation:
+            if not isinstance(item, dict):
+                continue
+
+            role = item.get("role")
+            content = item.get("content")
+            if role not in {"user", "assistant"} or not isinstance(content, str) or not content:
+                continue
+
+            messages.append({"role": role, "content": content})
+
+        return messages
 
     def _format_tool_definitions(self, session: SessionContext) -> list[str]:
         lines: list[str] = []
