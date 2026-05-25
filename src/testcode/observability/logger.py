@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..safety.redaction import redact, redact_text
 from .events import Event
 
 
@@ -15,7 +16,7 @@ class InMemoryLogger:
         self.last_run_id: str | None = None
 
     def record(self, name: str, payload: dict) -> None:
-        event = Event(name=name, payload=payload)
+        event = Event(name=name, payload=redact(payload))
         self.events.append(event)
         self._append_event(event)
 
@@ -34,9 +35,9 @@ class InMemoryLogger:
             "run.start",
             {
                 "run_id": safe_timestamp,
-                "prompt": request.prompt,
+                "prompt": redact_text(request.prompt),
                 "cwd": request.cwd,
-                "metadata": request.metadata,
+                "metadata": redact(request.metadata),
             },
         )
 
@@ -48,14 +49,14 @@ class InMemoryLogger:
             "run.finish",
             {
                 "run_id": self.run_id,
-                "final_message": summary.final_message,
+                "final_message": redact_text(summary.final_message),
                 "tool_results": [
                     {
                         "name": result.name,
                         "success": result.success,
-                        "output": result.output,
+                        "output": redact_text(result.output),
                         "error_code": result.error_code,
-                        "metadata": result.metadata,
+                        "metadata": redact(result.metadata),
                     }
                     for result in summary.tool_results
                 ],
@@ -92,7 +93,7 @@ class InMemoryLogger:
         lines = [
             "Overview",
             f"- run_id: {self.run_id}",
-            f"- prompt: {request.prompt}",
+            f"- prompt: {redact_text(request.prompt)}",
             f"- cwd: {request.cwd}",
             f"- total events: {len(self.events)}",
             f"- turns: {len(turns)}",
@@ -145,7 +146,7 @@ class InMemoryLogger:
             [
                 "",
                 "Final",
-                f"- message: {summary.final_message}",
+                f"- message: {redact_text(summary.final_message)}",
             ]
         )
 
@@ -153,7 +154,7 @@ class InMemoryLogger:
             lines.append("- tool results:")
             for result in summary.tool_results:
                 lines.append(f"  - {result.name}: {'ok' if result.success else 'blocked'}")
-                for line in str(result.output).splitlines():
+                for line in redact_text(str(result.output)).splitlines():
                     lines.append(f"    {line}")
 
         details_path = self.run_dir / "details.log"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 
 from ...types import ToolAction, ToolResult
+from ...safety.redaction import is_sensitive_path
 from ..base import SimpleTool, ToolContext
 from ..shared import looks_binary, path_error, positive_int, resolve_workspace_path, retarget, schema
 from ..summary import read_file_summary
@@ -36,6 +37,14 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
         return retarget(resolved, action.name)
     if error := path_error(action, resolved, "file"):
         return error
+    if is_sensitive_path(resolved.path):
+        return ToolResult(
+            name=action.name,
+            success=False,
+            output=f"sensitive file refused: {resolved.path}",
+            error_code="sensitive_file",
+            metadata={"path": str(resolved.path)},
+        )
 
     max_bytes = positive_int(action.arguments.get("max_bytes"), MAX_READ_BYTES)
     data = resolved.path.read_bytes()
