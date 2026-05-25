@@ -74,7 +74,6 @@
 剩余：
 
 - session 持久化层尚未保存 read state，跨 run resume 后仍需要重新读取目标文件。
-- preview diff 目前在 metadata 中返回，CLI 还没有独立的人工确认前 preview 展示。
 - `patch` 仍偏底层，依赖模型手写 unified diff；后续需要结构化编辑工具或由 runtime 自动生成 diff，降低 `patch_syntax_error` 重试失败率。
 
 原始待办：
@@ -90,19 +89,31 @@
 
 ### P0.3 验证闭环
 
-- 修改后由模型建议或调用 `run_tests`。
-- 测试结果写回 session history，失败信息允许模型继续修复。
-- 限制 fix loop 最大轮数，避免无限修复。
-- run summary 展示修改文件和测试结果。
-- 增加 fake model e2e：第一次修改导致测试失败，第二轮读取失败输出后修复成功。
+进展：
+
+- 已完成 `run_tests` 输出测试通过、失败或超时状态，并写回 session history。
+- 已完成失败测试输出进入模型下一轮上下文，允许模型继续修复。
+- 已完成连续失败测试轮次上限，避免无限 fix loop。
+- 已完成 run summary 展示测试状态、退出码、输出行数和耗时。
+- 已增加 fake model e2e：第一次测试失败，第二轮读取失败输出后继续修复成功。
+
+剩余：
+
+- 暂无。
 
 ### P0.4 安全补齐
 
-- 非交互模式下默认拒绝需要确认的操作，并补测试。
-- 支持本次会话记住同类 approval。
-- 对 symlink 跳出 workspace 的写入补测试。
-- 敏感文件规则：`.env`、私钥、`.pem`、token 类文件默认不直接返回内容。
-- 日志中对 token-like value 和敏感 env key 脱敏。
+进展：
+
+- 已完成非交互模式下默认拒绝需要确认的操作，并有测试覆盖。
+- 已完成本次 `execute()` 内记住同一 tool/risk 的 approval。
+- 已通过 workspace path resolve 防止 symlink 跳出 workspace。
+- 已完成敏感文件规则：`.env`、私钥、`.pem`、token 类文件默认不直接返回内容。
+- 已完成日志中对 token-like value 和敏感 env key 脱敏。
+
+剩余：
+
+- 可继续扩充敏感文件模式和 symlink 写入专项 fixture 覆盖。
 
 ### P0.5 工具输出质量
 
