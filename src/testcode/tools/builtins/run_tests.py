@@ -37,4 +37,12 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
     result = run_shell(action, context)
     result.name = action.name
     result.metadata["duration_seconds"] = round(time.monotonic() - started, 3)
+    result.metadata["command"] = action.arguments["command"]
+    result.metadata["passed"] = result.success
+    if result.error_code == "timeout":
+        result.output = "test command timed out\n" + result.output
+    elif result.success:
+        result.output = "tests passed\n" + result.output
+    else:
+        result.output = "tests failed\n" + result.output
     return result

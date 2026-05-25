@@ -24,6 +24,8 @@ class ExecutionEngine:
             self.tools.reset_state()
         session = SessionContext(request=request, available_tools=self.tools.definitions())
         consecutive_non_retryable_turns = 0
+        consecutive_failed_test_turns = 0
+        approved_risk_groups: set[tuple[str, str]] = set()
         completed_actions: dict[str, ToolResult] = {}
 
         for turn in range(1, self.max_turns + 1):
@@ -54,12 +56,17 @@ class ExecutionEngine:
                 definition = self.tools.definition_for(action.name)
                 decision = self.guardrails.check(action, definition)
                 if decision.requires_confirmation:
-                    if self._approved(action, decision.reason):
+                    approval_key = (action.name, decision.risk_level)
+                    if self._approval_remembered(approval_key, approved_risk_groups) or self._approved(action, decision.reason):
+                        if decision.risk_level != "destructive":
+                            approved_risk_groups.add(approval_key)
                         result = self.tools.execute(action, cwd=request.cwd)
                         self._attach_action_metadata(result, action)
                         session.add_tool_result(result)
                         turn_results.append(result)
                         if result.success:
+                            if decision.risk_level == "write":
+                                completed_actions.clear()
                             completed_actions[action_key] = result
                         continue
 
@@ -91,10 +98,22 @@ class ExecutionEngine:
                 session.add_tool_result(result)
                 turn_results.append(result)
                 if result.success:
+                    if decision.risk_level == "write":
+                        completed_actions.clear()
                     completed_actions[action_key] = result
 
             if reply.done:
                 return ExecutionSummary(final_message=reply.message, tool_results=session.tool_results)
+
+            if self._has_failed_test_result(turn_results):
+                consecutive_failed_test_turns += 1
+                if consecutive_failed_test_turns >= 3:
+                    return ExecutionSummary(
+                        final_message="Stopping after 3 consecutive failing test runs. Review the latest test output before retrying.",
+                        tool_results=session.tool_results,
+                    )
+            elif turn_results:
+                consecutive_failed_test_turns = 0
 
             if turn_results and self._all_non_retryable(turn_results):
                 consecutive_non_retryable_turns += 1
@@ -116,6 +135,12 @@ class ExecutionEngine:
             not result.success and result.error_code in self.non_retryable_error_codes
             for result in results
         )
+
+    def _has_failed_test_result(self, results: list[ToolResult]) -> bool:
+        return any(result.name == "run_tests" and not result.success for result in results)
+
+    def _approval_remembered(self, approval_key: tuple[str, str], approved_risk_groups: set[tuple[str, str]]) -> bool:
+        return approval_key[1] != "destructive" and approval_key in approved_risk_groups
 
     def _approved(self, action, reason: str) -> bool:
         if self.approval_callback is None:

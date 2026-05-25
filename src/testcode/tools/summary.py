@@ -60,7 +60,10 @@ def process_result_summary(result: ToolResult) -> str:
 
 
 def run_tests_summary(result: ToolResult) -> str:
-    return process_summary(result.metadata, duration=result.metadata.get("duration_seconds"))
+    status = "passed" if result.metadata.get("passed") else "failed"
+    if result.error_code == "timeout":
+        status = "timeout"
+    return f"tests {status}; {process_summary(result.metadata, duration=result.metadata.get('duration_seconds'))}"
 
 
 def read_file_summary(result: ToolResult) -> str:

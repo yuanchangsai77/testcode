@@ -51,6 +51,9 @@ class ConsolePresenter:
         if action.arguments:
             arguments = json.dumps(action.arguments, ensure_ascii=False, sort_keys=True)
             print(f"[testcode] arguments: {self._summarize_tool_output(arguments)}")
+        if action.name == "patch" and isinstance(action.arguments.get("diff"), str):
+            print("[testcode] patch preview:")
+            print(action.arguments["diff"])
         answer = input("Allow this tool call? [y/N] ").strip().lower()
         return answer in {"y", "yes"}
 
