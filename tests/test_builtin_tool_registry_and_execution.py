@@ -73,6 +73,19 @@ def test_file_tools_handle_empty_directory_large_and_binary_files(tmp_path):
     assert refused.error_code == "binary_file"
 
 
+def test_read_file_refuses_sensitive_files(tmp_path):
+    (tmp_path / ".env").write_text("TOKEN=secret-value\n", encoding="utf-8")
+    (tmp_path / "id_rsa.pem").write_text("private key\n", encoding="utf-8")
+    registry = make_registry()
+
+    env_result = registry.execute(ToolAction(name="read_file", arguments={"path": ".env"}), cwd=str(tmp_path))
+    key_result = registry.execute(ToolAction(name="read_file", arguments={"path": "id_rsa.pem"}), cwd=str(tmp_path))
+
+    assert env_result.error_code == "sensitive_file"
+    assert key_result.error_code == "sensitive_file"
+    assert "secret-value" not in env_result.output
+
+
 def test_search_tools_return_matches_no_matches_and_truncation(tmp_path):
     (tmp_path / "a.py").write_text("needle\nneedle\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("hay", encoding="utf-8")
@@ -110,6 +123,22 @@ def test_shell_exec_reports_success_failure_and_timeout(tmp_path):
     assert registry.summarize_result(failure) == "exit 7"
     assert timeout.error_code == "timeout"
     assert registry.summarize_result(timeout) == "timeout after 0.01s"
+
+
+def test_run_tests_reports_test_status(tmp_path):
+    registry = make_registry()
+
+    passed = registry.execute(ToolAction(name="run_tests", arguments={"command": "printf ok"}), cwd=str(tmp_path))
+    failed = registry.execute(ToolAction(name="run_tests", arguments={"command": "exit 2"}), cwd=str(tmp_path))
+
+    assert passed.success is True
+    assert passed.metadata["passed"] is True
+    assert passed.output.startswith("tests passed")
+    assert registry.summarize_result(passed).startswith("tests passed; exit 0")
+    assert failed.success is False
+    assert failed.metadata["passed"] is False
+    assert failed.output.startswith("tests failed")
+    assert registry.summarize_result(failed).startswith("tests failed; exit 2")
 
 
 def test_patch_applies_unified_diff_and_rejects_bad_context(tmp_path):

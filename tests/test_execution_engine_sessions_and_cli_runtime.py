@@ -166,6 +166,143 @@ def test_engine_allows_patch_in_auto_mode_without_prompting(tmp_path):
     assert (tmp_path / "auto.py").read_text(encoding="utf-8") == "print('auto')\n"
 
 
+def test_engine_remembers_approved_risk_group_within_execute(tmp_path):
+    class ShellModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="first",
+                    actions=[ToolAction(name="shell_exec", arguments={"command": "printf one"})],
+                    done=False,
+                )
+            return ModelReply(
+                message="second",
+                actions=[ToolAction(name="shell_exec", arguments={"command": "printf two"})],
+                done=True,
+            )
+
+    approvals = []
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=ShellModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda action, _reason: approvals.append(action.arguments["command"]) or True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="run commands", cwd=str(tmp_path)))
+
+    assert approvals == ["printf one"]
+    assert len(summary.tool_results) == 2
+    assert all(result.success for result in summary.tool_results)
+
+
+def test_engine_does_not_remember_destructive_approval(tmp_path):
+    class DestructiveShellModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="first destructive",
+                    actions=[ToolAction(name="shell_exec", arguments={"command": "git reset --hard"})],
+                    done=False,
+                )
+            return ModelReply(
+                message="second destructive",
+                actions=[ToolAction(name="shell_exec", arguments={"command": "git clean -fd"})],
+                done=True,
+            )
+
+    approvals = []
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=DestructiveShellModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda action, _reason: approvals.append(action.arguments["command"]) or True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="run destructive commands", cwd=str(tmp_path)))
+
+    assert approvals == ["git reset --hard", "git clean -fd"]
+    assert len(summary.tool_results) == 2
+
+
+def test_engine_allows_model_to_fix_after_failed_tests(tmp_path):
+    class TestFixModel:
+        calls = 0
+
+        def respond(self, session):
+            self.calls += 1
+            history = "\n".join(session.history)
+            if "tests failed" not in history:
+                return ModelReply(
+                    message="run tests",
+                    actions=[ToolAction(name="run_tests", arguments={"command": "exit 1"})],
+                    done=False,
+                )
+            return ModelReply(
+                message="fixed after seeing test output",
+                actions=[
+                    ToolAction(
+                        name="patch",
+                        arguments={
+                            "diff": "--- /dev/null\n+++ b/fixed.py\n@@ -0,0 +1 @@\n+print('fixed')\n"
+                        },
+                    )
+                ],
+                done=True,
+            )
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=TestFixModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+        approval_callback=lambda _action, _reason: True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="fix tests", cwd=str(tmp_path)))
+
+    assert summary.final_message == "fixed after seeing test output"
+    assert summary.tool_results[0].name == "run_tests"
+    assert summary.tool_results[0].error_code == "nonzero_exit"
+    assert summary.tool_results[1].success is True
+    assert (tmp_path / "fixed.py").exists()
+
+
+def test_engine_stops_after_repeated_failed_test_runs(tmp_path):
+    class FailingTestsModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="try tests",
+                actions=[ToolAction(name="run_tests", arguments={"command": "exit 1"})],
+                done=False,
+            )
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=FailingTestsModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+        approval_callback=lambda _action, _reason: True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="test loop", cwd=str(tmp_path)))
+
+    assert "Stopping after 3 consecutive failing test runs" in summary.final_message
+    assert [result.name for result in summary.tool_results] == ["run_tests", "run_tests", "run_tests"]
+
+
 def test_engine_keeps_read_state_within_single_execute(tmp_path):
     (tmp_path / "target.txt").write_text("before\n", encoding="utf-8")
 
