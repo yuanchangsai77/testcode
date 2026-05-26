@@ -535,6 +535,50 @@ def test_engine_stops_repeated_duplicate_tool_actions(tmp_path):
     assert len(logged_results) == len(summary.tool_results)
 
 
+def test_engine_recovers_read_duplicate_loop_for_file_change_request(tmp_path):
+    class InspectLoopThenPatchModel:
+        calls = 0
+
+        def respond(self, session):
+            self.calls += 1
+            if any("progress_required" in item for item in session.history):
+                return ModelReply(
+                    message="created standard metadata",
+                    actions=[
+                        ToolAction(
+                            name="patch",
+                            arguments={
+                                "diff": "--- /dev/null\n+++ b/pyproject.toml\n@@ -0,0 +1,2 @@\n+[project]\n+name = \"demo\"\n"
+                            },
+                        )
+                    ],
+                    done=True,
+                )
+            return ModelReply(
+                message="inspect project",
+                actions=[ToolAction(name="list_dir", arguments={"path": "."})],
+                done=False,
+            )
+
+    logger = InMemoryLogger()
+    model = InspectLoopThenPatchModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine.execute(UserRequest(prompt="升级这个项目，生成标准项目文件夹", cwd=str(tmp_path)))
+
+    assert model.calls == 6
+    assert summary.final_message == "created standard metadata"
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == '[project]\nname = "demo"\n'
+    assert any(result.error_code == "progress_required" for result in summary.tool_results)
+    assert summary.tool_results[-1].name == "patch"
+    assert summary.tool_results[-1].success is True
+
+
 def test_engine_skips_duplicate_non_retryable_failures(tmp_path):
     class MissingPathModel:
         calls = 0

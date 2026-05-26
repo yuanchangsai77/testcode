@@ -43,6 +43,7 @@ class ExecutionEngine:
         approved_risk_groups: set[tuple[str, str]] = set()
         completed_actions: dict[str, ToolResult] = {}
         duplicate_counts: dict[str, int] = {}
+        progress_recovery_sent = False
 
         for turn in range(1, self.max_turns + 1):
             reply = self.model.respond(session)
@@ -135,6 +136,17 @@ class ExecutionEngine:
             elif turn_results:
                 consecutive_failed_test_turns = 0
 
+            if (
+                not progress_recovery_sent
+                and self._should_send_progress_recovery(request.prompt, turn_results)
+            ):
+                progress_result = self._progress_recovery_result(turn_results)
+                self._record_synthetic_tool_result(progress_result)
+                session.add_tool_result(progress_result)
+                progress_recovery_sent = True
+                consecutive_non_retryable_turns = 0
+                continue
+
             if turn_results and self._all_non_retryable(turn_results):
                 consecutive_non_retryable_turns += 1
                 if consecutive_non_retryable_turns >= 2:
@@ -187,6 +199,52 @@ class ExecutionEngine:
 
     def _has_failed_test_result(self, results: list[ToolResult]) -> bool:
         return any(result.name == "run_tests" and not result.success for result in results)
+
+    def _should_send_progress_recovery(self, prompt: str, results: list[ToolResult]) -> bool:
+        if not self._request_implies_file_changes(prompt):
+            return False
+        return any(
+            result.error_code == "duplicate_tool_call" and result.name in self._read_context_tools()
+            for result in results
+        )
+
+    def _request_implies_file_changes(self, prompt: str) -> bool:
+        lowered = prompt.lower()
+        change_words = (
+            "add",
+            "build",
+            "change",
+            "create",
+            "edit",
+            "fix",
+            "generate",
+            "implement",
+            "modify",
+            "patch",
+            "scaffold",
+            "update",
+            "write",
+            "修改",
+            "创建",
+            "生成",
+            "实现",
+            "新增",
+            "修复",
+            "升级",
+        )
+        return any(word in lowered for word in change_words)
+
+    def _read_context_tools(self) -> set[str]:
+        return {
+            "file_info",
+            "find_files",
+            "git_diff",
+            "git_show",
+            "git_status",
+            "list_dir",
+            "read_file",
+            "search_text",
+        }
 
     def _approval_remembered(self, approval_key: tuple[str, str], approved_risk_groups: set[tuple[str, str]]) -> bool:
         return approval_key[1] != "destructive" and approval_key in approved_risk_groups
@@ -296,6 +354,24 @@ class ExecutionEngine:
                 "action_arguments": dict(action.arguments),
                 "previous_output": previous.output,
             },
+        )
+
+    def _progress_recovery_result(self, results: list[ToolResult]) -> ToolResult:
+        repeated = [
+            result.metadata.get("action_arguments", {"tool": result.name})
+            for result in results
+            if result.error_code == "duplicate_tool_call"
+        ]
+        return ToolResult(
+            name="progress_guard",
+            success=False,
+            output=(
+                "The last read-only tool call repeated context that is already available. "
+                "Use the previous result in session history. If the user requested file changes, "
+                "stop inspecting and make the next action a patch or a final answer explaining why no change is needed."
+            ),
+            error_code="progress_required",
+            metadata={"repeated_actions": repeated},
         )
 
     def _non_retryable_failure_message(self, results: list[ToolResult]) -> str:
