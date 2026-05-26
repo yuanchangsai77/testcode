@@ -89,19 +89,50 @@ def test_read_file_refuses_sensitive_files(tmp_path):
 def test_search_tools_return_matches_no_matches_and_truncation(tmp_path):
     (tmp_path / "a.py").write_text("needle\nneedle\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("hay", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "c.py").write_text("needle\n", encoding="utf-8")
     registry = make_registry()
 
     files = registry.execute(ToolAction(name="find_files", arguments={"pattern": "*.py"}), cwd=str(tmp_path))
+    nested_files = registry.execute(
+        ToolAction(name="find_files", arguments={"pattern": "*.py", "path": "nested"}),
+        cwd=str(tmp_path),
+    )
     matches = registry.execute(
         ToolAction(name="search_text", arguments={"query": "needle", "max_results": 1}),
         cwd=str(tmp_path),
     )
     none = registry.execute(ToolAction(name="search_text", arguments={"query": "absent"}), cwd=str(tmp_path))
 
-    assert files.output == "a.py"
+    assert files.output == "a.py\nnested/c.py"
+    assert nested_files.output == "c.py"
     assert "needle" in matches.output
     assert matches.metadata["count"] == 1
     assert none.output == "no matches"
+
+
+def test_find_files_supports_authorized_external_path(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (outside / "target.py").write_text("print('target')\n", encoding="utf-8")
+    registry = make_registry()
+
+    denied = registry.execute(
+        ToolAction(name="find_files", arguments={"pattern": "*.py", "path": str(outside)}),
+        cwd=str(workspace),
+    )
+    allowed = registry.execute(
+        ToolAction(name="find_files", arguments={"pattern": "*.py", "path": str(outside)}),
+        cwd=str(workspace),
+        allowed_roots=[str(outside)],
+    )
+
+    assert denied.error_code == "path_outside_workspace"
+    assert allowed.success is True
+    assert allowed.output == "target.py"
 
 
 def test_shell_exec_reports_success_failure_and_timeout(tmp_path):
@@ -123,6 +154,48 @@ def test_shell_exec_reports_success_failure_and_timeout(tmp_path):
     assert registry.summarize_result(failure) == "exit 7"
     assert timeout.error_code == "timeout"
     assert registry.summarize_result(timeout) == "timeout after 0.01s"
+
+
+def test_shell_exec_rejects_cd_outside_workspace(tmp_path):
+    (tmp_path / "child").mkdir()
+    registry = make_registry()
+
+    inside = registry.execute(ToolAction(name="shell_exec", arguments={"command": "cd child && pwd"}), cwd=str(tmp_path))
+    outside = make_registry().execute(ToolAction(name="shell_exec", arguments={"command": "cd .. && pwd"}), cwd=str(tmp_path))
+    compact_outside = make_registry().execute(
+        ToolAction(name="shell_exec", arguments={"command": "cd ..&& pwd"}),
+        cwd=str(tmp_path),
+    )
+    dynamic_outside = make_registry().execute(
+        ToolAction(name="shell_exec", arguments={"command": "cd $HOME && pwd"}),
+        cwd=str(tmp_path),
+    )
+
+    assert inside.success is True
+    assert inside.metadata["stdout"].strip() == str(tmp_path / "child")
+    assert outside.error_code == "path_outside_workspace"
+    assert "outside the current workspace" in outside.output
+    assert compact_outside.error_code == "path_outside_workspace"
+    assert dynamic_outside.error_code == "path_outside_workspace"
+
+
+def test_shell_exec_persists_cd_and_environment_within_registry_state(tmp_path):
+    (tmp_path / "child").mkdir()
+    registry = make_registry()
+
+    cd_result = registry.execute(ToolAction(name="shell_exec", arguments={"command": "cd child"}), cwd=str(tmp_path))
+    pwd_result = registry.execute(ToolAction(name="shell_exec", arguments={"command": "pwd"}), cwd=str(tmp_path))
+    env_set = registry.execute(ToolAction(name="shell_exec", arguments={"command": "export TESTCODE_MARKER=kept"}), cwd=str(tmp_path))
+    env_read = registry.execute(ToolAction(name="shell_exec", arguments={"command": "printf $TESTCODE_MARKER"}), cwd=str(tmp_path))
+    parent = registry.execute(ToolAction(name="shell_exec", arguments={"command": "cd .. && pwd"}), cwd=str(tmp_path))
+
+    assert cd_result.success is True
+    assert cd_result.metadata["cwd"] == str(tmp_path / "child")
+    assert pwd_result.metadata["stdout"].strip() == str(tmp_path / "child")
+    assert env_set.success is True
+    assert env_read.metadata["stdout"].strip() == "kept"
+    assert parent.success is True
+    assert parent.metadata["stdout"].strip() == str(tmp_path)
 
 
 def test_run_tests_reports_test_status(tmp_path):
