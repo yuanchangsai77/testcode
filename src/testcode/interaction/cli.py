@@ -69,6 +69,10 @@ class CLI:
                     "session_id": session.session_id if session is not None else None,
                 },
             )
+            if session is not None and self.logger is not None and self.session_store is not None:
+                self.logger.start_run(request)
+                self._attach_last_run_id(session)
+                self.session_store.save(session)
             summary = self._run_once(request)
             conversation.append({"role": "user", "content": prompt})
             conversation.append({"role": "assistant", "content": summary.final_message})

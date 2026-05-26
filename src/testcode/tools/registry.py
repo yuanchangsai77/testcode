@@ -14,6 +14,10 @@ class ToolRegistry:
         self._tools[tool.name] = tool
 
     def reset_state(self) -> None:
+        for value in self._state.values():
+            close = getattr(value, "close", None)
+            if callable(close):
+                close()
         self._state = {}
 
     def definitions(self) -> list[ToolDefinition]:
@@ -25,7 +29,7 @@ class ToolRegistry:
             return None
         return tool.definition()
 
-    def execute(self, action: ToolAction, *, cwd: str = ".") -> ToolResult:
+    def execute(self, action: ToolAction, *, cwd: str = ".", allowed_roots: list[str] | None = None) -> ToolResult:
         tool = self._tools.get(action.name)
         if tool is None:
             result = ToolResult(
@@ -43,7 +47,7 @@ class ToolRegistry:
             return validation_error
 
         self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
-        result = tool.run(action, ToolContext(cwd=cwd, state=self._state))
+        result = tool.run(action, ToolContext(cwd=cwd, state=self._state, allowed_roots=list(allowed_roots or [])))
         self._record_result(result)
         return result
 

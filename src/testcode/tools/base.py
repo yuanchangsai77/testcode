@@ -28,6 +28,7 @@ class Tool(Protocol):
 class ToolContext:
     cwd: str
     state: dict = field(default_factory=dict)
+    allowed_roots: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

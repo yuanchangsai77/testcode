@@ -375,6 +375,86 @@ def test_engine_resets_read_state_between_executes(tmp_path):
     assert target.read_text(encoding="utf-8") == "before\n"
 
 
+def test_engine_requests_workspace_access_for_outside_read_path(tmp_path):
+    outside = tmp_path.parent
+
+    class OutsideReadModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="list outside",
+                actions=[ToolAction(name="list_dir", arguments={"path": str(outside)})],
+                done=True,
+            )
+
+    approvals = []
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=OutsideReadModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda action, _reason: approvals.append(action.name) or True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="list parent", cwd=str(tmp_path)))
+
+    assert approvals == ["workspace_access"]
+    assert summary.tool_results[0].success is True
+    assert summary.tool_results[0].metadata["workspace_grant"] == str(outside.resolve())
+
+
+def test_engine_requests_workspace_access_for_shell_cd_escape(tmp_path):
+    class OutsideShellModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="pwd parent",
+                actions=[ToolAction(name="shell_exec", arguments={"command": "cd .. && pwd"})],
+                done=True,
+            )
+
+    approvals = []
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=OutsideShellModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda action, _reason: approvals.append(action.name) or True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="cd parent", cwd=str(tmp_path)))
+
+    assert approvals == ["shell_exec", "workspace_access"]
+    assert summary.tool_results[0].success is True
+    assert summary.tool_results[0].metadata["stdout"].strip() == str(tmp_path.parent)
+    assert summary.tool_results[0].metadata["workspace_grant"] == str(tmp_path.parent.resolve())
+
+
+def test_engine_reports_denied_workspace_access(tmp_path):
+    class OutsideReadModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="list outside",
+                actions=[ToolAction(name="list_dir", arguments={"path": str(tmp_path.parent)})],
+                done=True,
+            )
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=OutsideReadModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda _action, _reason: False,
+    )
+
+    summary = engine.execute(UserRequest(prompt="list parent", cwd=str(tmp_path)))
+
+    assert summary.tool_results[0].success is False
+    assert summary.tool_results[0].error_code == "approval_required"
+    assert "outside the current workspace" in summary.tool_results[0].output
+
+
 def test_engine_skips_duplicate_successful_tool_action(tmp_path):
     class DuplicateShellModel:
         calls = 0
@@ -405,7 +485,156 @@ def test_engine_skips_duplicate_successful_tool_action(tmp_path):
     assert summary.final_message == "done"
     assert approvals == ["shell_exec"]
     assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == "x"
+    assert summary.tool_results[1].success is True
+    assert summary.tool_results[1].error_code is None
     assert summary.tool_results[1].metadata["duplicate"] is True
+    assert summary.tool_results[1].metadata["duplicate_count"] == 1
+    logged_results = [event for event in logger.events if event.name == "tool.result"]
+    assert len(logged_results) == 2
+    assert logged_results[1].payload["metadata"]["duplicate"] is True
+
+
+def test_engine_stops_repeated_duplicate_tool_actions(tmp_path):
+    class RepeatingDuplicateModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            return ModelReply(
+                message="repeat",
+                actions=[ToolAction(name="shell_exec", arguments={"command": "printf x >> marker.txt"})],
+                done=False,
+            )
+
+    approvals = []
+    logger = InMemoryLogger()
+    model = RepeatingDuplicateModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda action, _reason: approvals.append(action.name) or True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="write marker", cwd=str(tmp_path)))
+
+    assert model.calls == 6
+    assert approvals == ["shell_exec"]
+    assert "repeated the same action" in summary.final_message
+    assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == "x"
+    assert [result.error_code for result in summary.tool_results] == [
+        None,
+        None,
+        None,
+        None,
+        "duplicate_tool_call",
+        "duplicate_tool_call",
+    ]
+    logged_results = [event for event in logger.events if event.name == "tool.result"]
+    assert len(logged_results) == len(summary.tool_results)
+
+
+def test_engine_skips_duplicate_non_retryable_failures(tmp_path):
+    class MissingPathModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            return ModelReply(
+                message="read missing",
+                actions=[ToolAction(name="read_file", arguments={"path": "missing.py"})],
+                done=False,
+            )
+
+    logger = InMemoryLogger()
+    model = MissingPathModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine.execute(UserRequest(prompt="read missing", cwd=str(tmp_path)))
+
+    assert model.calls == 2
+    assert summary.tool_results[0].error_code == "path_not_found"
+    assert summary.tool_results[1].metadata["duplicate"] is True
+    assert "repeated the same action" in summary.final_message
+    logged_results = [event for event in logger.events if event.name == "tool.result"]
+    assert len(logged_results) == 2
+    assert logged_results[1].payload["error_code"] == "duplicate_tool_call"
+
+
+def test_engine_persists_shell_cd_within_execute(tmp_path):
+    (tmp_path / "child").mkdir()
+
+    class CdThenPwdModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="enter directory",
+                    actions=[ToolAction(name="shell_exec", arguments={"command": "cd child"})],
+                    done=False,
+                )
+            return ModelReply(
+                message="check directory",
+                actions=[ToolAction(name="shell_exec", arguments={"command": "pwd"})],
+                done=True,
+            )
+
+    logger = InMemoryLogger()
+    model = CdThenPwdModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda _action, _reason: True,
+    )
+
+    summary = engine.execute(UserRequest(prompt="cd child", cwd=str(tmp_path)))
+
+    assert model.calls == 2
+    assert summary.tool_results[0].metadata["cwd"] == str(tmp_path / "child")
+    assert summary.tool_results[1].metadata["stdout"].strip() == str(tmp_path / "child")
+
+
+def test_engine_persists_shell_cd_across_same_session_executes(tmp_path):
+    (tmp_path / "child").mkdir()
+
+    class SingleActionModel:
+        def __init__(self, action):
+            self.action = action
+
+        def respond(self, _session):
+            return ModelReply(message="run action", actions=[self.action], done=True)
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=SingleActionModel(ToolAction(name="shell_exec", arguments={"command": "cd child"})),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda _action, _reason: True,
+    )
+
+    request_metadata = {"session_id": "session-1"}
+    first = engine.execute(UserRequest(prompt="cd child", cwd=str(tmp_path), metadata=request_metadata))
+
+    engine.model = SingleActionModel(ToolAction(name="shell_exec", arguments={"command": "pwd"}))
+    second = engine.execute(UserRequest(prompt="pwd", cwd=str(tmp_path), metadata=request_metadata))
+
+    engine.model = SingleActionModel(ToolAction(name="shell_exec", arguments={"command": "pwd"}))
+    third = engine.execute(UserRequest(prompt="pwd", cwd=str(tmp_path), metadata={"session_id": "session-2"}))
+
+    assert first.tool_results[0].metadata["cwd"] == str(tmp_path / "child")
+    assert second.tool_results[0].metadata["stdout"].strip() == str(tmp_path / "child")
+    assert third.tool_results[0].metadata["stdout"].strip() == str(tmp_path)
 
 
 def test_session_store_lists_latest_first(tmp_path):
@@ -551,3 +780,33 @@ def test_chat_persists_run_ids_on_session(tmp_path, monkeypatch):
     assert stored is not None
     assert stored.run_ids == [logger.last_run_id]
     assert (tmp_path / "runs" / stored.run_ids[0] / "events.jsonl").exists()
+
+
+def test_chat_persists_run_id_before_execute_finishes(tmp_path, monkeypatch):
+    class InspectingEngine:
+        def __init__(self, store):
+            self.store = store
+            self.seen_run_ids = None
+
+        def execute(self, _request):
+            sessions = self.store.list_sessions()
+            stored = self.store.load(sessions[0].session_id)
+            self.seen_run_ids = list(stored.run_ids)
+            return type("Summary", (), {"final_message": "done", "tool_results": []})()
+
+    store = SessionStore(base_dir=tmp_path)
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    engine = InspectingEngine(store)
+    cli = CLI(
+        engine=engine,
+        presenter=ConsolePresenter(),
+        logger=logger,
+        session_store=store,
+    )
+
+    answers = iter(["hello", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    cli.chat(cwd=str(tmp_path))
+
+    assert engine.seen_run_ids == [logger.last_run_id]
