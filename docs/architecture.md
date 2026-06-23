@@ -256,6 +256,7 @@ The code is intentionally minimal. It establishes the system boundaries and the 
 - reliable edit workflow with read-before-patch, hash checks, diff preview, and test feedback
 - approval workflows for destructive tools
 - richer terminal UI with streaming updates
-- skill-based context loading
-- MCP-backed external tool discovery
+- skill-based context loading (via the unified `ContextLoader` extensibility hook, see [docs/runtime-extensibility.md](runtime-extensibility.md))
+- MCP-backed external tool discovery (via the unified `ToolProvider` extensibility hook, see [docs/runtime-extensibility.md](runtime-extensibility.md))
 - local subagents, team workflows, and remote A2A agents
+

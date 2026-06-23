@@ -171,7 +171,10 @@
 
 ## P2：Skill 系统
 
+（详细方案设计已完成，见 [docs/skill-system.md](skill-system.md) 与 [docs/runtime-extensibility.md](runtime-extensibility.md)）
+
 目标：像 Codex/Claude Code 一样支持标准 Skill 和项目/用户自定义 Skill。
+
 
 ### P2.1 Skill 格式
 
