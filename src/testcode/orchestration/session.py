@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from typing import TYPE_CHECKING
+
 from ..types import ToolDefinition, ToolResult, UserRequest
+
+if TYPE_CHECKING:
+    from ..skills.model import Skill
 
 
 @dataclass(slots=True)
@@ -12,6 +17,8 @@ class SessionContext:
     available_tools: list[ToolDefinition] = field(default_factory=list)
     history: list[str] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
+    active_skills: list[Skill] = field(default_factory=list)
+
 
     def add_model_message(self, message: str) -> None:
         self.history.append(f"model: {message}")

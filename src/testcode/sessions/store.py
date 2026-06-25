@@ -39,6 +39,7 @@ class SessionStore:
             "status": session.status,
             "messages": session.messages,
             "run_ids": session.run_ids,
+            "active_skills": list(getattr(session, "active_skills", [])),
         }
         path = self.base_dir / f"{session.session_id}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -61,6 +62,7 @@ class SessionStore:
             status=str(payload.get("status", "active")),
             messages=messages,
             run_ids=self._normalize_run_ids(payload.get("run_ids", [])),
+            active_skills=list(payload.get("active_skills", [])),
         )
 
     def list_sessions(self) -> list[SessionRecord]:

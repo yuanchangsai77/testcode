@@ -35,3 +35,8 @@ def build_builtin_registry(logger) -> ToolRegistry:
     ):
         registry.register(factory())
     return registry
+
+
+from .builtin_provider import BuiltinToolProvider
+
+

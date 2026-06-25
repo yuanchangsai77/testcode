@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from ..types import ExecutionSummary, ToolAction, ToolResult, UserRequest
+from .ext import ContextLoader
 from .permissions import PermissionContext
 from .session import SessionContext
 
@@ -21,11 +22,20 @@ class ExecutionEngine:
         "unknown_argument",
     }
 
-    def __init__(self, model, tools, guardrails, logger, approval_callback=None) -> None:
+    def __init__(
+        self,
+        model,
+        tools,
+        guardrails,
+        logger,
+        context_loaders: list[ContextLoader] | None = None,
+        approval_callback=None,
+    ) -> None:
         self.model = model
         self.tools = tools
         self.guardrails = guardrails
         self.logger = logger
+        self.context_loaders = context_loaders or []
         self.approval_callback = approval_callback
         self.max_turns = 100
         self.max_duplicate_skips = 3
@@ -38,6 +48,10 @@ class ExecutionEngine:
         self._keep_tool_state = session_key is not None
         permissions = PermissionContext()
         session = SessionContext(request=request, available_tools=self.tools.definitions())
+        
+        for loader in self.context_loaders:
+            loader.load_context(request, session)
+
         consecutive_non_retryable_turns = 0
         consecutive_failed_test_turns = 0
         approved_risk_groups: set[tuple[str, str]] = set()
@@ -59,7 +73,13 @@ class ExecutionEngine:
             )
 
             if reply.done and not reply.actions:
-                return self._finish(ExecutionSummary(final_message=reply.message, tool_results=session.tool_results))
+                return self._finish(
+                    ExecutionSummary(
+                        final_message=reply.message,
+                        tool_results=session.tool_results,
+                        active_skills=session.active_skills,
+                    )
+                )
 
             turn_results: list[ToolResult] = []
             for action in reply.actions:
@@ -122,7 +142,13 @@ class ExecutionEngine:
                     completed_actions[action_key] = result
 
             if reply.done:
-                return self._finish(ExecutionSummary(final_message=reply.message, tool_results=session.tool_results))
+                return self._finish(
+                    ExecutionSummary(
+                        final_message=reply.message,
+                        tool_results=session.tool_results,
+                        active_skills=session.active_skills,
+                    )
+                )
 
             if self._has_failed_test_result(turn_results):
                 consecutive_failed_test_turns += 1
@@ -131,6 +157,7 @@ class ExecutionEngine:
                         ExecutionSummary(
                             final_message="Stopping after 3 consecutive failing test runs. Review the latest test output before retrying.",
                             tool_results=session.tool_results,
+                            active_skills=session.active_skills,
                         )
                     )
             elif turn_results:
@@ -154,6 +181,7 @@ class ExecutionEngine:
                         ExecutionSummary(
                             final_message=self._non_retryable_failure_message(turn_results),
                             tool_results=session.tool_results,
+                            active_skills=session.active_skills,
                         )
                     )
             else:
@@ -163,6 +191,7 @@ class ExecutionEngine:
             ExecutionSummary(
                 final_message="Model exceeded the maximum number of turns without producing a final answer.",
                 tool_results=session.tool_results,
+                active_skills=session.active_skills,
             )
         )
 

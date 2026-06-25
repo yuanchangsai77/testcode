@@ -52,10 +52,17 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .skills.model import Skill
+
+
 @dataclass(slots=True)
 class ExecutionSummary:
     final_message: str
     tool_results: list[ToolResult]
+    active_skills: list[Skill] = field(default_factory=list)
+
 
 
 @dataclass(slots=True)
@@ -78,3 +85,5 @@ class StoredSession:
     status: str
     messages: list[dict[str, str]] = field(default_factory=list)
     run_ids: list[str] = field(default_factory=list)
+    active_skills: list[str] = field(default_factory=list)
+

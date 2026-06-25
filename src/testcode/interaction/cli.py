@@ -61,16 +61,41 @@ class CLI:
                 self._close_session(session, conversation)
                 return
 
+            active_skills = []
+            if session is not None:
+                active_skills = getattr(session, "active_skills", [])
+
             request = UserRequest(
                 prompt=prompt,
                 cwd=cwd,
                 metadata={
                     "conversation": list(conversation),
                     "session_id": session.session_id if session is not None else None,
+                    "active_skills": list(active_skills),
                 },
             )
             if session is not None and self.logger is not None and self.session_store is not None:
-                self.logger.start_run(request)
+                # We need registered skills for start_run, but wait, self.logger.start_run is also called in _run_once.
+                # So we can let _run_once handle self.logger.start_run!
+                # Wait, currently, why is self.logger.start_run called twice?
+                # Ah! In CLI.chat:
+                # ```
+                # if session is not None and self.logger is not None and self.session_store is not None:
+                #     self.logger.start_run(request)
+                #     self._attach_last_run_id(session)
+                #     self.session_store.save(session)
+                # ```
+                # Let's see: _run_once also does `self.logger.start_run(request)`.
+                # InMemoryLogger has a check: `if self.run_dir is not None: return`.
+                # So the first call to start_run actually initializes the run_id, and the second call in _run_once returns early.
+                # Thus, we must provide the registered_skills in BOTH places, or simply call it correctly in both places!
+                registered_skills = []
+                if hasattr(self.engine, "context_loaders"):
+                    for loader in self.engine.context_loaders:
+                        if hasattr(loader, "registry"):
+                            registered_skills = sorted(loader.registry._skills.keys())
+                            break
+                self.logger.start_run(request, registered_skills=registered_skills)
                 self._attach_last_run_id(session)
                 self.session_store.save(session)
             summary = self._run_once(request)
@@ -79,6 +104,8 @@ class CLI:
             if session is not None:
                 session.messages = list(conversation)
                 session.status = "active"
+                if hasattr(summary, "active_skills"):
+                    session.active_skills = [s.metadata.name for s in summary.active_skills]
                 self._attach_last_run_id(session)
                 self.session_store.save(session)
             prompt = None
@@ -120,7 +147,13 @@ class CLI:
 
     def _run_once(self, request: UserRequest) -> ExecutionSummary:
         if self.logger is not None:
-            self.logger.start_run(request)
+            registered_skills = []
+            if hasattr(self.engine, "context_loaders"):
+                for loader in self.engine.context_loaders:
+                    if hasattr(loader, "registry"):
+                        registered_skills = sorted(loader.registry._skills.keys())
+                        break
+            self.logger.start_run(request, registered_skills=registered_skills)
         self.presenter.show_start(request)
         try:
             summary = self.engine.execute(request)

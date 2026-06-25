@@ -14,7 +14,12 @@ from .safety.guardrails import Guardrails
 from .safety.policy import DefaultPolicy
 from .sessions import SessionStore
 from .tools.builtin import build_builtin_registry
+from .tools.builtin_provider import BuiltinToolProvider
+from .tools.registry import ToolRegistry
+from .skills.registry import SkillRegistry
+from .skills.loader import SkillContextLoader
 from .types import UserRequest
+from pathlib import Path
 
 
 load_dotenv()
@@ -38,7 +43,28 @@ def create_app(mode: str | None = None) -> CLI:
     logger = InMemoryLogger()
     policy = DefaultPolicy(mode=config.mode)
     guardrails = Guardrails(policy=policy, logger=logger)
-    tools = build_builtin_registry(logger=logger)
+
+    # Resolve skill registry directories
+    builtins_dir = Path(__file__).parent / "skills" / "builtins"
+    global_dir = Path.home() / ".testcode" / "skills"
+    project_dir = Path(os.getcwd()) / ".testcode" / "skills"
+
+    skills_registry = SkillRegistry(
+        builtins_dir=builtins_dir,
+        global_dir=global_dir,
+        project_dir=project_dir,
+    )
+    skills_registry.scan_metadata()
+
+    skill_loader = SkillContextLoader(registry=skills_registry, logger=logger)
+
+    # Initialize tools via BuiltinToolProvider
+    providers = [BuiltinToolProvider(logger)]
+    tools = ToolRegistry(logger=logger)
+    for provider in providers:
+        for tool in provider.get_tools():
+            tools.register(tool)
+
     model = create_model_client(logger)
     presenter = ConsolePresenter(tool_result_summarizer=tools.summarize_result)
     engine = ExecutionEngine(
@@ -46,8 +72,12 @@ def create_app(mode: str | None = None) -> CLI:
         tools=tools,
         guardrails=guardrails,
         logger=logger,
+        context_loaders=[skill_loader],
         approval_callback=presenter.confirm_tool_action,
     )
+    # Store skills registry on engine for CLI visibility
+    engine.skills_registry = skills_registry
+
     session_store = SessionStore()
     return CLI(engine=engine, presenter=presenter, logger=logger, session_store=session_store)
 
@@ -119,6 +149,7 @@ def main() -> None:
             if resumed_session is not None:
                 metadata["conversation"] = list(resumed_session.messages)
                 metadata["session_id"] = resumed_session.session_id
+                metadata["active_skills"] = list(getattr(resumed_session, "active_skills", []))
             request = UserRequest(prompt=prompt, cwd=cwd, metadata=metadata)
             app.run(request)
             return

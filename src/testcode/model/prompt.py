@@ -34,9 +34,20 @@ class ModelPromptBuilder:
             "- Use shell_exec cwd when you need to start or reset the persistent shell working directory explicitly.",
             "- Prefer structured tools such as list_dir, find_files, read_file, search_text, and patch over shell_exec when they can do the job.",
             "- Do not retry a failed tool call with the same arguments unless the user gives new information.",
-            "Available tools:",
         ]
+
+        active_skills = getattr(session, "active_skills", [])
+        if active_skills:
+            system_lines.append("")
+            system_lines.append("### Active Skill Guidelines:")
+            for skill in active_skills:
+                system_lines.append("")
+                system_lines.append(f"[Skill: {skill.metadata.name}]")
+                system_lines.append(skill.content)
+
+        system_lines.append("Available tools:")
         system_lines.extend(self._format_tool_definitions(session))
+
 
         user_lines = [
             f"Current working directory: {session.request.cwd}",

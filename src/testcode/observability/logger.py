@@ -20,7 +20,7 @@ class InMemoryLogger:
         self.events.append(event)
         self._append_event(event)
 
-    def start_run(self, request) -> None:
+    def start_run(self, request, registered_skills: list[str] | None = None) -> None:
         if self.run_dir is not None:
             return
 
@@ -38,8 +38,10 @@ class InMemoryLogger:
                 "prompt": redact_text(request.prompt),
                 "cwd": request.cwd,
                 "metadata": redact(request.metadata),
+                "registered_skills": registered_skills or [],
             },
         )
+
 
     def finalize(self, request, summary) -> None:
         if self.run_dir is None:
@@ -90,15 +92,25 @@ class InMemoryLogger:
             return
 
         turns = self._group_turns()
+        active_skills = getattr(summary, "active_skills", [])
+
         lines = [
             "Overview",
             f"- run_id: {self.run_id}",
             f"- prompt: {redact_text(request.prompt)}",
+        ]
+
+        if active_skills:
+            active_skills_str = ", ".join(f"{s.metadata.name} (v{s.metadata.version})" for s in active_skills)
+            lines.append(f"- active skills: {active_skills_str}")
+
+        lines.extend([
             f"- cwd: {request.cwd}",
             f"- total events: {len(self.events)}",
             f"- turns: {len(turns)}",
             "",
-        ]
+        ])
+
 
         if turns:
             lines.append("Turns")
