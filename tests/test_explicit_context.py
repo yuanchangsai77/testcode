@@ -79,6 +79,41 @@ def test_explicit_context_loader_truncates_and_skips_binary(tmp_path):
     assert session.explicit_context[1].error == "binary_file"
 
 
+def test_explicit_context_loader_refuses_sensitive_files(tmp_path):
+    (tmp_path / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
+    request = UserRequest(
+        prompt="inspect",
+        cwd=str(tmp_path),
+        metadata={"context_paths": [".env"]},
+    )
+    session = SessionContext(request=request)
+
+    ExplicitContextLoader().load_context(request, session)
+
+    assert len(session.explicit_context) == 1
+    assert session.explicit_context[0].path == ".env"
+    assert session.explicit_context[0].content == ""
+    assert session.explicit_context[0].error == "sensitive_file"
+
+
+def test_explicit_context_directory_listing_skips_sensitive_files(tmp_path):
+    (tmp_path / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
+    request = UserRequest(
+        prompt="inspect",
+        cwd=str(tmp_path),
+        metadata={"context_paths": ["."]},
+    )
+    session = SessionContext(request=request)
+
+    ExplicitContextLoader().load_context(request, session)
+
+    assert len(session.explicit_context) == 1
+    assert "README.md" in session.explicit_context[0].content
+    assert ".env" not in session.explicit_context[0].content
+    assert session.explicit_context[0].truncated is False
+
+
 def test_explicit_context_prompt_section_and_logging(tmp_path):
     (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
     logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))

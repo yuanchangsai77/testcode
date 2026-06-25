@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..orchestration.ext import ContextLoader
 from ..orchestration.session import SessionContext
+from ..safety.redaction import is_sensitive_path
 from ..tools.shared import looks_binary
 from ..types import UserRequest
 
@@ -98,6 +99,15 @@ class ExplicitContextLoader(ContextLoader):
             return [self._directory_item(root, source, resolved)]
         if not resolved.is_file():
             return [ExplicitContextItem(source=source, path=self._display_path(root, resolved), kind="error", error="unsupported_path")]
+        if is_sensitive_path(resolved):
+            return [
+                ExplicitContextItem(
+                    source=source,
+                    path=self._display_path(root, resolved),
+                    kind="file",
+                    error="sensitive_file",
+                )
+            ]
         return [self._file_item(root, source, resolved)]
 
     def _resolve_inside_root(self, root: Path, raw_path: Path) -> Path | None:
@@ -123,10 +133,11 @@ class ExplicitContextLoader(ContextLoader):
             children = sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
         except OSError as error:
             return ExplicitContextItem(source=source, path=self._display_path(root, path), kind="directory", error=str(error))
-        for child in children[: self.max_files]:
+        visible_children = [child for child in children if not is_sensitive_path(child)]
+        for child in visible_children[: self.max_files]:
             suffix = "/" if child.is_dir() else ""
             entries.append(f"{child.relative_to(root)}{suffix}")
-        truncated = len(children) > len(entries)
+        truncated = len(visible_children) > len(entries)
         return ExplicitContextItem(
             source=source,
             path=self._display_path(root, path),

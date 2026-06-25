@@ -133,7 +133,12 @@ class ModelPromptBuilder:
         if workspace_summary is None:
             return []
 
-        lines = ["", "### Workspace Summary:", f"root: {workspace_summary.root}"]
+        lines = [
+            "",
+            "### Workspace Summary:",
+            "Automatically collected context. Use it only when relevant to the user request.",
+            f"root: {workspace_summary.root}",
+        ]
         if workspace_summary.project_signals:
             lines.append("project signals:")
             for signal in workspace_summary.project_signals:
