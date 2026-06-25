@@ -45,6 +45,10 @@ class ModelPromptBuilder:
                 system_lines.append(f"[Skill: {skill.metadata.name}]")
                 system_lines.append(skill.content)
 
+        system_lines.extend(self._format_project_rules(session))
+        system_lines.extend(self._format_workspace_summary(session))
+        system_lines.extend(self._format_explicit_context(session))
+
         system_lines.append("Available tools:")
         system_lines.extend(self._format_tool_definitions(session))
 
@@ -105,6 +109,64 @@ class ModelPromptBuilder:
             lines.append(f"  risk: {tool.risk_level}")
             for name in sorted(tool.arguments):
                 lines.append(f"  argument {name}: {tool.arguments[name]}")
+        return lines
+
+    def _format_project_rules(self, session: SessionContext) -> list[str]:
+        project_rules = getattr(session, "project_rules", [])
+        if not project_rules:
+            return []
+
+        lines = [
+            "",
+            "### Project Rules:",
+            "Follow these AGENTS.md instructions. Later entries are closer to the current working directory and override earlier entries when they conflict.",
+        ]
+        for rule in project_rules:
+            suffix = " (truncated)" if rule.truncated else ""
+            lines.append("")
+            lines.append(f"[AGENTS.md: {rule.path}{suffix}]")
+            lines.append(rule.content)
+        return lines
+
+    def _format_workspace_summary(self, session: SessionContext) -> list[str]:
+        workspace_summary = getattr(session, "workspace_summary", None)
+        if workspace_summary is None:
+            return []
+
+        lines = ["", "### Workspace Summary:", f"root: {workspace_summary.root}"]
+        if workspace_summary.project_signals:
+            lines.append("project signals:")
+            for signal in workspace_summary.project_signals:
+                commands = ", ".join(signal.test_commands) if signal.test_commands else "none"
+                lines.append(f"- {signal.language}: {signal.marker}; suggested tests: {commands}")
+        if workspace_summary.git is not None:
+            lines.append("git:")
+            if workspace_summary.git.branch:
+                lines.append(f"- branch: {workspace_summary.git.branch}")
+            if workspace_summary.git.status:
+                lines.append(f"- status: {workspace_summary.git.status}")
+            if workspace_summary.git.recent_commit:
+                lines.append(f"- recent commit: {workspace_summary.git.recent_commit}")
+        if workspace_summary.tree:
+            lines.append("workspace tree:")
+            lines.extend(f"- {entry}" for entry in workspace_summary.tree)
+            if workspace_summary.tree_truncated:
+                lines.append("- ...truncated...")
+        return lines
+
+    def _format_explicit_context(self, session: SessionContext) -> list[str]:
+        explicit_context = getattr(session, "explicit_context", [])
+        if not explicit_context:
+            return []
+
+        lines = ["", "### Explicit User Context:"]
+        for item in explicit_context:
+            suffix = " (truncated)" if item.truncated else ""
+            error = f" error={item.error}" if item.error else ""
+            lines.append("")
+            lines.append(f"[{item.kind}: {item.path or item.source}{suffix}{error}]")
+            if item.content:
+                lines.append(item.content)
         return lines
 
     def _schema_from_arguments(self, definition: ToolDefinition) -> dict[str, object]:

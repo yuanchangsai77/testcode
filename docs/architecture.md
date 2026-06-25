@@ -30,6 +30,7 @@ Current source layout:
 src/testcode/
   app.py             application composition and CLI argument dispatch
   config.py          .env loading and runtime configuration
+  context/           project rules, workspace summaries, and explicit context loaders
   interaction/       CLI input/output and presentation
   orchestration/     session context and model/tool execution loop
   model/             provider client, prompt builder, reply parser, model types
@@ -49,6 +50,7 @@ Responsibilities:
 - load `.env` before runtime objects are assembled
 - create the logger, policy, guardrails, tool registry, model client, presenter, engine, and session store
 - parse CLI flags and choose single-turn, chat, list, resume, or latest-session mode
+- collect explicit context arguments such as `--context`
 - keep object wiring separate from lower-level implementation details
 
 Core files:
@@ -97,6 +99,29 @@ Orchestration structure:
 - `session.py` owns the in-memory context passed to the model during one run.
 - `engine.py` owns the model/tool loop, policy checks, approvals, duplicate action skipping, and terminal summary.
 - Long-lived conversation persistence is not part of this layer; it is handled by `sessions/store.py`.
+
+### 3.2.1 Context Assembly Layer
+
+Responsibilities:
+
+- load project rules and workspace summaries before model invocation
+- keep context-gathering policies independent from the model/tool loop
+- inject user-selected context paths from CLI metadata
+- bound context size and keep paths inside the active workspace
+
+Core files:
+
+- `src/testcode/context/project_rules.py`
+- `src/testcode/context/workspace.py`
+- `src/testcode/context/explicit.py`
+
+Context structure:
+
+- `ProjectRulesLoader` loads `AGENTS.md` from the current path up to the nearest project boundary. Project boundaries are detected from `.git`, `pyproject.toml`, `package.json`, `Cargo.toml`, or `go.mod`.
+- `WorkspaceSummaryLoader` detects common project markers, suggested test commands, git branch/status/latest commit, and a bounded workspace tree.
+- `ExplicitContextLoader` expands CLI-provided `--context` files, directories, and globs under the workspace. It refuses out-of-workspace paths and binary files, and clips large files.
+
+The orchestration layer treats these as ordinary `ContextLoader` implementations. It does not know how rules, summaries, or explicit files are discovered.
 
 ### 3.3 Model Integration Layer
 
@@ -225,19 +250,20 @@ Persistence structure:
 2. `app.py` loads configuration, wires the runtime objects, and chooses the requested CLI mode.
 3. The interaction layer creates a `UserRequest`.
 4. The orchestration layer creates a `SessionContext` with available tool definitions and prior conversation metadata.
-5. The model layer builds messages through `ModelPromptBuilder`.
-6. `OpenAICompatibleModelClient` invokes the provider, or `StubModelClient` is used when no model base URL is configured.
-7. `ModelReplyParser` normalizes the provider response into either:
+5. Registered context loaders add project rules, workspace summaries, explicit context, and active skill guidance to the session.
+6. The model layer builds messages through `ModelPromptBuilder`.
+7. `OpenAICompatibleModelClient` invokes the provider, or `StubModelClient` is used when no model base URL is configured.
+8. `ModelReplyParser` normalizes the provider response into either:
    - a final answer
    - one or more tool actions
-8. Each requested tool action is checked by the safety layer.
-9. If an action needs approval, the CLI asks the user before execution.
-10. Allowed or approved actions are executed by the tool layer.
-11. Tool results are logged by the observability layer and added back into session state.
-12. Successful duplicate tool actions in the same run are skipped to avoid repeated side effects.
-13. The orchestration loop continues until a final answer is produced or a stop condition is reached.
-14. The interaction layer renders the answer and execution summary.
-15. In chat mode, `SessionStore` persists the updated conversation and last run id.
+9. Each requested tool action is checked by the safety layer.
+10. If an action needs approval, the CLI asks the user before execution.
+11. Allowed or approved actions are executed by the tool layer.
+12. Tool results are logged by the observability layer and added back into session state.
+13. Successful duplicate tool actions in the same run are skipped to avoid repeated side effects.
+14. The orchestration loop continues until a final answer is produced or a stop condition is reached.
+15. The interaction layer renders the answer and execution summary.
+16. In chat mode, `SessionStore` persists the updated conversation and last run id.
 
 ## 5. Repository Scaffold Decision
 
@@ -256,7 +282,6 @@ The code is intentionally minimal. It establishes the system boundaries and the 
 - reliable edit workflow with read-before-patch, hash checks, diff preview, and test feedback
 - approval workflows for destructive tools
 - richer terminal UI with streaming updates
-- skill-based context loading (via the unified `ContextLoader` extensibility hook, see [docs/runtime-extensibility.md](runtime-extensibility.md))
+- additional context loaders behind the unified `ContextLoader` hook, including rules, workspace summaries, explicit user context, and skills (see [docs/runtime-extensibility.md](runtime-extensibility.md))
 - MCP-backed external tool discovery (via the unified `ToolProvider` extensibility hook, see [docs/runtime-extensibility.md](runtime-extensibility.md))
 - local subagents, team workflows, and remote A2A agents
-

@@ -22,6 +22,7 @@ class CLI:
         initial_prompt: str | None = None,
         conversation: list[dict[str, str]] | None = None,
         session_id: str | None = None,
+        context_paths: list[str] | None = None,
     ) -> None:
         conversation = list(conversation or [])
         session = None
@@ -72,6 +73,7 @@ class CLI:
                     "conversation": list(conversation),
                     "session_id": session.session_id if session is not None else None,
                     "active_skills": list(active_skills),
+                    "context_paths": list(context_paths or []),
                 },
             )
             if session is not None and self.logger is not None and self.session_store is not None:

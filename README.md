@@ -73,6 +73,16 @@ Single turn only:
 PYTHONPATH=src python3 -m testcode --once "summarize this repository"
 ```
 
+Add explicit context files, directories, or globs:
+
+```bash
+PYTHONPATH=src python3 -m testcode --context README.md --context "docs/*.md" "summarize these docs"
+```
+
+At the start of each run, `testcode` also injects bounded context from
+project `AGENTS.md` rules, common project markers, git status, and a compact
+workspace tree.
+
 Choose a safety mode:
 
 ```bash

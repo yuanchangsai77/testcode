@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from ..types import ToolDefinition, ToolResult, UserRequest
 
 if TYPE_CHECKING:
+    from ..context import ExplicitContextItem, ProjectRule, WorkspaceSummary
     from ..skills.model import Skill
 
 
@@ -18,6 +19,9 @@ class SessionContext:
     history: list[str] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     active_skills: list[Skill] = field(default_factory=list)
+    project_rules: list[ProjectRule] = field(default_factory=list)
+    workspace_summary: WorkspaceSummary | None = None
+    explicit_context: list[ExplicitContextItem] = field(default_factory=list)
 
 
     def add_model_message(self, message: str) -> None:

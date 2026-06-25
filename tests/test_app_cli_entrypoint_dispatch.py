@@ -48,6 +48,32 @@ def test_main_once_dispatches_prompt_to_app_run(monkeypatch, tmp_path):
     assert fake.runs[0].cwd == str(tmp_path)
 
 
+def test_main_once_passes_context_paths_to_request_metadata(monkeypatch, tmp_path):
+    fake = FakeApp()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["testcode", "--once", "--context", "README.md", "--context", "docs/*.md", "inspect"],
+    )
+    monkeypatch.setattr(app_module, "create_app", lambda mode: fake)
+    monkeypatch.chdir(tmp_path)
+
+    app_module.main()
+
+    assert fake.runs[0].metadata["context_paths"] == ["README.md", "docs/*.md"]
+
+
+def test_main_chat_passes_context_paths(monkeypatch, tmp_path):
+    fake = FakeApp()
+    monkeypatch.setattr(sys, "argv", ["testcode", "--context", "README.md", "inspect"])
+    monkeypatch.setattr(app_module, "create_app", lambda mode: fake)
+    monkeypatch.chdir(tmp_path)
+
+    app_module.main()
+
+    assert fake.chats[0]["context_paths"] == ["README.md"]
+
+
 def test_main_list_dispatches_to_presenter(monkeypatch):
     fake = FakeApp()
     monkeypatch.setattr(sys, "argv", ["testcode", "--list"])

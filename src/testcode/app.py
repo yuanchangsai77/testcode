@@ -4,6 +4,7 @@ import argparse
 import os
 
 from .config import load_dotenv, load_runtime_config
+from .context import ExplicitContextLoader, ProjectRulesLoader, WorkspaceSummaryLoader
 from .interaction.cli import CLI
 from .interaction.presenter import ConsolePresenter
 from .model.client import OpenAICompatibleModelClient, StubModelClient
@@ -56,6 +57,9 @@ def create_app(mode: str | None = None) -> CLI:
     )
     skills_registry.scan_metadata()
 
+    project_rules_loader = ProjectRulesLoader(logger=logger)
+    workspace_summary_loader = WorkspaceSummaryLoader(logger=logger)
+    explicit_context_loader = ExplicitContextLoader(logger=logger)
     skill_loader = SkillContextLoader(registry=skills_registry, logger=logger)
 
     # Initialize tools via BuiltinToolProvider
@@ -72,7 +76,7 @@ def create_app(mode: str | None = None) -> CLI:
         tools=tools,
         guardrails=guardrails,
         logger=logger,
-        context_loaders=[skill_loader],
+        context_loaders=[project_rules_loader, workspace_summary_loader, explicit_context_loader, skill_loader],
         approval_callback=presenter.confirm_tool_action,
     )
     # Store skills registry on engine for CLI visibility
@@ -112,6 +116,12 @@ def main() -> None:
             default=os.getenv("TESTCODE_MODE", "confirm").strip() or "confirm",
             help="Safety mode for tool execution.",
         )
+        parser.add_argument(
+            "--context",
+            action="append",
+            default=[],
+            help="Add a workspace file, directory, or glob as explicit context for this run.",
+        )
         args = parser.parse_args()
 
         app = create_app(mode=args.mode)
@@ -150,6 +160,7 @@ def main() -> None:
                 metadata["conversation"] = list(resumed_session.messages)
                 metadata["session_id"] = resumed_session.session_id
                 metadata["active_skills"] = list(getattr(resumed_session, "active_skills", []))
+            metadata["context_paths"] = list(args.context)
             request = UserRequest(prompt=prompt, cwd=cwd, metadata=metadata)
             app.run(request)
             return
@@ -159,6 +170,7 @@ def main() -> None:
             initial_prompt=initial_prompt,
             conversation=resumed_session.messages if resumed_session is not None else None,
             session_id=resumed_session.session_id if resumed_session is not None else None,
+            context_paths=list(args.context),
         )
     except KeyboardInterrupt:
         print()

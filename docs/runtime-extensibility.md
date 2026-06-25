@@ -1,7 +1,7 @@
 # testcode Runtime Extensibility Design Document
 
 To support features like the **Skill System (P2)**, **Project Rules (P1.2)**, **Explicit Context (P1.4)**, and **MCP Integration (P3)** without bloating the core execution loop, we introduce two generic extension interfaces into the `testcode` runtime:
-1. **`ContextLoader`**: Hook interface for loading dynamic context, rules, and skills at the start of a run.
+1. **`ContextLoader`**: Hook interface for loading dynamic context, rules, summaries, explicit user context, and skills at the start of a run.
 2. **`ToolProvider`**: Hook interface for registering external tools (e.g., from MCP servers).
 
 ---
@@ -28,15 +28,21 @@ class ContextLoader(Protocol):
 
 Using this single abstraction, we can cleanly isolate and implement different roadmap features:
 
-1. **`SkillContextLoader`** (For P2: Skill System)
-   - Matches `request.prompt` using `SkillRegistry`.
-   - Injects active skills into `session.metadata` or custom session properties.
-2. **`ProjectRulesLoader`** (For P1.2: Project Rules - `AGENTS.md`)
-   - Traverses directories upwards from `request.cwd` to find `AGENTS.md`.
-   - Loads its content and appends it to system instructions.
+1. **`ProjectRulesLoader`** (For P1.2: Project Rules - `AGENTS.md`)
+   - Traverses directories upwards from `request.cwd` to the nearest project boundary.
+   - Project boundaries are detected using `.git`, `pyproject.toml`, `package.json`, `Cargo.toml`, or `go.mod`.
+   - Loads bounded rule content and appends it to system instructions.
+2. **`WorkspaceSummaryLoader`** (For P1.1/P1.3: Project, Git, and Workspace Summary)
+   - Detects common project markers and suggested test commands.
+   - Collects read-only git branch/status/latest commit information.
+   - Builds a bounded directory tree while ignoring cache/build folders.
 3. **`ExplicitContextLoader`** (For P1.4: Explicit Context - `--context`)
    - Expands file globs/directories requested via `--context`.
-   - Reads files and prepends them as initial system/user knowledge.
+   - Reads workspace-contained text files and bounded directory listings.
+   - Refuses out-of-workspace paths and binary files.
+4. **`SkillContextLoader`** (For P2: Skill System)
+   - Matches `request.prompt` using `SkillRegistry`.
+   - Injects active skills into session properties.
 
 ### Integrating into the Engine
 
@@ -86,9 +92,10 @@ class ToolProvider(Protocol):
 
 > [!NOTE]
 > **Execution Order of ContextLoaders**: Loaders should be executed in order of specificity:
-> 1. General workspace/project loaders (like `ProjectRulesLoader` loading `AGENTS.md`).
-> 2. Dynamic, trigger-based loaders (like `SkillContextLoader`).
-> 3. User-explicit parameter loaders (like `ExplicitContextLoader` loading files/directories specified in CLI arguments).
+> 1. Project policy loaders, such as `ProjectRulesLoader`.
+> 2. Automatic workspace loaders, such as `WorkspaceSummaryLoader`.
+> 3. User-explicit parameter loaders, such as `ExplicitContextLoader`.
+> 4. Dynamic trigger-based loaders, such as `SkillContextLoader`.
 
 
 ### Implementations

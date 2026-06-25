@@ -142,12 +142,41 @@
 
 ### P1.1 项目探测
 
+进展：
+
+- 已完成 `WorkspaceSummaryLoader`，在每次执行前注入 bounded workspace summary。
+- 已检测 `pyproject.toml`、`package.json`、`Cargo.toml`、`go.mod`。
+- 已推断 Python、Node.js、Rust、Go 及常见测试命令。
+- 已补充 Python、Node、Go marker 和目录摘要测试。
+
+剩余：
+
+- 继续增强 package-manager 细节，例如 uv/poetry/pnpm/yarn 等。
+- 增加 Rust fixture 测试。
+
+原始待办：
+
 - 检测 `pyproject.toml`、`package.json`、`Cargo.toml`、`go.mod`。
 - 推断语言、包管理器、常见测试命令。
 - 不读取大文件全文，只返回摘要。
 - 增加 Python、Node、Rust、Go fixture 测试。
 
 ### P1.2 项目规则加载
+
+进展：
+
+- 已完成 `ProjectRulesLoader`，从 cwd 向上查找 `AGENTS.md`。
+- 已支持以 `.git`、`pyproject.toml`、`package.json`、`Cargo.toml`、`go.mod` 作为项目边界。
+- 已按从根到近目录的顺序注入规则，近目录规则在 prompt 中靠后，可覆盖上层规则。
+- 已限制单个规则文件读取大小，避免大文件撑爆上下文。
+- 已补充多层规则、截断、prompt 注入和 app 装配测试。
+
+剩余：
+
+- 暂未做按任务选择额外规则文件；当前只加载 `AGENTS.md`。
+- 暂未读取 README 和 `docs/architecture.md` 摘要。
+
+原始待办：
 
 - 从 cwd 向上查找 `AGENTS.md`。
 - 支持多层规则，近目录优先。
@@ -157,12 +186,42 @@
 
 ### P1.3 Git 和 Workspace 摘要
 
+进展：
+
+- 已收集当前分支、短状态、最近 commit。
+- 已生成目录树摘要，忽略 `.git`、venv、`node_modules`、缓存目录和 `.testcode`。
+- 已对目录摘要做深度和条目数限制。
+- 已补充 clean git repo、目录忽略、截断和 prompt 注入测试。
+
+剩余：
+
+- 暂未收集 working tree diff 摘要。
+- 暂未做 workspace summary 缓存和文件变化失效。
+
+原始待办：
+
 - 收集当前分支、git status、working tree diff 摘要、最近 commit。
 - 生成目录树摘要，忽略 `.git`、venv、`node_modules`、缓存目录。
 - 缓存 workspace summary，文件变化后失效。
 - 对大目录做数量和深度限制。
 
 ### P1.4 显式上下文
+
+进展：
+
+- 已完成 CLI `--context` 参数，支持多次传入。
+- 已完成 `ExplicitContextLoader`，支持 workspace 内文件、目录和 glob。
+- 已对路径做 workspace 边界检查，拒绝越界路径。
+- 已限制显式上下文文件数量和单文件读取大小，二进制文件不注入。
+- 已记录 explicit context 来源，并在 prompt 中单独展示。
+- 已补充 loader、prompt、越界拒绝、截断、二进制拒绝和 CLI dispatch 测试。
+
+剩余：
+
+- 暂未支持更复杂的 include/exclude glob 规则。
+- 暂未做 context token 预算统一裁剪；后续并入 P7.2。
+
+原始待办：
 
 - CLI 增加 `--context path`，支持多个路径。
 - 路径必须通过 workspace 安全检查。
