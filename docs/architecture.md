@@ -32,7 +32,7 @@ src/testcode/
   config.py          .env loading and runtime configuration
   context/           project rules, workspace summaries, and explicit context loaders
   interaction/       CLI input/output and presentation
-  orchestration/     session context and model/tool execution loop
+  orchestration/     session context, progress protocol, and model/tool execution loop
   model/             provider client, prompt builder, reply parser, model types
   sessions/          persisted conversation storage
   tools/             tool protocol, registry, shared helpers, built-in tools
@@ -97,7 +97,8 @@ Core files:
 Orchestration structure:
 
 - `session.py` owns the in-memory context passed to the model during one run.
-- `engine.py` owns the model/tool loop, policy checks, approvals, duplicate action skipping, and terminal summary.
+- `engine.py` owns the model/tool loop, policy checks, approvals, and duplicate action skipping.
+- `progress.py` defines optional progress events so terminal rendering stays outside the execution engine.
 - Long-lived conversation persistence is not part of this layer; it is handled by `sessions/store.py`.
 
 ### 3.2.1 Context Assembly Layer
