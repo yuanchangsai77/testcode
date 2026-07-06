@@ -6,6 +6,7 @@ from pathlib import Path
 from ..types import ExecutionSummary, ToolAction, ToolResult, UserRequest
 from .ext import ContextLoader
 from .permissions import PermissionContext
+from .progress import ProgressReporter
 from .session import SessionContext
 
 
@@ -30,6 +31,8 @@ class ExecutionEngine:
         logger,
         context_loaders: list[ContextLoader] | None = None,
         approval_callback=None,
+        progress_reporter: ProgressReporter | None = None,
+        presenter=None,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -37,18 +40,27 @@ class ExecutionEngine:
         self.logger = logger
         self.context_loaders = context_loaders or []
         self.approval_callback = approval_callback
+        self.progress_reporter = progress_reporter or presenter
         self.max_turns = 100
         self.max_duplicate_skips = 3
         self._tool_state_session_key: str | None = None
         self._keep_tool_state = False
 
     def execute(self, request: UserRequest) -> ExecutionSummary:
+        try:
+            return self._execute(request)
+        except Exception:
+            self.current_session = None
+            raise
+
+    def _execute(self, request: UserRequest) -> ExecutionSummary:
         session_key = self._session_key(request)
         self._prepare_tool_state(session_key)
         self._keep_tool_state = session_key is not None
         permissions = PermissionContext()
         session = SessionContext(request=request, available_tools=self.tools.definitions())
-        
+        self.current_session = session
+
         for loader in self.context_loaders:
             loader.load_context(request, session)
 
@@ -60,7 +72,14 @@ class ExecutionEngine:
         progress_recovery_sent = False
 
         for turn in range(1, self.max_turns + 1):
-            reply = self.model.respond(session)
+            progress_handle = None
+            if self.progress_reporter:
+                progress_handle = self.progress_reporter.model_started()
+            try:
+                reply = self.model.respond(session)
+            finally:
+                if progress_handle is not None:
+                    self.progress_reporter.model_finished(progress_handle)
             session.add_model_message(reply.message)
             self.logger.record(
                 "model.reply",
@@ -87,6 +106,8 @@ class ExecutionEngine:
                 if action_key in completed_actions:
                     duplicate_counts[action_key] = duplicate_counts.get(action_key, 0) + 1
                     result = self._duplicate_result(action, completed_actions[action_key], duplicate_counts[action_key])
+                    if self.progress_reporter:
+                        self.progress_reporter.tool_skipped(action, "duplicate skipped")
                     self._record_synthetic_tool_result(result)
                     session.add_tool_result(result)
                     turn_results.append(result)
@@ -115,6 +136,8 @@ class ExecutionEngine:
                         output=decision.reason,
                         error_code="approval_required",
                     )
+                    if self.progress_reporter:
+                        self.progress_reporter.tool_skipped(action, "denied by user")
                     self._attach_action_metadata(result, action)
                     session.add_tool_result(result)
                     turn_results.append(result)
@@ -127,6 +150,8 @@ class ExecutionEngine:
                         output=decision.reason,
                         error_code="blocked_by_policy",
                     )
+                    if self.progress_reporter:
+                        self.progress_reporter.tool_skipped(action, f"blocked: {decision.reason}")
                     self._attach_action_metadata(result, action)
                     session.add_tool_result(result)
                     turn_results.append(result)
@@ -196,6 +221,7 @@ class ExecutionEngine:
         )
 
     def _finish(self, summary: ExecutionSummary) -> ExecutionSummary:
+        self.current_session = None
         if not self._keep_tool_state:
             close_state = getattr(self.tools, "reset_state", None)
             if callable(close_state):
@@ -289,52 +315,67 @@ class ExecutionEngine:
         return bool(approved)
 
     def _execute_action(self, action, cwd: str, permissions: PermissionContext) -> ToolResult:
-        result = self.tools.execute(action, cwd=cwd, allowed_roots=permissions.workspace_roots(scopes={"run"}))
-        self._attach_action_metadata(result, action)
-        if result.error_code != "path_outside_workspace":
+        progress_handle = None
+        result = None
+        if self.progress_reporter:
+            progress_handle = self.progress_reporter.tool_started(action.name)
+        try:
+            result = self.tools.execute(action, cwd=cwd, allowed_roots=permissions.workspace_roots(scopes={"run"}))
+            self._attach_action_metadata(result, action)
+            if result.error_code == "path_outside_workspace":
+                if progress_handle is not None:
+                    self.progress_reporter.tool_finished(progress_handle, action, result)
+                    progress_handle = None
+
+                grant_path = self._workspace_grant_path(result)
+                if grant_path is not None:
+                    scope = "run"
+                    approval = ToolAction(
+                        name="workspace_access",
+                        arguments={
+                            "path": grant_path,
+                            "scope": scope,
+                            "requested_by": action.name,
+                            "original_arguments": dict(action.arguments),
+                        },
+                    )
+                    reason = (
+                        f"tool '{action.name}' requested access outside the current workspace: {grant_path}. "
+                        "Approve only if this path is part of the task."
+                    )
+                    if not self._approved(approval, reason):
+                        ret_res = ToolResult(
+                            name=action.name,
+                            success=False,
+                            output=reason,
+                            error_code="approval_required",
+                            metadata={
+                                "action_arguments": dict(action.arguments),
+                                "path": grant_path,
+                                "requested_by": action.name,
+                            },
+                        )
+                        return ret_res
+
+                    grant = permissions.grant_workspace_path(grant_path, scope=scope)
+                    self.logger.record(
+                        "workspace.grant",
+                        {"path": grant.path, "scope": grant.scope, "requested_by": action.name},
+                    )
+                    if self.progress_reporter:
+                        progress_handle = self.progress_reporter.tool_started(action.name)
+                    retried = self.tools.execute(action, cwd=cwd, allowed_roots=permissions.workspace_roots(scopes={"run"}))
+                    self._attach_action_metadata(retried, action)
+                    retried.metadata["workspace_grant"] = grant.path
+                    retried.metadata["workspace_grant_scope"] = grant.scope
+                    result = retried
             return result
-
-        grant_path = self._workspace_grant_path(result)
-        if grant_path is None:
-            return result
-
-        scope = "run"
-        approval = ToolAction(
-            name="workspace_access",
-            arguments={
-                "path": grant_path,
-                "scope": scope,
-                "requested_by": action.name,
-                "original_arguments": dict(action.arguments),
-            },
-        )
-        reason = (
-            f"tool '{action.name}' requested access outside the current workspace: {grant_path}. "
-            "Approve only if this path is part of the task."
-        )
-        if not self._approved(approval, reason):
-            return ToolResult(
-                name=action.name,
-                success=False,
-                output=reason,
-                error_code="approval_required",
-                metadata={
-                    "action_arguments": dict(action.arguments),
-                    "path": grant_path,
-                    "requested_by": action.name,
-                },
-            )
-
-        grant = permissions.grant_workspace_path(grant_path, scope=scope)
-        self.logger.record(
-            "workspace.grant",
-            {"path": grant.path, "scope": grant.scope, "requested_by": action.name},
-        )
-        retried = self.tools.execute(action, cwd=cwd, allowed_roots=permissions.workspace_roots(scopes={"run"}))
-        self._attach_action_metadata(retried, action)
-        retried.metadata["workspace_grant"] = grant.path
-        retried.metadata["workspace_grant_scope"] = grant.scope
-        return retried
+        finally:
+            if progress_handle is not None:
+                if result is None:
+                    self.progress_reporter.tool_aborted(progress_handle)
+                else:
+                    self.progress_reporter.tool_finished(progress_handle, action, result)
 
     def _workspace_grant_path(self, result: ToolResult) -> str | None:
         raw_path = result.metadata.get("resolved_path") or result.metadata.get("path")

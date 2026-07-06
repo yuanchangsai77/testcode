@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+try:
+    import readline
+except ImportError:
+    pass
+
 from ..types import ExecutionSummary, SessionRecord, StoredSession, UserRequest
 from .presenter import ConsolePresenter
 
@@ -37,14 +42,14 @@ class CLI:
                 session.status = "active"
                 session.messages = list(conversation)
                 self.session_store.save(session)
-            self.presenter.show_session_state(session, resumed=resumed)
+            self.presenter.show_session_state(session, resumed=resumed, engine=self.engine)
 
         prompt = initial_prompt
 
         while True:
             if prompt is None:
                 try:
-                    prompt = input("testcode> ").strip()
+                    prompt = self.presenter.prompt_input(engine=self.engine)
                 except KeyboardInterrupt:
                     print()
                     self._close_session(session, conversation)
@@ -61,6 +66,27 @@ class CLI:
             if prompt.lower() in {"exit", "quit"}:
                 self._close_session(session, conversation)
                 return
+
+            if prompt.startswith("/") or prompt in {"?", "？"}:
+                cmd_parts = prompt.split()
+                cmd = cmd_parts[0].lower()
+                if cmd in {"/help", "?", "？"}:
+                    self.presenter.show_help()
+                    prompt = None
+                    continue
+                elif cmd == "/tasks":
+                    self.presenter.show_tasks()
+                    prompt = None
+                    continue
+                elif cmd == "/skills":
+                    self.presenter.show_skills(self.engine)
+                    prompt = None
+                    continue
+                elif cmd == "/mode":
+                    mode_arg = cmd_parts[1].lower() if len(cmd_parts) > 1 else None
+                    self.presenter.show_or_change_mode(self.engine, mode_arg)
+                    prompt = None
+                    continue
 
             active_skills = []
             if session is not None:
@@ -100,16 +126,20 @@ class CLI:
                 self.logger.start_run(request, registered_skills=registered_skills)
                 self._attach_last_run_id(session)
                 self.session_store.save(session)
-            summary = self._run_once(request)
-            conversation.append({"role": "user", "content": prompt})
-            conversation.append({"role": "assistant", "content": summary.final_message})
-            if session is not None:
-                session.messages = list(conversation)
-                session.status = "active"
-                if hasattr(summary, "active_skills"):
-                    session.active_skills = [s.metadata.name for s in summary.active_skills]
-                self._attach_last_run_id(session)
-                self.session_store.save(session)
+            try:
+                summary = self._run_once(request)
+                conversation.append({"role": "user", "content": prompt})
+                conversation.append({"role": "assistant", "content": summary.final_message})
+                if session is not None:
+                    session.messages = list(conversation)
+                    session.status = "active"
+                    if hasattr(summary, "active_skills"):
+                        session.active_skills = [s.metadata.name for s in summary.active_skills]
+                    self._attach_last_run_id(session)
+                    self.session_store.save(session)
+            except KeyboardInterrupt:
+                prompt = None
+                continue
             prompt = None
 
     def list_sessions(self) -> list[SessionRecord]:
@@ -158,8 +188,21 @@ class CLI:
             self.logger.start_run(request, registered_skills=registered_skills)
         self.presenter.show_start(request)
         try:
+            self.presenter.show_status_bar(engine=self.engine, is_running=True)
             summary = self.engine.execute(request)
+            self.presenter.clear_running_status_bar(len(summary.tool_results))
+        except KeyboardInterrupt:
+            tools_count = 0
+            if hasattr(self.engine, "current_session") and self.engine.current_session:
+                tools_count = len(self.engine.current_session.tool_results)
+            self.presenter.clear_running_status_bar(tools_count)
+            self.presenter.show_interrupted()
+            if hasattr(self.engine, "_finish"):
+                dummy_summary = ExecutionSummary(final_message="Interrupted", tool_results=[])
+                self.engine._finish(dummy_summary)
+            raise KeyboardInterrupt
         except RuntimeError as error:
+            self.presenter.clear_running_status_bar(0)
             if self.logger is not None:
                 self.logger.record("run.error", {"message": str(error)})
             summary = ExecutionSummary(

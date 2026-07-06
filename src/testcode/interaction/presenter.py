@@ -5,6 +5,8 @@ import re
 from html import unescape
 
 from ..types import ExecutionSummary, SessionRecord, StoredSession, ToolResult, UserRequest
+from .input import PromptBox, StatusBar
+from .terminal import Spinner
 
 
 class ConsolePresenter:
@@ -12,24 +14,26 @@ class ConsolePresenter:
 
     def __init__(self, tool_result_summarizer=None) -> None:
         self.tool_result_summarizer = tool_result_summarizer
+        self.status_bar = StatusBar()
+        self.prompt_box = PromptBox(self.status_bar)
 
     def show_start(self, request: UserRequest) -> None:
-        print(f"[testcode] task: {request.prompt}")
-        print(f"[testcode] cwd: {request.cwd}")
+        pass
 
     def show_summary(self, summary: ExecutionSummary) -> None:
         thinking = self._extract_thinking(summary.final_message)
+        
+        GRAY = "\033[90m"
+        RESET = "\033[0m"
+        
         if thinking:
-            print("[testcode] thinking:")
-            print(thinking)
-        print("[testcode] result:")
-        print(self._display_text(summary.final_message))
-        if summary.tool_results:
-            print("[testcode] tool results:")
-            for result in summary.tool_results:
-                status = "ok" if result.success else "blocked"
-                output = self._summarize_tool_result(result)
-                print(f"- {result.name}: {status} -> {output}")
+            print(f"\n {GRAY}› thinking:{RESET}")
+            indented_thinking = "\n".join(f"   {line}" for line in thinking.splitlines())
+            print(f"{GRAY}{indented_thinking}{RESET}")
+            
+        response_text = self._display_text(summary.final_message)
+        indented_response = "\n".join(f"   {line}" for line in response_text.splitlines())
+        print(f"\n{indented_response}\n")
 
     def _summarize_tool_result(self, result: ToolResult) -> str:
         if self.tool_result_summarizer is not None:
@@ -46,16 +50,34 @@ class ConsolePresenter:
         return self._summarize_tool_output(result.output)
 
     def confirm_tool_action(self, action, reason: str) -> bool:
-        print(f"[testcode] approval required: {action.name}")
-        print(f"[testcode] reason: {reason}")
+        CYAN = "\033[1;36m"
+        YELLOW = "\033[1;33m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+
+        print(f"\n {YELLOW}•{RESET} {BOLD}Requesting permission for:{RESET} {CYAN}{action.name}{RESET}")
+        print(f"   {BOLD}Reason:{RESET} {reason}")
+        
         if action.arguments:
-            arguments = json.dumps(action.arguments, ensure_ascii=False, sort_keys=True)
-            print(f"[testcode] arguments: {self._summarize_tool_output(arguments)}")
+            arguments = json.dumps(action.arguments, ensure_ascii=False)
+            if len(arguments) > 80:
+                arguments = json.dumps(action.arguments, ensure_ascii=False, indent=2)
+            indented_args = "\n".join(f"      {line}" for line in arguments.splitlines())
+            print(f"   {BOLD}Arguments:{RESET}\n{indented_args}")
+            
         if action.name == "patch" and isinstance(action.arguments.get("diff"), str):
-            print("[testcode] patch preview:")
-            print(action.arguments["diff"])
-        answer = input("Allow this tool call? [y/N] ").strip().lower()
-        return answer in {"y", "yes"}
+            print(f"   {BOLD}Patch Preview:{RESET}")
+            indented_diff = "\n".join(f"      {line}" for line in action.arguments["diff"].splitlines())
+            print(indented_diff)
+
+        print(f"   {BOLD}Do you want to proceed?{RESET}")
+        print(f"    {CYAN}>{RESET} 1. Yes")
+        print("      2. No")
+        print()
+        
+        engine = getattr(self, "engine", None)
+        choice = self.prompt_box.read_selection(engine=engine)
+        return choice in {"1", "y", "yes"}
 
     def _summarize_tool_output(self, output: str) -> str:
         single_line = " ".join(str(output).split())
@@ -73,7 +95,19 @@ class ConsolePresenter:
         )
         without_tags = re.sub(r"</?[\w:.-]+[^>]*>", "", without_parameters)
         without_tool_attrs = re.sub(r'-?\s*tool="[^"]+"\s*>?', "", without_tags)
-        return " ".join(unescape(without_tool_attrs).split())
+        unescaped = unescape(without_tool_attrs)
+        
+        # Clean up lines to avoid duplicate consecutive empty lines while preserving line breaks
+        lines = unescaped.splitlines()
+        cleaned_lines = []
+        for line in lines:
+            line_str = line.strip()
+            if line_str:
+                cleaned_lines.append(line_str)
+            else:
+                if cleaned_lines and cleaned_lines[-1] != "":
+                    cleaned_lines.append("")
+        return "\n".join(cleaned_lines).strip()
 
     def _extract_thinking(self, value: str) -> str:
         parts = [
@@ -83,10 +117,83 @@ class ConsolePresenter:
         ]
         return "\n".join(parts)
 
-    def show_session_state(self, session: StoredSession, resumed: bool) -> None:
-        action = "resumed" if resumed else "started"
-        print(f"[testcode] session {action}: {session.session_id}")
-        print(f"[testcode] session cwd: {session.cwd}")
+    def show_session_state(self, session: StoredSession, resumed: bool, engine=None) -> None:
+        # Standard ANSI colors
+        CYAN = "\033[1;36m"
+        GREEN = "\033[1;32m"
+        YELLOW = "\033[1;33m"
+        MAGENTA = "\033[1;35m"
+        GRAY = "\033[90m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+
+        logo = f"""
+{CYAN}  _            _                 _                 
+ | |_ ___  ___| |_ ___  ___   __| | ___ 
+ | __/ _ \\/ __| __/ __|/ _ \\ / _` |/ _ \\
+ | ||  __/\\__ \\ || (__| (_) | (_| |  __/
+  \\__\\___||___/\\__\\___|\\___/ \\__,_|\\___|{RESET}
+"""
+        print(logo)
+
+        import sys
+        import platform
+        import os
+
+        # Try to detect if we are in a virtual environment
+        venv_name = None
+        if sys.prefix != sys.base_prefix:
+            venv_name = os.path.basename(sys.prefix)
+        else:
+            for possible_venv in (".venv", "venv", "env"):
+                if os.path.isdir(os.path.join(session.cwd, possible_venv)):
+                    venv_name = possible_venv
+                    break
+
+        env_str = f"Python {sys.version.split()[0]}"
+        if venv_name:
+            env_str += f" ({venv_name})"
+        env_str += f" on {platform.system()}"
+
+        action_str = "Resumed" if resumed else "Started"
+        session_id_colored = f"{YELLOW}{session.session_id}{RESET}"
+
+        # Safety Mode Coloring
+        mode_val = "confirm"
+        if engine and hasattr(engine, "guardrails") and hasattr(engine.guardrails, "policy"):
+            mode_val = getattr(engine.guardrails.policy, "mode", "confirm")
+
+        if mode_val == "auto":
+            mode_colored = f"{MAGENTA}auto{RESET} (Tool calls run automatically)"
+        elif mode_val == "readonly":
+            mode_colored = f"{GREEN}readonly{RESET} (No write operations allowed)"
+        else:
+            mode_colored = f"{YELLOW}confirm{RESET} (Tool calls require approval)"
+
+        # Border Line
+        border = f"{GRAY}─────────────────────────────────────────────────────────────────{RESET}"
+
+        print(border)
+        print(f" {GRAY}›{RESET} {BOLD}Workspace:{RESET}   {session.cwd}")
+        print(f" {GRAY}›{RESET} {BOLD}Session:{RESET}     {action_str} - {session_id_colored}")
+        print(f" {GRAY}›{RESET} {BOLD}Safety Mode:{RESET} {mode_colored}")
+        print(f" {GRAY}›{RESET} {BOLD}System:{RESET}      {env_str}")
+        print(border)
+
+        # Print loaded component stats if engine is provided
+        if engine:
+            loaders_count = len(getattr(engine, "context_loaders", []))
+            tools_count = len(getattr(engine.tools, "_tools", {})) if hasattr(engine, "tools") else 0
+            skills_count = len(getattr(engine.skills_registry, "_skills", {})) if hasattr(engine, "skills_registry") else 0
+
+            print(f" {GRAY}›{RESET} {BOLD}Loaded Components:{RESET}")
+            print(f"   {GREEN}•{RESET} {BOLD}{loaders_count}{RESET} Context Loaders")
+            print(f"   {GREEN}•{RESET} {BOLD}{tools_count}{RESET} Tools")
+            print(f"   {GREEN}•{RESET} {BOLD}{skills_count}{RESET} Skills")
+            print(border)
+
+        print(f"  {GRAY}Type \"exit\" or \"quit\" to end the session.{RESET}")
+        print()
 
     def show_session_list(self, sessions: list[SessionRecord]) -> None:
         if not sessions:
@@ -102,3 +209,174 @@ class ConsolePresenter:
             )
             print(f"  cwd: {session.cwd}")
             print(f"  preview: {preview}")
+
+    def show_thinking_start(self) -> Spinner:
+        spinner = Spinner(message="Model is thinking...")
+        spinner.start()
+        return spinner
+
+    def show_thinking_end(self, spinner: Spinner) -> None:
+        spinner.stop()
+        self.clear_running_status_bar(0)
+
+    def model_started(self) -> Spinner:
+        return self.show_thinking_start()
+
+    def model_finished(self, handle: Spinner) -> None:
+        self.show_thinking_end(handle)
+
+    def show_tool_start(self, action_name: str) -> Spinner:
+        YELLOW = "\033[1;33m"
+        CYAN = "\033[1;36m"
+        RESET = "\033[0m"
+        prefix = f" {YELLOW}•{RESET}"
+        message = f"{CYAN}{action_name}{RESET} -> Executing"
+        spinner = Spinner(message=message, prefix=prefix)
+        spinner.start()
+        return spinner
+
+    def show_tool_end(self, spinner: Spinner, action, result: ToolResult) -> None:
+        spinner.stop()
+        
+        # Color codes
+        GREEN = "\033[1;32m"
+        RED = "\033[1;31m"
+        CYAN = "\033[1;36m"
+        RESET = "\033[0m"
+
+        args_str = self._format_args(action.arguments)
+        args_display = f"({args_str})" if args_str else ""
+        
+        output_summary = self._summarize_tool_result(result)
+        
+        if result.success:
+            print(f" {GREEN}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {output_summary}")
+        else:
+            print(f" {RED}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {RED}{output_summary}{RESET}")
+
+    def show_tool_skipped(self, action, reason: str) -> None:
+        YELLOW = "\033[1;33m"
+        CYAN = "\033[1;36m"
+        RESET = "\033[0m"
+
+        args_str = self._format_args(action.arguments)
+        args_display = f"({args_str})" if args_str else ""
+        print(f" {YELLOW}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {YELLOW}{reason}{RESET}")
+
+    def tool_started(self, action_name: str) -> Spinner:
+        return self.show_tool_start(action_name)
+
+    def tool_finished(self, handle: Spinner, action, result: ToolResult) -> None:
+        self.show_tool_end(handle, action, result)
+
+    def tool_aborted(self, handle: Spinner) -> None:
+        handle.stop()
+
+    def tool_skipped(self, action, reason: str) -> None:
+        self.show_tool_skipped(action, reason)
+
+    def _format_args(self, arguments: dict) -> str:
+        if not arguments:
+            return ""
+        parts = []
+        for k, v in arguments.items():
+            v_str = str(v)
+            if len(v_str) > 40:
+                v_str = v_str[:37] + "..."
+            if " " in v_str or v_str.startswith("{") or v_str.startswith("["):
+                parts.append(f"{k}=\"{v_str}\"")
+            else:
+                parts.append(f"{k}={v_str}")
+        return ", ".join(parts)
+
+    def show_status_bar(self, engine=None, active_tasks_count=0, is_running=False, left_override=None) -> None:
+        self.status_bar.show(
+            engine=engine,
+            active_tasks_count=active_tasks_count,
+            is_running=is_running,
+            left_override=left_override,
+        )
+
+    def show_help(self) -> None:
+        CYAN = "\033[1;36m"
+        BOLD = "\033[1m"
+        RESET = "\033[0m"
+        GRAY = "\033[90m"
+        
+        print(f"\n{BOLD}testcode CLI Workbench Shortcuts & Commands:{RESET}")
+        print(f"  {CYAN}/help, ?{RESET}       Show this help message")
+        print(f"  {CYAN}/tasks{RESET}         List active background tasks")
+        print(f"  {CYAN}/skills{RESET}        List all scanned skills and metadata")
+        print(f"  {CYAN}/mode [mode]{RESET}  Show or change safety mode ({GRAY}readonly{RESET}/{GRAY}confirm{RESET}/{GRAY}auto{RESET})")
+        print(f"  {CYAN}exit, quit{RESET}     Exit the current workbench session\n")
+
+    def show_tasks(self) -> None:
+        print("\nNo active background tasks running in this session.\n")
+
+    def show_skills(self, engine) -> None:
+        CYAN = "\033[1;36m"
+        BOLD = "\033[1m"
+        RESET = "\033[0m"
+        
+        skills = {}
+        if engine and hasattr(engine, "skills_registry") and engine.skills_registry:
+            skills = getattr(engine.skills_registry, "_skills", {})
+            
+        print(f"\n{BOLD}Scanned Skill Registry:{RESET}")
+        if not skills:
+            print("  No skills found in registry.")
+        else:
+            for name, meta in skills.items():
+                version = getattr(meta, "version", "0.1.0")
+                desc = getattr(meta, "description", "")
+                triggers = getattr(meta, "triggers", [])
+                print(f"  {CYAN}• {name}{RESET} (v{version}) - {desc}")
+                if triggers:
+                    print(f"    Triggers: {', '.join(triggers)}")
+        print()
+
+    def show_or_change_mode(self, engine, mode_arg: str | None = None) -> None:
+        GREEN = "\033[1;32m"
+        YELLOW = "\033[1;33m"
+        RED = "\033[1;31m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+        
+        if not engine or not hasattr(engine, "guardrails") or not hasattr(engine.guardrails, "policy"):
+            print("Engine policy configuration is not available.\n")
+            return
+            
+        policy = engine.guardrails.policy
+        
+        if not mode_arg:
+            current_mode = getattr(policy, "mode", "confirm")
+            print(f"\nCurrent safety mode: {BOLD}{current_mode}{RESET}\n")
+            return
+            
+        if mode_arg not in {"readonly", "confirm", "auto"}:
+            print(f"\n{RED}Error:{RESET} Invalid mode '{mode_arg}'. Use readonly, confirm, or auto.\n")
+            return
+            
+        policy.mode = mode_arg
+        print(f"\nSafety mode successfully updated to: {BOLD}{mode_arg}{RESET}\n")
+
+    def show_input_border(self) -> None:
+        self.prompt_box.show_border()
+
+    def clear_previous_status_bar(self) -> None:
+        import sys
+        if sys.stdout.isatty():
+            # Move up 3 lines, carriage return, clear the entire line, and move back down 3 lines
+            sys.stdout.write("\r\033[3A\r\033[2K\033[3B\r")
+            sys.stdout.flush()
+
+    def show_interrupted(self) -> None:
+        RED = "\033[1;31m"
+        RESET = "\033[0m"
+        print(f"\n {RED}⎿  Interrupted · What should testcode CLI do instead?{RESET}\n")
+
+    def clear_running_status_bar(self, tools_count: int) -> None:
+        self.status_bar.clear_running(tools_count)
+
+    def prompt_input(self, engine=None) -> str:
+        return self.prompt_box.prompt_input(engine=engine)

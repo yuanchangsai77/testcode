@@ -231,7 +231,20 @@ class ModelReplyParser:
         )
         without_tags = re.sub(r"</?[\w:.-]+[^>]*>", "", without_parameters)
         without_tool_attrs = re.sub(r'-?\s*tool="[^"]+"\s*>?', "", without_tags)
-        message = " ".join(unescape(without_tool_attrs).split())
+        unescaped = unescape(without_tool_attrs)
+        
+        # Clean up lines to avoid duplicate consecutive empty lines while preserving line breaks
+        lines = unescaped.splitlines()
+        cleaned_lines = []
+        for line in lines:
+            line_str = line.strip()
+            if line_str:
+                cleaned_lines.append(line_str)
+            else:
+                if cleaned_lines and cleaned_lines[-1] != "":
+                    cleaned_lines.append("")
+        message = "\n".join(cleaned_lines).strip()
+        
         return CleanedContent(
             message=message,
             thinking="\n".join(thinking_parts),

@@ -78,9 +78,11 @@ def create_app(mode: str | None = None) -> CLI:
         logger=logger,
         context_loaders=[project_rules_loader, workspace_summary_loader, explicit_context_loader, skill_loader],
         approval_callback=presenter.confirm_tool_action,
+        progress_reporter=presenter,
     )
     # Store skills registry on engine for CLI visibility
     engine.skills_registry = skills_registry
+    presenter.engine = engine
 
     session_store = SessionStore()
     return CLI(engine=engine, presenter=presenter, logger=logger, session_store=session_store)
