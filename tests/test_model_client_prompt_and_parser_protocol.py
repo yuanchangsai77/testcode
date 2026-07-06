@@ -411,3 +411,10 @@ def test_parse_reply_retries_invalid_json_shaped_response():
     )
     assert reply.metadata == {"invalid_reply_json": True}
     assert logger.events[-1].name == "model.invalid_reply_json"
+
+
+def test_parse_reply_preserves_newlines_in_message():
+    parser = ModelReplyParser()
+    content = "Line 1.\n\nLine 2.\nLine 3."
+    reply = parser.parse_reply(content)
+    assert reply.message == "Line 1.\n\nLine 2.\nLine 3."

@@ -1,3 +1,5 @@
+import pytest
+
 from testcode.app import create_app
 from testcode.interaction.cli import CLI
 from testcode.interaction.presenter import ConsolePresenter
@@ -7,7 +9,7 @@ from testcode.safety.guardrails import Guardrails
 from testcode.safety.policy import DefaultPolicy
 from testcode.sessions import SessionStore
 from testcode.tools.builtin import build_builtin_registry
-from testcode.types import ModelReply, ToolAction, UserRequest
+from testcode.types import ModelReply, ToolAction, ToolDefinition, UserRequest
 
 
 def test_scaffold_runs_end_to_end(tmp_path, monkeypatch):
@@ -65,6 +67,133 @@ def test_engine_stops_repeated_non_retryable_tool_failures(tmp_path):
     assert model.calls == 2
     assert "requires explicit approval" in summary.final_message
     assert summary.tool_results[-1].error_code == "approval_required"
+
+
+def test_engine_stops_spinner_without_masking_tool_execute_exception(tmp_path):
+    class OneToolModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="run tool",
+                actions=[ToolAction(name="explode", arguments={})],
+                done=True,
+            )
+
+    class ExplodingTools:
+        def definitions(self):
+            return [ToolDefinition(name="explode", description="explode", risk_level="read")]
+
+        def definition_for(self, _name):
+            return ToolDefinition(name="explode", description="explode", risk_level="read")
+
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("tool exploded")
+
+    class ProgressHandle:
+        stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    class ProgressReporter:
+        def __init__(self):
+            self.handle = ProgressHandle()
+            self.tool_finished_calls = 0
+
+        def model_started(self):
+            return None
+
+        def model_finished(self, _handle):
+            return None
+
+        def tool_started(self, _action_name):
+            return self.handle
+
+        def tool_finished(self, *_args):
+            self.tool_finished_calls += 1
+
+        def tool_aborted(self, handle):
+            handle.stop()
+
+        def tool_skipped(self, *_args):
+            return None
+
+    logger = InMemoryLogger()
+    progress = ProgressReporter()
+    engine = ExecutionEngine(
+        model=OneToolModel(),
+        tools=ExplodingTools(),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        progress_reporter=progress,
+    )
+
+    with pytest.raises(RuntimeError, match="tool exploded"):
+        engine.execute(UserRequest(prompt="run tool", cwd=str(tmp_path)))
+
+    assert progress.handle.stopped is True
+    assert progress.tool_finished_calls == 0
+
+
+def test_engine_clears_current_session_when_model_raises(tmp_path):
+    class FailingModel:
+        def respond(self, _session):
+            raise RuntimeError("model failed")
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=FailingModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+    )
+
+    with pytest.raises(RuntimeError, match="model failed"):
+        engine.execute(UserRequest(prompt="fail", cwd=str(tmp_path)))
+
+    assert engine.current_session is None
+
+
+def test_engine_finishes_falsy_progress_handles(tmp_path):
+    class DoneModel:
+        def respond(self, _session):
+            return ModelReply(message="done", done=True)
+
+    class ProgressReporter:
+        def __init__(self):
+            self.model_finished_handles = []
+
+        def model_started(self):
+            return 0
+
+        def model_finished(self, handle):
+            self.model_finished_handles.append(handle)
+
+        def tool_started(self, _action_name):
+            return None
+
+        def tool_finished(self, *_args):
+            return None
+
+        def tool_aborted(self, *_args):
+            return None
+
+        def tool_skipped(self, *_args):
+            return None
+
+    logger = InMemoryLogger()
+    progress = ProgressReporter()
+    engine = ExecutionEngine(
+        model=DoneModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        progress_reporter=progress,
+    )
+
+    summary = engine.execute(UserRequest(prompt="done", cwd=str(tmp_path)))
+
+    assert summary.final_message == "done"
+    assert progress.model_finished_handles == [0]
 
 
 def test_engine_executes_approved_patch_tool(tmp_path):

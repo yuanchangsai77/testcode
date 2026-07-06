@@ -166,5 +166,7 @@ def test_patch_approval_shows_diff_preview(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert approved is True
-    assert "[testcode] patch preview:" in output
-    assert diff in output
+    assert "Patch Preview:" in output
+    assert "--- /dev/null" in output
+    assert "+++ b/new.py" in output
+    assert "+print('new')" in output
