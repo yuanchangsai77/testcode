@@ -1,5 +1,21 @@
 # testcode Build Roadmap
 
+## 文档职责
+
+本文档负责：
+
+- 说明当前系统处于什么阶段
+- 记录还缺哪些能力
+- 定义推荐实现顺序和阶段验收标准
+
+本文档不负责替代架构设计或专项接口说明。具体边界以其他文档为准：
+
+- 总体架构：`docs/architecture.md`
+- 扩展点抽象：`docs/runtime-extensibility.md`
+- Skill 设计：`docs/skill-system.md`
+- MCP 设计：`docs/mcp-integration.md`
+- tool 字段契约：`docs/tool-contract.md`
+
 本文档用于指挥 `testcode` 从当前 CLI agent scaffold 演进为一个可扩展的智能脚手架：先具备稳定的多轮对话和本地工具执行能力，再接入标准 Skill、外部 MCP，最后扩展到 team/subagent 和 A2A。
 
 ## 版本快照
@@ -19,6 +35,19 @@
 - 工具系统要能承载内置工具、Skill 派生上下文、外部 MCP tools。
 - 后续 team/subagent/A2A 都应该复用同一套 session、tool、policy、logger 基础设施。
 
+## 长任务上下文原则
+
+长任务的准确性不能靠把所有历史和环境信息都塞进 prompt。runtime 应保存完整事实，prompt 只注入继续当前任务所需的最小充分上下文。
+
+- 全量对话过程、完整工具结果、原始事件和 artifacts 必须持久化保存；剪枝只发生在模型调用前的 context packaging 阶段。
+- 剪枝逻辑必须模块化，不能散落在 session store、context loaders、prompt builder 和各个 tool 里。
+- Hot context：本轮必须使用的信息，包括当前目标、当前阶段、下一步、最近失败、待修改文件状态、最新测试结果。
+- Warm summary：压缩后的历史结论，包括已调查路径、已做决策、已完成修改、已排除方向。
+- Cold archive：完整原始记录，包括 events、details、完整工具输出、patch preview、测试日志和文件 read state；需要细节时通过工具或日志回查。
+- Checkpoint 是持久化事实来源，不等于 prompt 全量注入。resume prompt 应注入 checkpoint 的裁剪恢复包，并带上来源、run id、时间点、文件 hash 或测试命令等可核验引用。
+- 上下文裁剪必须可观察：被摘要、被省略、被截断的内容要在日志和 prompt 标记中说明，避免模型误以为上下文完整。
+- 早期实现应先建立稳定接口和透传行为，再逐步启用预算、摘要和裁剪策略，避免为了过早优化上下文而增加后续重构成本。
+
 ## 当前状态
 
 已具备：
@@ -35,18 +64,23 @@
 - `readonly`、`confirm`、`auto` 三种运行模式。
 - write/execute/test/destructive 风险审批。
 - 明显危险 shell 命令识别。
+- 项目规则、workspace summary、显式 `--context` 上下文加载。
+- Skill metadata 扫描、按 trigger 或 `/skill` 显式触发、active skill 注入 prompt。
+- 内置、用户全局、项目级 Skill 目录。
 - run 日志写入 `.testcode/runs/`。
-- pytest 覆盖了核心 engine、model、policy、tools 的一部分路径。
+- pytest 覆盖了核心 engine、model、policy、tools、context、Skill、CLI 的关键路径；当前 135 个用例通过。
 
 仍存在的关键缺口：
 
 - 模型协议已有原生 tool calling，但协议提示、响应清洗和错误恢复还需要继续打磨。
-- 修改前读取、hash 防覆盖、diff preview、测试反馈闭环还不完整。
-- 上下文收集仍偏被动，缺少项目探测、AGENTS 规则、git/test 自动摘要。
-- 没有 Skill 加载机制。
+- session 持久化层尚未保存完整长任务状态：tool history、read state、任务计划、检查点、审批上下文、测试状态。
+- 长任务仍缺少明确的 plan/task 状态机，无法稳定表达 pending、in_progress、blocked、verified、done。
+- 模型请求仍是非流式；长任务的可取消、可恢复和用户可观察进度还需要增强。
+- 上下文收集已有基础，但还缺统一 token/字符预算、分层记忆、历史摘要、旧工具输出压缩和 resume 恢复包。
+- Skill 已有最小可用链路，但缺少 references/assets/scripts 的按需加载和 Skill script 审批执行模型。
 - 没有 MCP server/tool 接入机制。
 - 没有 subagent/team/A2A 编排模型。
-- 敏感文件和日志脱敏仍不完整。
+- 敏感文件、日志脱敏和外部路径授权仍需持续补强。
 
 ## P0：稳定核心编码 CLI
 
@@ -174,14 +208,14 @@
 剩余：
 
 - 暂未做按任务选择额外规则文件；当前只加载 `AGENTS.md`。
-- 暂未读取 README 和 `docs/architecture.md` 摘要。
+- 暂未建立 README、架构文档等高价值文档的按需摘要机制。
 
 原始待办：
 
 - 从 cwd 向上查找 `AGENTS.md`。
 - 支持多层规则，近目录优先。
 - 只加载与当前任务相关的规则，避免一次性塞满上下文。
-- 读取 README 和 `docs/architecture.md` 的前 N 字符或摘要。
+- 读取 README 和 `docs/architecture.md` 等高价值文档时，优先生成预算内摘要和来源引用，避免简单塞入前 N 字符。
 - 增加多层规则冲突测试。
 
 ### P1.3 Git 和 Workspace 摘要
@@ -195,12 +229,12 @@
 
 剩余：
 
-- 暂未收集 working tree diff 摘要。
+- 暂未收集 working tree diff 的预算内摘要。
 - 暂未做 workspace summary 缓存和文件变化失效。
 
 原始待办：
 
-- 收集当前分支、git status、working tree diff 摘要、最近 commit。
+- 收集当前分支、git status、working tree diff 摘要、最近 commit；diff 只进入摘要，完整 diff 留给按需工具读取。
 - 生成目录树摘要，忽略 `.git`、venv、`node_modules`、缓存目录。
 - 缓存 workspace summary，文件变化后失效。
 - 对大目录做数量和深度限制。
@@ -219,7 +253,7 @@
 剩余：
 
 - 暂未支持更复杂的 include/exclude glob 规则。
-- 暂未做 context token 预算统一裁剪；后续并入 P7.2。
+- 暂未做 context token 预算统一裁剪；后续并入 P7.2。用户显式提供的上下文也应受总预算约束，超出时保留来源清单和摘要。
 
 原始待办：
 
@@ -237,55 +271,135 @@
 
 ### P2.1 Skill 格式
 
-- 定义 Skill 目录结构：
-  - `SKILL.md`：主要说明。
-  - `skill.toml` 或 frontmatter：name、description、triggers、version。
-  - 可选 `assets/`、`scripts/`、`references/`。
-- 支持项目 Skill：`.testcode/skills/`。
-- 支持用户全局 Skill：`~/.testcode/skills/`。
-- 支持内置标准 Skill。
+进展：
+
+- 已定义 `SKILL.md` + frontmatter 格式，支持 name、description、triggers、version。
+- 已支持内置 Skill：`src/testcode/skills/builtins/`。
+- 已支持用户全局 Skill：`~/.testcode/skills/`。
+- 已支持项目 Skill：`.testcode/skills/`。
+
+剩余：
+
+- 尚未支持 `assets/`、`scripts/`、`references/` 的标准化加载和生命周期。
+- 尚未定义 Skill 版本冲突、同名覆盖和来源优先级的用户可见诊断。
 
 ### P2.2 Skill 发现和加载
 
-- 启动时只读取 Skill metadata，不读取所有正文。
-- 根据用户请求、显式 `/skill` 命令、trigger 关键词选择相关 Skill。
-- 被选中的 Skill 才加载 `SKILL.md`。
-- Skill 引用额外文件时按需读取，避免上下文膨胀。
-- 记录本轮加载了哪些 Skill。
+进展：
+
+- 已实现启动和运行前 metadata 扫描，避免一次性加载所有正文。
+- 已实现 trigger 关键词自动匹配。
+- 已实现 `/skill <name>` 显式触发。
+- 已实现被选中的 Skill 才加载正文。
+- 已实现 active skills 跨多轮 session 传递。
+- 已记录 `skills.matched` 事件，并在 run start/details log 中展示相关 Skill 信息。
+
+剩余：
+
+- `/skill` 目前作为 prompt 触发机制存在，尚未形成完整交互命令体验。
+- 尚未实现 Skill 引用额外文件时的按需读取。
+- 尚未实现 Skill 内容的独立预算裁剪和过长内容摘要。
 
 ### P2.3 Skill 对工具和上下文的影响
 
-- Skill 可以提供额外上下文、操作流程、验证命令建议。
-- Skill 不直接绕过 policy，也不能自动获得更高权限。
-- Skill scripts 如需执行，必须转换为普通 tool action 并走审批。
-- 增加测试：自动触发、显式触发、未触发不加载、Skill script 需要审批。
+- 已完成 Skill instructions 注入 system prompt。
+- 已明确 Skill 只能提供上下文和流程建议，不绕过 policy，不自动获得更高权限。
+- 已补充自动触发、显式触发、未触发不加载、prompt 注入、跨轮保留等测试。
+
+剩余：
+
+- Skill scripts 还没有正式执行模型；后续必须转换为普通 tool action，并走同一套审批、日志和风险策略。
+- Skill 派生 tool 还没有接入 `ToolProvider`。
+
+## P2.5：正式长任务跑通
+
+目标：在接入 MCP 和 subagent 之前，先让单 agent 能稳定跑完可中断、可恢复、可复盘的长编码任务。
+
+### P2.5.0 Context Packaging 边界
+
+目标：在真正做复杂剪枝前，先建立一个独立的“模型注入前”层，集中处理 prompt context 的选择、排序、裁剪和审计。
+
+- 新增 `ContextPackager` 或等价模块，输入为 session 状态、checkpoint/archive 索引、candidate context 和 source references，输出为 `PromptContextPackage`。
+- `SessionStore` 只负责完整保存，不负责裁剪。
+- `ContextLoader` 只负责发现和产生候选上下文，不直接决定最终 prompt 预算。
+- `ModelPromptBuilder` 只负责把 `PromptContextPackage` 渲染成 provider messages，不内置复杂剪枝策略。
+- 初版 `ContextPackager` 可以只做透传、分组、来源标记和总字符统计，不急于做复杂摘要。
+- 后续预算策略、Hot/Warm/Cold 分层、摘要和裁剪都收敛到这一层；完整原始内容按需读取，不要求 packager 常驻持有。
+- 增加单元测试：完整对话被保存、packaging 后只注入预算内上下文、被省略内容带 source reference。
+
+### P2.5.1 Session Checkpoint
+
+- session schema 增加 runtime state：任务计划、当前阶段、tool history 摘要、最近失败原因、最近测试结果。
+- 保存 read state：path、mtime、sha256，使 resume 后能判断是否仍可继续 patch，或明确要求重新读取。
+- 保存 active skills、context sources、run ids、关键 artifact 摘要，并把完整工具输出和原始事件保留在 cold archive。
+- 中断、模型错误、工具错误、审批拒绝时都写入 checkpoint。
+- resume 时只将 checkpoint 的最小恢复包注入 prompt，并清楚区分历史事实、当前状态和下一步建议。
+- prompt 中的恢复包必须带来源引用，例如 run id、文件路径、mtime/hash、测试命令或 artifact id，便于按需回查完整记录。
+
+### P2.5.2 Task Plan 状态机
+
+- 引入轻量 task plan：pending、in_progress、blocked、verified、done。
+- 每次 run summary 展示当前阶段、已完成事项、阻塞原因、建议下一步。
+- 连续无进展、重复读取、重复失败测试时更新状态，而不是只返回散落的工具错误。
+- 支持用户在长会话中查看当前任务状态，例如 `/status` 或等价 CLI 命令。
+
+### P2.5.3 长任务恢复和验证闭环
+
+- Ctrl+C、模型 API 失败、工具超时后，保留可恢复状态。
+- 恢复后优先读取 checkpoint 和最新 workspace summary，再决定是否继续。
+- 对涉及文件修改的长任务，最终必须有明确验证结果：测试通过、测试失败、未运行测试及原因。
+- run details 顶部增加失败诊断摘要和下一步恢复建议。
+
+### P2.5.4 上下文预算前置版
+
+- 在完整 P7.2 前先在 `ContextPackager` 内做最小预算保护：限制 conversation、tool results、Skill、explicit context 的总字符量。
+- 旧工具输出优先压缩为摘要，保留最新失败测试、最新 patch、关键错误和可回查来源。
+- 超预算时写入日志和 prompt 标记，避免静默丢失关键上下文。
+- 预算策略默认遵循 Hot context > Warm summary > Cold archive 索引，不把 cold archive 全量注入模型。
 
 ## P3：MCP 接入
 
 目标：把外部 MCP server 暴露的 tools/resources 纳入同一套 agent runtime。
 
+详细设计见 [docs/mcp-integration.md](mcp-integration.md)。P3 的实现应以该文档中的模块拆分和边界为准，避免把 transport、server lifecycle、tool adaptation 和 resource indexing 混写成单个 provider。
+
 ### P3.1 MCP 配置
 
 - 支持全局配置：`~/.testcode/config.toml`。
 - 支持项目配置：`.testcode/config.toml`。
-- 定义 MCP server 配置：name、command、args、env、transport、enabled。
+- 定义统一 MCP server 配置：name、transport、enabled、tool_name_prefix、risk_overrides、timeout、read_timeout。
+- `stdio` 使用 `command`、`args`、`env`。
+- `streamable_http` 和 `sse` 使用 `url`、`headers`。
 - 配置优先级：CLI 参数 > env > 项目配置 > 全局配置 > 默认值。
+- `tool_name_prefix` 默认取 server name；允许显式覆盖。
+- 启动阶段校验最终稳定 tool id 全局唯一；命名冲突时拒绝注册冲突项，并输出可诊断错误。
+- 支持 `risk_overrides`，用于覆盖具体 MCP tool 的默认风险级别。
+- 支持 `${VAR}` 形式的环境变量展开，并对敏感值脱敏。
 
 ### P3.2 MCP Client Runtime
 
-- 启动并管理 stdio MCP server。
+- 先定义统一 `MCPTransport` 抽象，再分别接入 `stdio`、`streamable_http`、`sse`。
+- 第一阶段先打稳 `stdio`；`streamable_http` 第二优先；`sse` 作为后续兼容补充。
+- 将运行时拆为 `MCPTransport`、`MCPClient`、`MCPManager`、`MCPDiscoveryService`、adapter、`MCPToolProvider`、`MCPResourceProvider` 七层，分别负责消息传输、协议调用、生命周期管理、懒发现与缓存、schema/result 适配、tool 注册、resource 索引入口。
+- `MCPToolProvider` 只消费 discovery snapshot，不直接决定远端连接与刷新时机。
 - 拉取 MCP tools，转换为内部 `ToolDefinition`。
-- 拉取 MCP resources，作为显式上下文来源。
+- 拉取 MCP resources 的索引和元数据，作为可按需读取的上下文来源；通过独立 `MCPResourceProvider` 暴露，不和 tool provider 混写。
 - MCP tool 执行结果转换为统一 `ToolResult`。
 - MCP 调用同样走 policy、approval、logger。
 - MCP server 崩溃时返回可恢复错误，不拖垮主流程。
+- 同一 runtime 内复用已建立的 server client；关闭 session/runtime 时统一清理。
+- app 启动默认不强依赖所有 server 在线；新 server 可走懒发现、缓存快照和显式刷新策略。
+- URL 型 server 记录 `timeout`、`read_timeout`、HTTP/SSE 错误，并统一做 secret redaction。
 
 ### P3.3 MCP 安全模型
 
-- 为 MCP tool 定义默认 risk：未知工具默认 `confirm` 或 `network`。
+- 为 MCP tool 定义 capability traits，再映射到默认 risk；未知工具默认 `confirm`。
+- traits 至少覆盖：本地读、本地写、执行代码、网络访问、远端状态变更、凭证使用、长耗时。
 - 配置允许用户为具体 MCP tool 覆盖 risk level。
 - MCP resource 读取要走敏感信息保护和长度限制。
-- 日志记录 server name、tool name、耗时、错误码。
+- 日志记录 server name、tool name、稳定 id、traits、映射后的 risk、是否 override、耗时、错误码。
+- 不允许 MCP 通过专用通道绕过现有 `ToolRegistry`、policy 或 approval。
+- URL query、headers、env 中的 key/token 必须脱敏后再进入日志。
 
 ## P4：Team / Subagent
 
@@ -366,10 +480,11 @@
 ### P7.2 上下文预算和摘要
 
 - 定义 max input chars 或 token 近似预算。
-- conversation、tool results、workspace summary、Skill 内容按优先级裁剪。
-- 超预算时先压缩旧 tool output，再压缩旧 conversation。
-- session schema 增加 `summary` 字段。
-- 达到阈值后触发历史摘要，resume 时优先加载 summary。
+- 定义分层记忆：Hot context、Warm summary、Cold archive。
+- conversation、tool results、workspace summary、Skill 内容、explicit context、MCP resources 按优先级裁剪。
+- 超预算时先把旧 tool output 压缩为带来源引用的摘要，再压缩旧 conversation。
+- session schema 增加 `summary` 和 `archive_index` 字段；summary 用于 prompt，archive_index 用于按需回查完整记录。
+- 达到阈值后触发历史摘要，resume 时优先加载最小恢复包，而不是完整历史。
 
 ### P7.3 测试和质量工具
 
@@ -385,8 +500,7 @@
 这些能力可以做，但不应阻塞当前目标：
 
 - 结构化 replacement patch：unified diff 暂时够用。
-- 流式 token 输出：体验优化，等 tool calling 稳定后再做。
-- token usage 展示：有价值，但低于可靠编辑和 MCP/Skill。
+- token usage 展示：有价值，但低于长任务 checkpoint、上下文预算和恢复能力。
 - review 模式：可以后置到核心编辑闭环之后。
 - session rename/tag/fork：产品化功能，后置。
 - zsh/fish completion：分发阶段再做。
@@ -394,16 +508,17 @@
 
 ## 近期推荐执行顺序
 
-1. P0.5 工具输出质量，先让模型看到干净、稳定的工作区状态。
-2. P1.1-P1.3 主动上下文收集，建立项目、Git、Workspace 摘要。
-3. P1.2 项目规则加载，支持 `AGENTS.md` 和按需规则文件。
-4. P1.4 显式上下文，支持用户指定文件或目录进入本轮上下文。
-5. P2 Skill 系统，先做最小发现、触发和 `SKILL.md` 加载。
-6. P0.2-P0.3 可靠编辑和验证闭环。
-7. P3 MCP 接入。
-8. P4 本地 subagent/team。
-9. P5 A2A 远程 agent。
-10. P6/P7 体验、配置、日志、质量门禁持续补齐。
+1. 对齐文档和实现状态，补一个 `docs/versions/v0.2.md` 快照，固化当前 P0/P1/P2 最小可用边界。
+2. P2.5.0 Context packaging 边界，先建立独立注入前层，初版只做透传、分组、来源标记和统计。
+3. P2.5.1 Session checkpoint，先解决中断和 resume 后状态丢失。
+4. P2.5.2 Task plan 状态机，让长任务有明确阶段、阻塞原因和下一步。
+5. P2.5.3 长任务恢复和验证闭环，保证中断、模型失败、测试失败后能继续。
+6. P2.5.4 上下文预算前置版，在独立 packager 内建立 Hot/Warm/Cold 分层，避免长会话 prompt 失控。
+7. P2 剩余项：Skill references/assets/scripts 和 `/skill` 交互体验。
+8. P3 MCP 接入。
+9. P4 本地 subagent/team。
+10. P5 A2A 远程 agent。
+11. P6/P7 体验、配置、日志、质量门禁持续补齐。
 
 ## 第一阶段验收标准
 
@@ -418,3 +533,14 @@
 - 能识别并拒绝明显危险操作。
 - 敏感文件读取和日志输出有基础保护。
 - README 能说明如何运行、配置模型、执行一次真实代码修改任务。
+
+## 第二阶段验收标准
+
+完成 P2.5 后，`testcode` 应至少具备：
+
+- 一个长任务可以被中断、保存、恢复，并清楚说明恢复点。
+- resume 后不依赖模型猜测历史，prompt 中有最小恢复包、任务状态、关键工具结果摘要和可回查来源。
+- 文件修改任务恢复后能判断已读文件是否仍然安全，或要求重新读取。
+- 每次 run summary 都展示当前阶段、完成事项、阻塞原因、验证状态和下一步。
+- 长对话不会无限塞入旧历史；完整事实保存在 archive，prompt 只放预算内摘要；超预算时有可观察的摘要和裁剪记录。
+- 涉及代码修改的任务最终明确给出测试通过、测试失败或未运行测试的原因。
