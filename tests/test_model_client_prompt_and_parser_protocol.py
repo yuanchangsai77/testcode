@@ -11,7 +11,7 @@ from testcode.model.prompt import ModelPromptBuilder
 from testcode.model.types import ModelClientConfig
 from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.session import SessionContext
-from testcode.types import ToolDefinition, UserRequest
+from testcode.types import SessionResumeState, SessionRunTrace, SessionTurnTrace, ToolDefinition, UserRequest
 
 
 def test_post_json_wraps_timeout_as_runtime_error(monkeypatch):
@@ -185,6 +185,77 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
     assert "Session history:" in user
     assert "Available tools:" not in user
     assert "- read_file: Read a workspace file." not in user
+
+
+def test_build_messages_includes_recent_session_trace_summary():
+    builder = ModelPromptBuilder()
+    session = SessionContext(
+        request=UserRequest(
+            prompt="continue",
+            cwd="/repo",
+            metadata={
+                "session_trace": [
+                    SessionRunTrace(
+                        run_id="run-1",
+                        started_at="2026-07-10T02:00:00Z",
+                        completed_at="2026-07-10T02:00:05Z",
+                        prompt="add amap config",
+                        final_message="config written successfully",
+                        outcome="completed",
+                        event_count=12,
+                        turn_count=2,
+                        tool_names=["read_file", "patch"],
+                        turns=[
+                            SessionTurnTrace(
+                                turn=1,
+                                message="inspecting config",
+                                actions=["read_file"],
+                                tool_results=["read_file:ok"],
+                            )
+                        ],
+                    )
+                ]
+            },
+        ),
+        available_tools=[],
+    )
+
+    messages = builder.build_messages(session)
+    user = str(messages[-1]["content"])
+
+    assert "Session trace summary:" in user
+    assert "run run-1 | outcome=completed | prompt=add amap config" in user
+    assert "- tools: read_file, patch" in user
+    assert "- final: config written successfully" in user
+
+
+def test_build_messages_includes_resume_state():
+    builder = ModelPromptBuilder()
+    session = SessionContext(
+        request=UserRequest(
+            prompt="continue",
+            cwd="/repo",
+            metadata={
+                "resume_state": SessionResumeState(
+                    last_run_id="run-2",
+                    last_outcome="runtime_error",
+                    last_tool_names=["read_file", "run_tests"],
+                    open_issue="Model API is unavailable right now. timed out.",
+                    recovery_hint="Reuse earlier successful results and avoid repeating identical reads.",
+                )
+            },
+        ),
+        available_tools=[],
+    )
+
+    messages = builder.build_messages(session)
+    user = str(messages[-1]["content"])
+
+    assert "Resume state:" in user
+    assert "- last_run_id: run-2" in user
+    assert "- last_outcome: runtime_error" in user
+    assert "- last_tools: read_file, run_tests" in user
+    assert "- open_issue: Model API is unavailable right now. timed out." in user
 
 
 def test_respond_sends_native_tool_schemas_and_parses_tool_calls(monkeypatch):

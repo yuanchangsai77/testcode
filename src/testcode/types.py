@@ -52,6 +52,24 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class ResourceDescriptor:
+    id: str
+    name: str
+    description: str = ""
+    source: str = ""
+    mime_type: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ResourceContent:
+    id: str
+    text: str
+    mime_type: str = "text/plain"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .skills.model import Skill
@@ -77,6 +95,41 @@ class SessionRecord:
 
 
 @dataclass(slots=True)
+class SessionTurnTrace:
+    turn: int
+    message: str
+    actions: list[str] = field(default_factory=list)
+    tool_results: list[str] = field(default_factory=list)
+    action_details: list[str] = field(default_factory=list)
+    tool_result_details: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SessionRunTrace:
+    run_id: str
+    started_at: str
+    completed_at: str
+    prompt: str
+    final_message: str
+    outcome: str
+    event_count: int
+    turn_count: int
+    tool_names: list[str] = field(default_factory=list)
+    turns: list[SessionTurnTrace] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SessionResumeState:
+    last_run_id: str = ""
+    last_user_prompt: str = ""
+    last_assistant_message: str = ""
+    last_outcome: str = ""
+    last_tool_names: list[str] = field(default_factory=list)
+    open_issue: str = ""
+    recovery_hint: str = ""
+
+
+@dataclass(slots=True)
 class StoredSession:
     session_id: str
     cwd: str
@@ -86,4 +139,5 @@ class StoredSession:
     messages: list[dict[str, str]] = field(default_factory=list)
     run_ids: list[str] = field(default_factory=list)
     active_skills: list[str] = field(default_factory=list)
-
+    trace: list[SessionRunTrace] = field(default_factory=list)
+    resume_state: SessionResumeState = field(default_factory=SessionResumeState)

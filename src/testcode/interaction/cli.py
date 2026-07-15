@@ -99,24 +99,14 @@ class CLI:
                     "conversation": list(conversation),
                     "session_id": session.session_id if session is not None else None,
                     "active_skills": list(active_skills),
+                    "session_trace": list(getattr(session, "trace", [])[-6:]) if session is not None else [],
+                    "resume_state": getattr(session, "resume_state", None),
                     "context_paths": list(context_paths or []),
                 },
             )
             if session is not None and self.logger is not None and self.session_store is not None:
-                # We need registered skills for start_run, but wait, self.logger.start_run is also called in _run_once.
-                # So we can let _run_once handle self.logger.start_run!
-                # Wait, currently, why is self.logger.start_run called twice?
-                # Ah! In CLI.chat:
-                # ```
-                # if session is not None and self.logger is not None and self.session_store is not None:
-                #     self.logger.start_run(request)
-                #     self._attach_last_run_id(session)
-                #     self.session_store.save(session)
-                # ```
-                # Let's see: _run_once also does `self.logger.start_run(request)`.
-                # InMemoryLogger has a check: `if self.run_dir is not None: return`.
-                # So the first call to start_run actually initializes the run_id, and the second call in _run_once returns early.
-                # Thus, we must provide the registered_skills in BOTH places, or simply call it correctly in both places!
+                # Start early so the run id can be attached to the session before execution.
+                # _run_once may call start_run again; the logger treats that as a no-op.
                 registered_skills = []
                 if hasattr(self.engine, "context_loaders"):
                     for loader in self.engine.context_loaders:
@@ -135,9 +125,18 @@ class CLI:
                     session.status = "active"
                     if hasattr(summary, "active_skills"):
                         session.active_skills = [s.metadata.name for s in summary.active_skills]
+                    run_summary = getattr(self.logger, "last_run_summary", None)
+                    if run_summary is not None and all(item.run_id != run_summary.run_id for item in session.trace):
+                        session.trace.append(run_summary)
                     self._attach_last_run_id(session)
                     self.session_store.save(session)
             except KeyboardInterrupt:
+                if session is not None:
+                    run_summary = getattr(self.logger, "last_run_summary", None)
+                    if run_summary is not None and all(item.run_id != run_summary.run_id for item in session.trace):
+                        session.trace.append(run_summary)
+                    self._attach_last_run_id(session)
+                    self.session_store.save(session)
                 prompt = None
                 continue
             prompt = None
@@ -156,6 +155,39 @@ class CLI:
         if self.session_store is None:
             return None
         return self.session_store.latest()
+
+    def persist_run(
+        self,
+        session: StoredSession,
+        prompt: str,
+        summary: ExecutionSummary,
+        *,
+        status: str = "active",
+        close_runtime: bool = False,
+    ) -> None:
+        if self.session_store is None:
+            return
+        session.messages.extend(
+            [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": summary.final_message},
+            ]
+        )
+        session.status = status
+        if hasattr(summary, "active_skills"):
+            session.active_skills = [skill.metadata.name for skill in summary.active_skills]
+        run_summary = getattr(self.logger, "last_run_summary", None)
+        if run_summary is not None and all(item.run_id != run_summary.run_id for item in session.trace):
+            session.trace.append(run_summary)
+        self._attach_last_run_id(session)
+        try:
+            self.session_store.save(session)
+        finally:
+            if close_runtime:
+                tools = getattr(self.engine, "tools", None)
+                reset_state = getattr(tools, "reset_state", None)
+                if callable(reset_state):
+                    reset_state()
 
     def choose_session(self, prompt: str = "Select a session number to resume") -> StoredSession | None:
         sessions = self.list_sessions()
@@ -193,13 +225,18 @@ class CLI:
             self.presenter.clear_running_status_bar(len(summary.tool_results))
         except KeyboardInterrupt:
             tools_count = 0
+            interrupted_results = []
             if hasattr(self.engine, "current_session") and self.engine.current_session:
                 tools_count = len(self.engine.current_session.tool_results)
+                interrupted_results = list(self.engine.current_session.tool_results)
             self.presenter.clear_running_status_bar(tools_count)
             self.presenter.show_interrupted()
+            interrupted_summary = ExecutionSummary(final_message="Interrupted", tool_results=interrupted_results)
             if hasattr(self.engine, "_finish"):
-                dummy_summary = ExecutionSummary(final_message="Interrupted", tool_results=[])
-                self.engine._finish(dummy_summary)
+                self.engine._finish(interrupted_summary)
+            if self.logger is not None:
+                self.logger.record("run.interrupted", {"tool_count": tools_count})
+                self.logger.finalize(request, interrupted_summary)
             raise KeyboardInterrupt
         except RuntimeError as error:
             self.presenter.clear_running_status_bar(0)
@@ -218,12 +255,20 @@ class CLI:
         return summary
 
     def _close_session(self, session, conversation: list[dict[str, str]]) -> None:
-        if session is None or self.session_store is None:
-            return
-        session.status = "closed"
-        self._attach_last_run_id(session)
-        session.messages = list(conversation)
-        self.session_store.save(session)
+        try:
+            if session is not None and self.session_store is not None:
+                session.status = "closed"
+                run_summary = getattr(self.logger, "last_run_summary", None)
+                if run_summary is not None and all(item.run_id != run_summary.run_id for item in session.trace):
+                    session.trace.append(run_summary)
+                self._attach_last_run_id(session)
+                session.messages = list(conversation)
+                self.session_store.save(session)
+        finally:
+            tools = getattr(self.engine, "tools", None)
+            reset_state = getattr(tools, "reset_state", None)
+            if callable(reset_state):
+                reset_state()
 
     def _attach_last_run_id(self, session: StoredSession) -> None:
         run_id = getattr(self.logger, "last_run_id", None)

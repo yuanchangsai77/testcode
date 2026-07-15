@@ -9,18 +9,70 @@ class ToolRegistry:
         self._tools = {}
         self._logger = logger
         self._state = {}
+        self._persistent_state_names: set[str] = set()
+        self._providers = []
+        self._provider_tool_owners: dict[str, int] = {}
 
-    def register(self, tool) -> None:
+    def register(self, tool) -> bool:
+        if tool.name in self._tools:
+            self._logger.record(
+                "tool.registration_conflict",
+                {"name": tool.name, "error_code": "duplicate_tool_name"},
+            )
+            return False
         self._tools[tool.name] = tool
+        return True
+
+    def attach_state(self, name: str, value, *, persistent: bool = False) -> None:
+        self._state[name] = value
+        if persistent:
+            self._persistent_state_names.add(name)
+
+    def attach_provider(self, provider) -> None:
+        self._providers.append(provider)
+
+    def refresh_providers(self) -> None:
+        for provider in self._providers:
+            provider_id = id(provider)
+            discovered = {}
+            for tool in provider.get_tools():
+                if tool.name in discovered:
+                    self._logger.record(
+                        "tool.registration_conflict",
+                        {"name": tool.name, "error_code": "duplicate_provider_tool_name"},
+                    )
+                    continue
+                discovered[tool.name] = tool
+
+            owned_names = {
+                name for name, owner in self._provider_tool_owners.items() if owner == provider_id
+            }
+            for name in owned_names - discovered.keys():
+                self._tools.pop(name, None)
+                self._provider_tool_owners.pop(name, None)
+
+            for name, tool in discovered.items():
+                owner = self._provider_tool_owners.get(name)
+                if owner == provider_id:
+                    self._tools[name] = tool
+                    continue
+                if not self.register(tool):
+                    continue
+                self._provider_tool_owners[name] = provider_id
 
     def reset_state(self) -> None:
         for value in self._state.values():
             close = getattr(value, "close", None)
             if callable(close):
                 close()
-        self._state = {}
+        self._state = {
+            name: value
+            for name, value in self._state.items()
+            if name in self._persistent_state_names
+        }
 
     def definitions(self) -> list[ToolDefinition]:
+        self.refresh_providers()
         return [tool.definition() for tool in self._tools.values() if getattr(tool, "exposed", True)]
 
     def definition_for(self, name: str) -> ToolDefinition | None:

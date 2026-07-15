@@ -17,6 +17,15 @@
 
 本文档定义 `testcode` 中 MCP 接入的目标边界、模块拆分、运行时职责和实施顺序。重点不是“把外部 tool 接进来能跑”，而是让 MCP 能稳定复用现有 runtime 的 tool、policy、logger、session 和 prompt 约束，同时为后续 `stdio`、`streamable_http`、`sse` 和 URL 型服务预留稳定演进空间。
 
+当前仓库实现状态：
+
+- 已有 `ToolProvider`，并已补齐 `ResourceProvider` 扩展面。
+- 已补齐 `src/testcode/mcp/` 模块骨架，包括 `config`、`types`、`client`、`manager`、`discovery`、`adapter`、`provider`。
+- `app.py` 已装配 MCP tool/resource provider，并将 manager 纳入统一生命周期清理。
+- 已实现 `stdio`、`streamable_http` 与 `sse` 的最小可用 transport 和 client 协议调用主链路。
+- 已实现内存与磁盘 discovery cache、一次性失效重连、MCP 专项事件、基础 capability traits 和未知工具默认确认。
+- 后续仍需扩充 traits 语义，并将 resource provider 接入完整的候选上下文选择与预算流程。
+
 ## 1. 目标
 
 MCP 接入应满足以下目标：
@@ -162,6 +171,13 @@ src/testcode/mcp/
 
 ## 6. 运行时数据流
 
+在当前实现里，数据流先落成了组合骨架：
+
+1. `load_runtime_config()` 读取 `.testcode/config.toml` 中的 `[[mcp.servers]]`。
+2. `app.py` 基于这些配置创建 `MCPManager`、`MCPDiscoveryService` 和 `MCPToolProvider`。
+3. `MCPToolProvider.get_tools()` 从 discovery snapshot 读取 descriptor，并通过 adapter 生成内部 `Tool`。
+4. 当 transport 尚未实现时，discovery 会记录 `mcp_server_unavailable` 级别的受控错误，provider 返回空集合，builtin tools 仍可继续工作。
+
 ### 6.1 Tool Discovery
 
 应用启动或建 app 时：
@@ -177,6 +193,22 @@ src/testcode/mcp/
 - app 启动期默认不强制连接所有远端 server。
 - 对没有缓存的新 server，可选择延迟到首次相关操作或显式刷新时再执行 `initialize` / `tools/list`。
 - discovery 失败只影响对应 server，不应拖垮整个 CLI 启动。
+
+### 6.3 Composition Root Wiring
+
+MCP 必须只在 application composition root 装配，不允许由 engine 内部懒创建。推荐装配顺序：
+
+1. 加载 runtime config，得到 `mcp_servers`
+2. 创建 `MCPManager`
+3. 创建 `MCPDiscoveryService`
+4. 创建 `MCPToolProvider`
+5. 与 `BuiltinToolProvider` 一起注册到同一个 `ToolRegistry`
+
+这样能保证：
+
+- engine 只面对统一的 `ToolRegistry`
+- policy、approval、logger 不需要感知 MCP 来源
+- transport/client/discovery 的演进不会污染 orchestration loop
 
 ### 6.2 Tool Execution
 
@@ -484,7 +516,8 @@ MCP tool 返回内容后，适配器应按 `docs/tool-contract.md` 的约定决�
 
 - 模型继续推理需要的短结果，进入 `ToolResult.output`
 - 结构化、审计或调试字段，进入 `ToolResult.metadata`
-- 大体量原始返回不要无脑塞进 `output`
+- `ToolResult.output` 最多保留 100,000 字符，超出部分截断，并在输出中明确标记
+- 超限的完整结果经过脱敏后写入 run artifact；结构化内容和远端 metadata 同样受大小限制
 
 建议 metadata 至少包含：
 
@@ -493,6 +526,7 @@ MCP tool 返回内容后，适配器应按 `docs/tool-contract.md` 的约定决�
 - `duration_ms`
 - `transport`
 - `truncated`
+- `artifact_path`
 
 ## 12. 风险模型
 
@@ -512,6 +546,7 @@ MCP 不能使用“因为是外部系统所以全部自由放行”的策略。�
 
 - 纯只读本地或只读远程查询，可映射到较低风险。
 - 涉及写文件、执行命令、远端状态变更、凭证使用的能力，默认提升到 `confirm` 或更高策略。
+- 服务端返回的 tool annotations 属于不可信提示，只能用于提高风险，不能把未知能力降为免审批的 `read`。
 - `risk_overrides` 是显式覆盖入口，但应覆盖的是最终策略，不应跳过 trait 推断和审计记录。
 
 默认建议如下：
@@ -548,6 +583,10 @@ MCP 最大的工程风险不在 schema，而在连接和进程生命周期。
 - 多轮会话中优先复用已建立的 client。
 - `ToolRegistry.reset_state()` 或 app 关闭时，由 `MCPManager` 统一关闭 transport/client。
 - server 崩溃后，不复用失效 client；下一次发现或调用时允许重建。
+- stdio、Streamable HTTP 和 SSE 都应接受单条 JSON-RPC 消息或 batch，并按请求 id 选择对应响应。
+- project MCP 配置、Skill 目录和 discovery cache 必须绑定请求或 resumed session 的 workspace，而不是启动命令所在目录。
+- 单个 server 最多暴露 256 个 tools、1,000 个 resources，单个 descriptor 最大 100,000 字符；超限项丢弃并记录诊断事件。
+- transport 在 JSON 解析前将单条 HTTP、SSE 或 stdio 消息限制为 10 MiB，避免远端异常响应导致无界内存占用。
 
 连接状态不应散落在 provider 和单个 tool 实例里；应由 manager 集中管理。
 
@@ -712,6 +751,11 @@ URL 型 transport 还应对以下字段默认脱敏：
 4. P3.2b：`streamable_http`
 5. P3.2c：`sse`
 6. P3.3：resource indexing 与 context integration
+
+当前代码进度可对应到：
+
+- 已完成：三种 transport、真实 MCP 协议 client、manager/discovery/adapter/provider、tool/resource 主链路、稳定命名、冲突拒绝、缓存、一次性重连、专项事件和安全默认值
+- 待增强：真实公网 server 的兼容性矩阵、更丰富的 traits、resource candidate context 与统一 token 预算
 
 ## 19. 结论
 

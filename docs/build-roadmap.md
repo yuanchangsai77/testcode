@@ -78,7 +78,7 @@
 - 模型请求仍是非流式；长任务的可取消、可恢复和用户可观察进度还需要增强。
 - 上下文收集已有基础，但还缺统一 token/字符预算、分层记忆、历史摘要、旧工具输出压缩和 resume 恢复包。
 - Skill 已有最小可用链路，但缺少 references/assets/scripts 的按需加载和 Skill script 审批执行模型。
-- 没有 MCP server/tool 接入机制。
+- MCP 已具备三种 transport、tool/resource 协议主链路、缓存、重连、安全映射和专项测试；后续重点是公网兼容性与 resource context packaging。
 - 没有 subagent/team/A2A 编排模型。
 - 敏感文件、日志脱敏和外部路径授权仍需持续补强。
 
@@ -379,7 +379,7 @@
 ### P3.2 MCP Client Runtime
 
 - 先定义统一 `MCPTransport` 抽象，再分别接入 `stdio`、`streamable_http`、`sse`。
-- 第一阶段先打稳 `stdio`；`streamable_http` 第二优先；`sse` 作为后续兼容补充。
+- 当前已具备 `stdio`、`streamable_http`、`sse` 主链路、专项 observability、磁盘 discovery cache 与一次性失效重连。
 - 将运行时拆为 `MCPTransport`、`MCPClient`、`MCPManager`、`MCPDiscoveryService`、adapter、`MCPToolProvider`、`MCPResourceProvider` 七层，分别负责消息传输、协议调用、生命周期管理、懒发现与缓存、schema/result 适配、tool 注册、resource 索引入口。
 - `MCPToolProvider` 只消费 discovery snapshot，不直接决定远端连接与刷新时机。
 - 拉取 MCP tools，转换为内部 `ToolDefinition`。

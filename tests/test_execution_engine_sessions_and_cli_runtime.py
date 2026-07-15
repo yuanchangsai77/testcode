@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from testcode.app import create_app
@@ -9,7 +11,7 @@ from testcode.safety.guardrails import Guardrails
 from testcode.safety.policy import DefaultPolicy
 from testcode.sessions import SessionStore
 from testcode.tools.builtin import build_builtin_registry
-from testcode.types import ModelReply, ToolAction, ToolDefinition, UserRequest
+from testcode.types import ModelReply, SessionRunTrace, SessionTurnTrace, ToolAction, ToolDefinition, UserRequest
 
 
 def test_scaffold_runs_end_to_end(tmp_path, monkeypatch):
@@ -39,6 +41,49 @@ def test_run_returns_message_when_model_request_fails(tmp_path, monkeypatch):
     assert "Connection refused" in summary.final_message
     assert "keep this session open and try again" in summary.final_message
     assert summary.tool_results == []
+
+
+def test_create_app_tolerates_configured_mcp_servers_without_transport_implementation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".testcode"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        """
+[[mcp.servers]]
+name = "github"
+transport = "stdio"
+command = "missing-mcp-server-command"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    app = create_app()
+
+    assert app.engine.tools.definition_for("read_file") is not None
+
+
+def test_create_app_does_not_connect_mcp_servers_during_startup(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".testcode"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        """
+[[mcp.servers]]
+name = "remote"
+transport = "streamable_http"
+url = "http://example.test/mcp"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    def fail_if_connected(_server):
+        raise AssertionError("MCP discovery must not run while creating the app")
+
+    monkeypatch.setattr("testcode.app.create_mcp_client", fail_if_connected)
+
+    app = create_app()
+
+    assert app.engine.tools.definition_for("read_file") is not None
 
 
 def test_engine_stops_repeated_non_retryable_tool_failures(tmp_path):
@@ -955,6 +1000,48 @@ def test_chat_persists_run_ids_on_session(tmp_path, monkeypatch):
     assert (tmp_path / "runs" / stored.run_ids[0] / "events.jsonl").exists()
 
 
+def test_chat_only_passes_recent_session_trace_to_execution(tmp_path, monkeypatch):
+    class CapturingEngine:
+        context_loaders = []
+
+        def __init__(self):
+            self.trace = None
+
+        def execute(self, request):
+            self.trace = request.metadata["session_trace"]
+            return type("Summary", (), {"final_message": "done", "tool_results": []})()
+
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd=str(tmp_path))
+    session.trace = [
+        SessionRunTrace(
+            run_id=f"run-{index}",
+            started_at="",
+            completed_at="",
+            prompt=f"prompt-{index}",
+            final_message="done",
+            outcome="completed",
+            event_count=0,
+            turn_count=0,
+        )
+        for index in range(8)
+    ]
+    store.save(session)
+    engine = CapturingEngine()
+    cli = CLI(
+        engine=engine,
+        presenter=ConsolePresenter(),
+        logger=InMemoryLogger(base_dir=str(tmp_path / "runs")),
+        session_store=store,
+    )
+    answers = iter(["continue", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    cli.chat(cwd=str(tmp_path), session_id=session.session_id)
+
+    assert [item.run_id for item in engine.trace] == [f"run-{index}" for index in range(2, 8)]
+
+
 def test_chat_persists_run_id_before_execute_finishes(tmp_path, monkeypatch):
     class InspectingEngine:
         def __init__(self, store):
@@ -983,3 +1070,276 @@ def test_chat_persists_run_id_before_execute_finishes(tmp_path, monkeypatch):
     cli.chat(cwd=str(tmp_path))
 
     assert engine.seen_run_ids == [logger.last_run_id]
+
+
+def test_session_store_persists_session_trace_and_writes_trace_log(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(
+        cwd=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "inspect workspace"},
+            {"role": "assistant", "content": "done"},
+        ],
+    )
+    session.trace.append(
+        SessionRunTrace(
+            run_id="run-1",
+            started_at="2026-07-10T02:00:00Z",
+            completed_at="2026-07-10T02:00:03Z",
+            prompt="inspect workspace",
+            final_message="done",
+            outcome="completed",
+            event_count=6,
+            turn_count=1,
+            tool_names=["list_dir"],
+            turns=[
+                SessionTurnTrace(
+                    turn=1,
+                    message="Model requested tool calls.",
+                    actions=["list_dir"],
+                    tool_results=["list_dir:ok"],
+                    action_details=['list_dir args={"path":"."}'],
+                    tool_result_details=["list_dir [ok] found 3 entries"],
+                )
+            ],
+        )
+    )
+
+    store.save(session)
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert len(loaded.trace) == 1
+    assert loaded.trace[0].run_id == "run-1"
+    assert loaded.resume_state.last_run_id == "run-1"
+    assert loaded.resume_state.last_outcome == "completed"
+    trace_log = tmp_path / ".testcode" / "sessions" / f"{session.session_id}.trace.log"
+    assert trace_log.exists()
+    text = trace_log.read_text(encoding="utf-8")
+    assert "Session Trace Summary" in text
+    assert "Run run-1" in text
+    assert "- prompt: inspect workspace" in text
+    assert 'action detail: list_dir args={"path":"."}' not in text
+    assert "result detail: list_dir [ok] found 3 entries" not in text
+    replay_log = tmp_path / ".testcode" / "sessions" / f"{session.session_id}.replay.log"
+    assert replay_log.exists() is False
+
+
+def test_session_store_tolerates_null_trace_fields(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session_id = "session-with-null-trace"
+    store.base_dir.mkdir(parents=True)
+    (store.base_dir / f"{session_id}.json").write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "cwd": str(tmp_path),
+                "created_at": "2026-07-10T02:00:00Z",
+                "updated_at": "2026-07-10T02:00:00Z",
+                "messages": [],
+                "active_skills": None,
+                "trace": [
+                    {
+                        "run_id": "run-1",
+                        "turns": [
+                            {
+                                "turn": None,
+                                "actions": None,
+                                "tool_results": None,
+                                "action_details": None,
+                                "tool_result_details": None,
+                            }
+                        ],
+                        "event_count": None,
+                        "turn_count": None,
+                        "tool_names": None,
+                    }
+                ],
+                "resume_state": {"last_tool_names": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = store.load(session_id)
+
+    assert loaded is not None
+    assert loaded.active_skills == []
+    assert loaded.trace[0].event_count == 0
+    assert loaded.trace[0].turns[0].actions == []
+    assert loaded.resume_state.last_tool_names == []
+    assert [item.session_id for item in store.list_sessions()] == [session_id]
+
+
+def test_session_resume_state_uses_latest_interrupted_trace(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(
+        cwd=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "first task"},
+            {"role": "assistant", "content": "first task completed"},
+        ],
+    )
+    session.trace.append(
+        SessionRunTrace(
+            run_id="run-2",
+            started_at="2026-07-10T02:00:00Z",
+            completed_at="2026-07-10T02:00:01Z",
+            prompt="second task",
+            final_message="Interrupted",
+            outcome="interrupted",
+            event_count=2,
+            turn_count=0,
+        )
+    )
+
+    store.save(session)
+
+    assert session.resume_state.last_run_id == "run-2"
+    assert session.resume_state.last_user_prompt == "second task"
+    assert session.resume_state.last_assistant_message == "Interrupted"
+    assert session.resume_state.last_outcome == "interrupted"
+
+
+def test_chat_persists_session_trace_from_logger_summary(tmp_path, monkeypatch):
+    class EchoEngine:
+        def execute(self, request):
+            return type("Summary", (), {"final_message": f"echo:{request.prompt}", "tool_results": []})()
+
+    store = SessionStore(base_dir=tmp_path)
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    cli = CLI(
+        engine=EchoEngine(),
+        presenter=ConsolePresenter(),
+        logger=logger,
+        session_store=store,
+    )
+
+    answers = iter(["hello", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    cli.chat(cwd=str(tmp_path))
+
+    sessions = store.list_sessions()
+    stored = store.load(sessions[0].session_id)
+    assert stored is not None
+    assert len(stored.trace) == 1
+    assert stored.trace[0].prompt == "hello"
+    assert stored.trace[0].final_message == "echo:hello"
+    assert stored.resume_state.last_run_id == stored.trace[0].run_id
+    assert stored.resume_state.last_user_prompt == "hello"
+    assert stored.resume_state.last_assistant_message == "echo:hello"
+    trace_log = tmp_path / ".testcode" / "sessions" / f"{stored.session_id}.trace.log"
+    trace_text = trace_log.read_text(encoding="utf-8")
+    assert "Resume State" in trace_text
+    assert "Action detail:" not in trace_text
+    replay_log = tmp_path / ".testcode" / "sessions" / f"{stored.session_id}.replay.log"
+    assert replay_log.exists() is False
+
+
+def test_chat_persists_interrupted_trace_and_resets_logger(tmp_path, monkeypatch):
+    class InterruptEngine:
+        context_loaders = []
+        current_session = None
+
+        def execute(self, _request):
+            self.current_session = type("Session", (), {"tool_results": []})()
+            raise KeyboardInterrupt
+
+        def _finish(self, summary):
+            self.current_session = None
+            return summary
+
+    store = SessionStore(base_dir=tmp_path)
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    cli = CLI(
+        engine=InterruptEngine(),
+        presenter=ConsolePresenter(),
+        logger=logger,
+        session_store=store,
+    )
+    answers = iter(["work", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    cli.chat(cwd=str(tmp_path))
+
+    stored = store.load(store.list_sessions()[0].session_id)
+    assert stored is not None
+    assert len(stored.trace) == 1
+    assert stored.trace[0].prompt == "work"
+    assert stored.trace[0].outcome == "interrupted"
+    assert stored.resume_state.last_outcome == "interrupted"
+    assert logger.run_dir is None
+
+
+def test_chat_close_cleans_up_runtime_tool_state(tmp_path, monkeypatch):
+    class Tools:
+        reset_count = 0
+
+        def reset_state(self):
+            self.reset_count += 1
+
+    class Engine:
+        tools = Tools()
+
+    store = SessionStore(base_dir=tmp_path)
+    cli = CLI(
+        engine=Engine(),
+        presenter=ConsolePresenter(),
+        session_store=store,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "quit")
+
+    cli.chat(cwd=str(tmp_path))
+
+    assert cli.engine.tools.reset_count == 1
+    stored = store.load(store.list_sessions()[0].session_id)
+    assert stored is not None
+    assert stored.status == "closed"
+
+
+def test_logger_summary_captures_action_and_result_details(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(prompt="inspect", cwd=str(tmp_path))
+    logger.start_run(request)
+    logger.record("model.request", {"messages": [{"role": "user", "content": "inspect"}]})
+    logger.record("tool.execute", {"name": "read_file", "arguments": {"path": "README.md"}})
+    logger.record(
+        "tool.result",
+        {
+            "name": "read_file",
+            "success": True,
+            "output": "hello world",
+            "error_code": None,
+            "metadata": {"action_arguments": {"path": "README.md"}},
+        },
+    )
+    logger.record("model.reply", {"turn": 1, "message": "done", "done": True, "actions": []})
+    summary = type(
+        "Summary",
+        (),
+        {
+            "final_message": "done",
+            "tool_results": [
+                type(
+                    "ToolResultLike",
+                    (),
+                    {
+                        "name": "read_file",
+                        "success": True,
+                        "output": "hello world",
+                        "error_code": None,
+                        "metadata": {"action_arguments": {"path": "README.md"}},
+                    },
+                )()
+            ],
+            "active_skills": [],
+        },
+    )()
+    logger.finalize(request, summary)
+
+    run_summary = logger.last_run_summary
+    assert run_summary is not None
+    assert run_summary.turns[0].action_details[0].startswith('read_file args=')
+    assert "README.md" in run_summary.turns[0].action_details[0]
+    assert run_summary.turns[0].tool_result_details[0].startswith("read_file [ok]")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..orchestration.session import SessionContext
-from ..types import ToolDefinition
+from ..types import SessionResumeState, SessionRunTrace, ToolDefinition
 
 
 class ModelPromptBuilder:
@@ -61,6 +61,18 @@ class ModelPromptBuilder:
         if session.history:
             user_lines.append("Session history:")
             user_lines.extend(f"- {item}" for item in session.history)
+
+        session_trace = session.request.metadata.get("session_trace", [])
+        trace_lines = self._format_session_trace(session_trace)
+        if trace_lines:
+            user_lines.append("Session trace summary:")
+            user_lines.extend(trace_lines)
+
+        resume_state = session.request.metadata.get("resume_state")
+        resume_lines = self._format_resume_state(resume_state)
+        if resume_lines:
+            user_lines.append("Resume state:")
+            user_lines.extend(resume_lines)
 
         return [
             {"role": "system", "content": "\n".join(system_lines)},
@@ -172,6 +184,75 @@ class ModelPromptBuilder:
             lines.append(f"[{item.kind}: {item.path or item.source}{suffix}{error}]")
             if item.content:
                 lines.append(item.content)
+        return lines
+
+    def _format_session_trace(self, trace: object, limit: int = 6) -> list[str]:
+        if not isinstance(trace, list):
+            return []
+
+        lines: list[str] = []
+        recent = trace[-limit:]
+        for item in recent:
+            if isinstance(item, SessionRunTrace):
+                run_id = item.run_id
+                outcome = item.outcome
+                prompt = item.prompt
+                final_message = item.final_message
+                tools = list(item.tool_names)
+            elif isinstance(item, dict):
+                run_id = str(item.get("run_id", ""))
+                outcome = str(item.get("outcome", "completed"))
+                prompt = str(item.get("prompt", ""))
+                final_message = str(item.get("final_message", ""))
+                tools = [tool for tool in item.get("tool_names", []) if isinstance(tool, str)]
+            else:
+                continue
+
+            if not run_id and not prompt and not final_message:
+                continue
+
+            lines.append(
+                f"- run {run_id or '?'} | outcome={outcome} | prompt={self._trim(prompt, 80)}"
+            )
+            if tools:
+                lines.append(f"- tools: {', '.join(tools[:8])}")
+            lines.append(f"- final: {self._trim(final_message, 120)}")
+        return lines
+
+    def _trim(self, text: str, limit: int) -> str:
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[: limit - 3]}..."
+
+    def _format_resume_state(self, state: object) -> list[str]:
+        if isinstance(state, SessionResumeState):
+            payload = {
+                "last_run_id": state.last_run_id,
+                "last_user_prompt": state.last_user_prompt,
+                "last_assistant_message": state.last_assistant_message,
+                "last_outcome": state.last_outcome,
+                "last_tool_names": list(state.last_tool_names),
+                "open_issue": state.open_issue,
+                "recovery_hint": state.recovery_hint,
+            }
+        elif isinstance(state, dict):
+            payload = state
+        else:
+            return []
+
+        lines: list[str] = []
+        if isinstance(payload.get("last_run_id"), str) and payload["last_run_id"]:
+            lines.append(f"- last_run_id: {payload['last_run_id']}")
+        if isinstance(payload.get("last_outcome"), str) and payload["last_outcome"]:
+            lines.append(f"- last_outcome: {payload['last_outcome']}")
+        tools = payload.get("last_tool_names", [])
+        if isinstance(tools, list) and tools:
+            lines.append(f"- last_tools: {', '.join(tool for tool in tools if isinstance(tool, str))}")
+        if isinstance(payload.get("open_issue"), str) and payload["open_issue"]:
+            lines.append(f"- open_issue: {self._trim(payload['open_issue'], 160)}")
+        if isinstance(payload.get("recovery_hint"), str) and payload["recovery_hint"]:
+            lines.append(f"- recovery_hint: {self._trim(payload['recovery_hint'], 160)}")
         return lines
 
     def _schema_from_arguments(self, definition: ToolDefinition) -> dict[str, object]:

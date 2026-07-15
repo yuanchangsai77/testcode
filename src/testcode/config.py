@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .mcp.config import MCPServerConfig, load_mcp_server_configs
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:
@@ -11,6 +13,7 @@ class RuntimeConfig:
     model_name: str = "gpt-5.4"
     model_timeout: float = 60.0
     mode: str = "confirm"
+    mcp_servers: tuple[MCPServerConfig, ...] = ()
 
 
 def load_dotenv(env_path: str | Path | None = None) -> None:
@@ -38,12 +41,13 @@ def load_dotenv(env_path: str | Path | None = None) -> None:
         os.environ[key] = value
 
 
-def load_runtime_config(mode: str | None = None) -> RuntimeConfig:
+def load_runtime_config(mode: str | None = None, cwd: str | Path | None = None) -> RuntimeConfig:
     return RuntimeConfig(
         model_base_url=os.getenv("TESTCODE_MODEL_BASE_URL", "").strip(),
         model_name=os.getenv("TESTCODE_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4",
         model_timeout=_float_env("TESTCODE_MODEL_TIMEOUT", 60.0),
         mode=mode or os.getenv("TESTCODE_MODE", "confirm").strip() or "confirm",
+        mcp_servers=load_mcp_server_configs(cwd=cwd),
     )
 
 

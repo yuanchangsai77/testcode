@@ -7,14 +7,14 @@ from typing import Any
 REDACTED = "[REDACTED]"
 
 SENSITIVE_KEY_RE = re.compile(
-    r"(api[_-]?key|auth|credential|password|secret|token)",
+    r"(api[_-]?key|auth|credential|password|secret|token|^key$)",
     re.IGNORECASE,
 )
 TOKEN_VALUE_RE = re.compile(
     r"(?i)\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_a-z0-9]{12,}\b"
 )
 ASSIGNMENT_RE = re.compile(
-    r"(?i)\b([a-z0-9_.-]*(?:api[_-]?key|credential|password|secret|token)[a-z0-9_.-]*)\s*([=:])\s*([^\s,;]+)"
+    r"(?i)\b((?:[a-z0-9_.-]*(?:api[_-]?key|credential|password|secret|token)[a-z0-9_.-]*|key))\s*([=:])\s*([^\s,;&]+)"
 )
 BEARER_RE = re.compile(
     r"(?i)\b(bearer)\s+[-._~+/=a-z0-9]{12,}\b"

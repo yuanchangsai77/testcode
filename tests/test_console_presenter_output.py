@@ -1,7 +1,7 @@
 from testcode.interaction.presenter import ConsolePresenter
 import os
 
-from testcode.types import ExecutionSummary, ToolAction, ToolResult
+from testcode.types import ExecutionSummary, SessionResumeState, ToolAction, ToolResult
 
 
 def test_presenter_cleans_protocol_tags_only_for_display(capsys):
@@ -114,6 +114,8 @@ def test_show_session_state(capsys):
         messages=[],
         run_ids=[],
         active_skills=[],
+        trace=[],
+        resume_state=SessionResumeState(),
     )
 
     class DummyEngine:

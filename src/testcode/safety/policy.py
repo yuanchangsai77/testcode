@@ -20,9 +20,9 @@ class DefaultPolicy:
 
     valid_modes = {"readonly", "confirm", "auto"}
     read_risks = {"read"}
-    confirm_risks = {"write", "execute", "test", "network", "destructive"}
+    confirm_risks = {"write", "execute", "test", "network", "destructive", "confirm"}
     auto_allowed_risks = {"read", "write"}
-    auto_confirm_risks = {"execute", "test", "network", "destructive"}
+    auto_confirm_risks = {"execute", "test", "network", "destructive", "confirm"}
 
     def __init__(self, mode: str = "confirm") -> None:
         if mode not in self.valid_modes:
