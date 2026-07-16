@@ -71,12 +71,9 @@ class ConsolePresenter:
             print(indented_diff)
 
         print(f"   {BOLD}Do you want to proceed?{RESET}")
-        print(f"    {CYAN}>{RESET} 1. Yes")
-        print("      2. No")
-        print()
-        
+
         engine = getattr(self, "engine", None)
-        choice = self.prompt_box.read_selection(engine=engine)
+        choice = self.prompt_box.read_selection(engine=engine, options=("Yes", "No"))
         return choice in {"1", "y", "yes"}
 
     def _summarize_tool_output(self, output: str) -> str:
@@ -211,7 +208,7 @@ class ConsolePresenter:
             print(f"  preview: {preview}")
 
     def show_thinking_start(self) -> Spinner:
-        spinner = Spinner(message="Model is thinking...")
+        spinner = Spinner(message="Model is thinking...", interruptible=True)
         spinner.start()
         return spinner
 
@@ -224,6 +221,18 @@ class ConsolePresenter:
 
     def model_finished(self, handle: Spinner) -> None:
         self.show_thinking_end(handle)
+
+    def model_retrying(
+        self,
+        handle: Spinner,
+        retry: int,
+        max_retries: int,
+        status: str,
+        delay_seconds: float,
+    ) -> None:
+        handle.update_message(
+            f"{status} — retrying {retry}/{max_retries} in {delay_seconds:g}s..."
+        )
 
     def show_tool_start(self, action_name: str) -> Spinner:
         YELLOW = "\033[1;33m"

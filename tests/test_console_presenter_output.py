@@ -1,6 +1,7 @@
-from testcode.interaction.presenter import ConsolePresenter
 import os
 
+from testcode.interaction.presenter import ConsolePresenter
+from testcode.interaction.terminal import Spinner
 from testcode.types import ExecutionSummary, SessionResumeState, ToolAction, ToolResult
 
 
@@ -247,3 +248,102 @@ def test_presenter_prompt_input_preserves_eof(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "shortcuts" in output
+
+
+def test_interactive_selection_uses_arrow_keys_and_enter(monkeypatch, capsys):
+    presenter = ConsolePresenter()
+    keys = iter(("\x1b[B", "\r"))
+
+    monkeypatch.setattr(presenter.prompt_box, "_read_key", lambda _fd: next(keys))
+    monkeypatch.setattr("testcode.interaction.input.sys.stdin.fileno", lambda: 0)
+    monkeypatch.setattr("testcode.interaction.input.termios.tcgetattr", lambda _fd: [])
+    monkeypatch.setattr("testcode.interaction.input.termios.tcsetattr", lambda *_args: None)
+    monkeypatch.setattr("testcode.interaction.input.tty.setcbreak", lambda _fd: None)
+
+    choice = presenter.prompt_box._read_interactive_selection(("Yes", "No"))
+
+    assert choice == "2"
+    output = capsys.readouterr().out
+    assert ">\033[0m 1. Yes" in output
+    assert ">\033[0m 2. No" in output
+
+
+def test_interactive_selection_accepts_number_keys(monkeypatch):
+    presenter = ConsolePresenter()
+
+    monkeypatch.setattr(presenter.prompt_box, "_read_key", lambda _fd: "2")
+    monkeypatch.setattr("testcode.interaction.input.sys.stdin.fileno", lambda: 0)
+    monkeypatch.setattr("testcode.interaction.input.termios.tcgetattr", lambda _fd: [])
+    monkeypatch.setattr("testcode.interaction.input.termios.tcsetattr", lambda *_args: None)
+    monkeypatch.setattr("testcode.interaction.input.tty.setcbreak", lambda _fd: None)
+
+    assert presenter.prompt_box._read_interactive_selection(("Yes", "No")) == "2"
+
+
+def test_read_key_waits_for_complete_arrow_sequence(monkeypatch):
+    presenter = ConsolePresenter()
+    bytes_to_read = iter((b"\x1b", b"[", b"B"))
+    timeouts = []
+
+    monkeypatch.setattr("testcode.interaction.input.os.read", lambda _fd, _size: next(bytes_to_read))
+
+    def readable(_read, _write, _errors, timeout):
+        timeouts.append(timeout)
+        return ([0], [], [])
+
+    monkeypatch.setattr("testcode.interaction.input.select.select", readable)
+
+    assert presenter.prompt_box._read_key(0) == "\x1b[B"
+    assert timeouts == [0.5, 0.5]
+
+
+def test_thinking_spinner_is_interruptible(capsys):
+    presenter = ConsolePresenter()
+
+    spinner = presenter.show_thinking_start()
+    spinner.stop()
+
+    assert spinner.interruptible is True
+    assert spinner.message == "Model is thinking..."
+
+
+def test_presenter_shows_model_timeout_retry_progress(capsys):
+    presenter = ConsolePresenter()
+    spinner = Spinner(message="Model is thinking...")
+
+    presenter.model_retrying(spinner, 3, 7, "Model request timed out", 1.5)
+
+    assert spinner.message == "Model request timed out — retrying 3/7 in 1.5s..."
+    assert "retrying 3/7" in capsys.readouterr().out
+
+
+def test_spinner_escape_listener_interrupts_on_escape(monkeypatch):
+    spinner = Spinner(interruptible=True)
+    spinner.stdin_fd = 0
+    interrupted = []
+
+    monkeypatch.setattr(spinner, "_read_key", lambda _fd: "\x1b")
+    monkeypatch.setattr(spinner, "_signal_interrupt", lambda: interrupted.append(True))
+    monkeypatch.setattr("testcode.interaction.terminal.select.select", lambda *_args: ([0], [], []))
+
+    spinner._watch_for_escape()
+
+    assert interrupted == [True]
+
+
+def test_spinner_escape_listener_ignores_arrow_sequence(monkeypatch):
+    spinner = Spinner(interruptible=True)
+    spinner.stdin_fd = 0
+    interrupted = []
+
+    def arrow_then_stop(_fd):
+        spinner.escape_stop.set()
+        return "\x1b[B"
+
+    monkeypatch.setattr(spinner, "_read_key", arrow_then_stop)
+    monkeypatch.setattr(spinner, "_signal_interrupt", lambda: interrupted.append(True))
+    monkeypatch.setattr("testcode.interaction.terminal.select.select", lambda *_args: ([0], [], []))
+
+    spinner._watch_for_escape()
+
+    assert interrupted == []

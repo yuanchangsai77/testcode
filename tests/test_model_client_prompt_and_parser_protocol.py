@@ -8,7 +8,12 @@ from testcode.app import create_model_client
 from testcode.model.client import OpenAICompatibleModelClient, StubModelClient
 from testcode.model.parser import ModelReplyParser
 from testcode.model.prompt import ModelPromptBuilder
-from testcode.model.types import ModelClientConfig
+from testcode.model.types import (
+    ModelClientConfig,
+    ModelConnectionError,
+    ModelServiceError,
+    ModelTimeoutError,
+)
 from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.session import SessionContext
 from testcode.types import SessionResumeState, SessionRunTrace, SessionTurnTrace, ToolDefinition, UserRequest
@@ -27,11 +32,26 @@ def test_post_json_wraps_timeout_as_runtime_error(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fail_with_timeout)
 
-    with pytest.raises(RuntimeError, match="timed out after 1.5 seconds"):
+    with pytest.raises(ModelTimeoutError, match="timed out after 1.5 seconds"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
 
     assert logger.events[-1].name == "model.timeout"
     assert logger.events[-1].payload["timeout"] == 1.5
+
+
+def test_post_json_recognizes_timeout_wrapped_by_url_error(monkeypatch):
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        timeout=1.5,
+    )
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError(TimeoutError("timed out"))),
+    )
+
+    with pytest.raises(ModelTimeoutError, match="timed out after 1.5 seconds"):
+        client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
 
 
 def test_post_json_wraps_remote_disconnect_as_runtime_error(monkeypatch):
@@ -47,7 +67,7 @@ def test_post_json_wraps_remote_disconnect_as_runtime_error(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fail_with_remote_disconnect)
 
-    with pytest.raises(RuntimeError, match="Remote end closed connection without response"):
+    with pytest.raises(ModelConnectionError, match="Remote end closed connection without response"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
 
     assert logger.events[-1].name == "model.network_error"
@@ -69,7 +89,7 @@ def test_post_json_wraps_http_and_url_errors(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fail_with_http_error)
 
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+    with pytest.raises(ModelServiceError, match="HTTP 500"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
     assert logger.events[-1].name == "model.http_error"
 
@@ -78,7 +98,7 @@ def test_post_json_wraps_http_and_url_errors(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fail_with_url_error)
 
-    with pytest.raises(RuntimeError, match="connection refused"):
+    with pytest.raises(ModelConnectionError, match="connection refused"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
     assert logger.events[-1].name == "model.network_error"
 

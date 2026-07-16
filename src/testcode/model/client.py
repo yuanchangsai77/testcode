@@ -126,28 +126,44 @@ class OpenAICompatibleModelClient:
                     "model.http_error",
                     {"url": url, "status": error.code, "body": body},
                 )
-            raise RuntimeError(f"Model request failed with HTTP {error.code}: {body}") from error
+            message = f"Model request failed with HTTP {error.code}: {body}"
+            if error.code in {408, 429} or 500 <= error.code <= 599:
+                raise model_types.ModelServiceError(message) from error
+            raise RuntimeError(message) from error
         except TimeoutError as error:
             if self.logger is not None:
                 self.logger.record(
                     "model.timeout",
                     {"url": url, "timeout": self.timeout},
                 )
-            raise RuntimeError(f"Model request timed out after {self.timeout:g} seconds") from error
+            raise model_types.ModelTimeoutError(
+                f"Model request timed out after {self.timeout:g} seconds"
+            ) from error
         except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                if self.logger is not None:
+                    self.logger.record(
+                        "model.timeout",
+                        {"url": url, "timeout": self.timeout},
+                    )
+                raise model_types.ModelTimeoutError(
+                    f"Model request timed out after {self.timeout:g} seconds"
+                ) from error
             if self.logger is not None:
                 self.logger.record(
                     "model.network_error",
                     {"url": url, "reason": str(error.reason)},
                 )
-            raise RuntimeError(f"Model request failed: {error.reason}") from error
+            raise model_types.ModelConnectionError(
+                f"Model request failed: {error.reason}"
+            ) from error
         except http.client.RemoteDisconnected as error:
             if self.logger is not None:
                 self.logger.record(
                     "model.network_error",
                     {"url": url, "reason": str(error)},
                 )
-            raise RuntimeError(f"Model request failed: {error}") from error
+            raise model_types.ModelConnectionError(f"Model request failed: {error}") from error
 
         try:
             data = json.loads(body)

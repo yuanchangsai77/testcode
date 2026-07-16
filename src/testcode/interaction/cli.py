@@ -254,7 +254,7 @@ class CLI:
             summary = ExecutionSummary(
                 final_message=(
                     "Model API is unavailable right now. "
-                    f"{error}. You can keep this session open and try again."
+                    f"{error}. You can keep this session open and try again later."
                 ),
                 tool_results=[],
             )

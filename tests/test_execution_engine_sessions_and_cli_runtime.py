@@ -5,6 +5,7 @@ import pytest
 from testcode.app import create_app
 from testcode.interaction.cli import CLI
 from testcode.interaction.presenter import ConsolePresenter
+from testcode.model.types import ModelConnectionError, ModelTimeoutError
 from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.engine import ExecutionEngine
 from testcode.safety.guardrails import Guardrails
@@ -41,6 +42,101 @@ def test_run_returns_message_when_model_request_fails(tmp_path, monkeypatch):
     assert "Connection refused" in summary.final_message
     assert "keep this session open and try again" in summary.final_message
     assert summary.tool_results == []
+
+
+def test_engine_retries_model_timeout_seven_times_before_succeeding(tmp_path):
+    class EventuallyRespondingModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls <= 7:
+                raise ModelTimeoutError("timed out")
+            return ModelReply(message="recovered", done=True)
+
+    class Progress:
+        retries = []
+
+        def model_started(self):
+            return object()
+
+        def model_retrying(self, _handle, retry, max_retries, status, delay_seconds):
+            self.retries.append((retry, max_retries, status, delay_seconds))
+
+        def model_finished(self, _handle):
+            pass
+
+    logger = InMemoryLogger()
+    model = EventuallyRespondingModel()
+    progress = Progress()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        progress_reporter=progress,
+    )
+    engine.model_retry_delays = (0.0,) * 7
+
+    summary = engine.execute(UserRequest(prompt="hello", cwd=str(tmp_path)))
+
+    assert summary.final_message == "recovered"
+    assert model.calls == 8
+    assert progress.retries == [
+        (retry, 7, "Model request timed out", 0.0) for retry in range(1, 8)
+    ]
+
+
+def test_engine_reports_api_unavailable_after_seven_timeout_retries(tmp_path):
+    class AlwaysTimingOutModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            raise ModelTimeoutError("timed out")
+
+    logger = InMemoryLogger()
+    model = AlwaysTimingOutModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+    )
+    engine.model_retry_delays = (0.0,) * 7
+
+    with pytest.raises(RuntimeError, match="All 7 retry attempts failed"):
+        engine.execute(UserRequest(prompt="hello", cwd=str(tmp_path)))
+
+    assert model.calls == 8
+    retry_events = [event for event in logger.events if event.name == "model.retry"]
+    assert [event.payload["retry"] for event in retry_events] == list(range(1, 8))
+
+
+def test_engine_retries_transient_model_connection_failure(tmp_path):
+    class ReconnectingModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelConnectionError("Remote end closed connection without response")
+            return ModelReply(message="reconnected", done=True)
+
+    logger = InMemoryLogger()
+    model = ReconnectingModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+    )
+    engine.model_retry_delays = (0.0,) * 7
+
+    summary = engine.execute(UserRequest(prompt="hello", cwd=str(tmp_path)))
+
+    assert summary.final_message == "reconnected"
+    assert model.calls == 2
 
 
 def test_create_app_tolerates_configured_mcp_servers_without_transport_implementation(tmp_path, monkeypatch):
@@ -881,8 +977,32 @@ def test_engine_reports_denied_workspace_access(tmp_path):
     summary = engine.execute(UserRequest(prompt="list parent", cwd=str(tmp_path)))
 
     assert summary.tool_results[0].success is False
-    assert summary.tool_results[0].error_code == "approval_required"
-    assert "outside the current workspace" in summary.tool_results[0].output
+    assert summary.tool_results[0].error_code == "approval_denied"
+    assert "declined by the user" in summary.tool_results[0].output
+
+
+def test_engine_reports_user_denial_separately_from_missing_approval(tmp_path):
+    class ShellModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="run echo",
+                actions=[ToolAction(name="shell_exec", arguments={"command": "echo hello"})],
+                done=True,
+            )
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=ShellModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda _action, _reason: False,
+    )
+
+    summary = engine.execute(UserRequest(prompt="run echo", cwd=str(tmp_path)))
+
+    assert summary.tool_results[0].error_code == "approval_denied"
+    assert summary.tool_results[0].output == "Tool execution was declined by the user."
 
 
 def test_engine_skips_duplicate_successful_tool_action(tmp_path):

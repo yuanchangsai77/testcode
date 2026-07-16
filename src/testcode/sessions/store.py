@@ -305,6 +305,8 @@ class SessionStore:
             open_issue = trace.final_message
         elif "Model API is unavailable right now." in trace.final_message:
             open_issue = trace.final_message
+        elif any("approval_denied" in result for turn in trace.turns for result in turn.tool_results):
+            open_issue = "A tool action was declined by the user."
         elif any("approval_required" in result for turn in trace.turns for result in turn.tool_results):
             open_issue = "A tool was blocked waiting for approval."
         elif any("duplicate_tool_call" in result for turn in trace.turns for result in turn.tool_results):

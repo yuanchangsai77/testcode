@@ -18,6 +18,16 @@ class ProgressReporter(Protocol):
     def model_finished(self, handle: Any) -> None:
         ...
 
+    def model_retrying(
+        self,
+        handle: Any,
+        retry: int,
+        max_retries: int,
+        status: str,
+        delay_seconds: float,
+    ) -> None:
+        ...
+
     def tool_started(self, action_name: str) -> Any:
         ...
 

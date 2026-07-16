@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
+from ..model.types import ModelRetryableError
 from ..types import ExecutionSummary, ToolAction, ToolResult, UserRequest
 from .ext import ContextLoader
 from .permissions import PermissionContext
@@ -13,7 +15,11 @@ from .session import SessionContext
 class ExecutionEngine:
     """Coordinates the model-think and tool-execute loop."""
 
+    max_model_retries = 7
+    model_retry_delays = (0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0)
+
     non_retryable_error_codes = {
+        "approval_denied",
         "approval_required",
         "blocked_by_policy",
         "duplicate_tool_call",
@@ -102,7 +108,38 @@ class ExecutionEngine:
             if self.progress_reporter:
                 progress_handle = self.progress_reporter.model_started()
             try:
-                reply = self.model.respond(session)
+                retry_count = 0
+                while True:
+                    try:
+                        reply = self.model.respond(session)
+                        break
+                    except (ModelRetryableError, TimeoutError) as error:
+                        if retry_count >= self.max_model_retries:
+                            raise RuntimeError(
+                                f"All {self.max_model_retries} retry attempts failed "
+                                f"after the initial request: {error}"
+                            ) from error
+                        retry_count += 1
+                        retry_delay = self.model_retry_delays[retry_count - 1]
+                        self.logger.record(
+                            "model.retry",
+                            {
+                                "retry": retry_count,
+                                "max_retries": self.max_model_retries,
+                                "delay_seconds": retry_delay,
+                                "reason": str(error),
+                            },
+                        )
+                        retry_reporter = getattr(self.progress_reporter, "model_retrying", None)
+                        if retry_reporter is not None:
+                            retry_reporter(
+                                progress_handle,
+                                retry_count,
+                                self.max_model_retries,
+                                getattr(error, "retry_status", "Model request timed out"),
+                                retry_delay,
+                            )
+                        time.sleep(retry_delay)
             finally:
                 if progress_handle is not None:
                     self.progress_reporter.model_finished(progress_handle)
@@ -158,7 +195,12 @@ class ExecutionEngine:
                 decision = self.guardrails.check(action, definition)
                 if decision.requires_confirmation:
                     approval_key = (action.name, decision.risk_level)
-                    if self._approval_remembered(approval_key, approved_risk_groups) or self._approved(action, decision.reason):
+                    approval = (
+                        True
+                        if self._approval_remembered(approval_key, approved_risk_groups)
+                        else self._approval_decision(action, decision.reason)
+                    )
+                    if approval is True:
                         if decision.risk_level != "destructive":
                             approved_risk_groups.add(approval_key)
                         result = self._execute_action(action, request.cwd, permissions)
@@ -174,8 +216,12 @@ class ExecutionEngine:
                     result = ToolResult(
                         name=action.name,
                         success=False,
-                        output=decision.reason,
-                        error_code="approval_required",
+                        output=(
+                            "Tool execution was declined by the user."
+                            if approval is False
+                            else decision.reason
+                        ),
+                        error_code="approval_denied" if approval is False else "approval_required",
                     )
                     if self.progress_reporter:
                         self.progress_reporter.tool_skipped(action, "denied by user")
@@ -355,9 +401,9 @@ class ExecutionEngine:
     def _approval_remembered(self, approval_key: tuple[str, str], approved_risk_groups: set[tuple[str, str]]) -> bool:
         return approval_key[1] != "destructive" and approval_key in approved_risk_groups
 
-    def _approved(self, action, reason: str) -> bool:
+    def _approval_decision(self, action, reason: str) -> bool | None:
         if self.approval_callback is None:
-            return False
+            return None
         approved = self.approval_callback(action, reason)
         self.logger.record(
             "safety.approval",
@@ -394,12 +440,19 @@ class ExecutionEngine:
                         f"tool '{action.name}' requested access outside the current workspace: {grant_path}. "
                         "Approve only if this path is part of the task."
                     )
-                    if not self._approved(approval, reason):
+                    approval_decision = self._approval_decision(approval, reason)
+                    if approval_decision is not True:
                         ret_res = ToolResult(
                             name=action.name,
                             success=False,
-                            output=reason,
-                            error_code="approval_required",
+                            output=(
+                                "Access outside the workspace was declined by the user."
+                                if approval_decision is False
+                                else reason
+                            ),
+                            error_code=(
+                                "approval_denied" if approval_decision is False else "approval_required"
+                            ),
                             metadata={
                                 "action_arguments": dict(action.arguments),
                                 "path": grant_path,
@@ -511,6 +564,8 @@ class ExecutionEngine:
             elif result.error_code == "approval_required":
                 has_permission_issue = True
                 reasons.append(f"tool '{result.name}' requires explicit approval")
+            elif result.error_code == "approval_denied":
+                reasons.append(f"tool '{result.name}' was declined by the user")
             elif result.error_code == "duplicate_tool_call":
                 reasons.append(f"tool '{result.name}' repeated the same action without using the previous result")
             else:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+import select
 import sys
+import termios
+import tty
 
 from .terminal import colored_border, terminal_columns
 
@@ -92,7 +96,16 @@ class PromptBox:
             self.show_border()
             raise
 
-    def read_selection(self, engine=None, prompt="    Selection [1-2]: ") -> str | None:
+    def read_selection(
+        self,
+        engine=None,
+        prompt="    Selection [1-2]: ",
+        options: tuple[str, ...] = ("Yes", "No"),
+    ) -> str | None:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return self._read_interactive_selection(options)
+
+        self._render_selection_options(options, selected=0)
         sys.stdout.write("\n")
         sys.stdout.flush()
         self.show_border()
@@ -112,6 +125,64 @@ class PromptBox:
             print()
             self.show_border()
             return None
+
+    def _read_interactive_selection(self, options: tuple[str, ...]) -> str | None:
+        selected = 0
+        self._render_selection_options(options, selected)
+        fd = sys.stdin.fileno()
+        previous_settings = termios.tcgetattr(fd)
+
+        try:
+            tty.setcbreak(fd)
+            while True:
+                key = self._read_key(fd)
+                if key in {"\r", "\n"}:
+                    return str(selected + 1)
+                if key in {"\x03", "\x1b"}:
+                    return None
+                if key in {"\x1b[A", "\x1bOA", "k"}:
+                    selected = (selected - 1) % len(options)
+                elif key in {"\x1b[B", "\x1bOB", "j"}:
+                    selected = (selected + 1) % len(options)
+                elif key.isdigit() and 1 <= int(key) <= len(options):
+                    return key
+                elif key.lower() == "y":
+                    return "1"
+                elif key.lower() == "n" and len(options) >= 2:
+                    return "2"
+                else:
+                    continue
+                self._render_selection_options(options, selected, redraw=True)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous_settings)
+
+    def _read_key(self, fd: int) -> str:
+        key = os.read(fd, 1).decode(errors="ignore")
+        if key != "\x1b":
+            return key
+
+        sequence = key
+        for _ in range(2):
+            # Direction keys arrive as a three-byte escape sequence. Allow
+            # enough time for the remaining bytes on slower terminals/SSH.
+            readable, _, _ = select.select([fd], [], [], 0.5)
+            if not readable:
+                break
+            sequence += os.read(fd, 1).decode(errors="ignore")
+        return sequence
+
+    def _render_selection_options(
+        self,
+        options: tuple[str, ...],
+        selected: int,
+        redraw: bool = False,
+    ) -> None:
+        if redraw:
+            sys.stdout.write(f"\033[{len(options)}A")
+        for index, label in enumerate(options):
+            pointer = "\033[1;36m>\033[0m" if index == selected else " "
+            sys.stdout.write(f"\r\033[2K    {pointer} {index + 1}. {label}\n")
+        sys.stdout.flush()
 
     def _clear_input_frame(self) -> None:
         if sys.stdout.isatty():
