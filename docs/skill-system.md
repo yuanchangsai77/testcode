@@ -13,7 +13,10 @@ It does not redefine the whole runtime architecture or generic extension model:
 
 - overall runtime layering: `docs/architecture.md`
 - generic extension hooks: `docs/runtime-extensibility.md`
+- capability warehouse, toolbox manifests, progressive disclosure, and activation: `docs/capability-warehouse.md`
 - roadmap priority and rollout stages: `docs/build-roadmap.md`
+
+Skill 在能力可见性上属于工具箱：默认只暴露 metadata 和简短描述，打开后展示 instructions/references/assets/scripts 索引，激活时才加载当前步骤需要的内容。该目标模型以 `docs/capability-warehouse.md` 为准；本文档继续负责 Skill 文件结构和箱内资产语义。
 
 This document outlines the architecture, data structures, and implementation plan for the **Skill System (P2)** in the `testcode` project, aligned with the goals specified in [docs/build-roadmap.md](build-roadmap.md).
 

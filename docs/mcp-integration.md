@@ -17,11 +17,13 @@
 
 本文档定义 `testcode` 中 MCP 接入的目标边界、模块拆分、运行时职责和实施顺序。重点不是“把外部 tool 接进来能跑”，而是让 MCP 能稳定复用现有 runtime 的 tool、policy、logger、session 和 prompt 约束，同时为后续 `stdio`、`streamable_http`、`sse` 和 URL 型服务预留稳定演进空间。
 
+MCP server 在能力可见性上应被视为工具箱：默认只在能力仓库中暴露外层描述，按需打开 manifest，再激活少量叶子工具。该目标模型见 `docs/capability-warehouse.md`；本文档继续负责 MCP 协议、transport、client、manager、discovery、adapter 与安全边界。
+
 当前仓库实现状态：
 
 - 已有 `ToolProvider`，并已补齐 `ResourceProvider` 扩展面。
 - 已补齐 `src/testcode/mcp/` 模块骨架，包括 `config`、`types`、`client`、`manager`、`discovery`、`adapter`、`provider`。
-- `app.py` 已装配 MCP tool/resource provider，并将 manager 纳入统一生命周期清理。
+- `app.py` 已将 MCP server 装配为能力仓库中的 `MCPToolboxSource`；MCP 叶子工具只在打开 manifest 并显式激活后注册。resource provider 与 manager 仍纳入统一生命周期清理。
 - 已实现 `stdio`、`streamable_http` 与 `sse` 的最小可用 transport 和 client 协议调用主链路。
 - 已实现内存与磁盘 discovery cache、一次性失效重连、MCP 专项事件、基础 capability traits 和未知工具默认确认。
 - 后续仍需扩充 traits 语义，并将 resource provider 接入完整的候选上下文选择与预算流程。
@@ -50,14 +52,14 @@ MCP 接入应满足以下目标：
 
 当前仓库已经具备 MCP 接入所需的主要扩展边界：
 
-- `ToolProvider` 负责发现并返回可注册工具，定义在 `src/testcode/orchestration/ext.py`。
+- `CapabilityWarehouse` 与 `MCPToolboxSource` 负责外层目录、按需 manifest 和叶子激活；`ToolProvider` 保留为通用扩展接口，不再承担启动时注册全部 MCP 工具的职责。
 - `ResourceProvider` 应作为并列扩展面承载 MCP resource index 和按需读取，而不是塞进 tool provider 或 prompt builder。
 - `ToolRegistry` 负责注册、schema 校验、执行和结果记录，定义在 `src/testcode/tools/registry.py`。
 - `DefaultPolicy` 负责按 `risk_level` 决定允许、确认或阻断，定义在 `src/testcode/safety/policy.py`。
 - `OpenAICompatibleModelClient` 只依赖 `session.available_tools` 生成 native tool schema，不区分工具来源，定义在 `src/testcode/model/client.py`。
 - `app.py` 是 runtime composition root，适合装配多个 provider。
 
-因此，MCP 应该以“discovery service + tool provider + resource provider + manager/client/transport + adapter”的形式接入，而不是直接侵入 engine、prompt builder 或 model client。
+因此，MCP 以“capability source + discovery service + resource provider + manager/client/transport + adapter”的形式接入。engine 只负责在下一模型回合刷新统一工具定义，不感知 MCP transport 细节。
 
 ## 4. 设计原则
 
@@ -139,7 +141,10 @@ src/testcode/mcp/
   manager.py       多 server 生命周期管理、缓存和关闭
   discovery.py     tool/resource descriptor 的懒发现、缓存与刷新策略
   adapter.py       MCP schema -> testcode Tool / Resource adapter
-  provider.py      MCPToolProvider / MCPResourceProvider，负责注册入口
+  provider.py      MCPResourceProvider 与兼容性 MCPToolProvider/状态接口
+
+src/testcode/capabilities/
+  mcp_source.py    MCP 工具箱目录、manifest 与叶子激活入口
 ```
 
 职责划分：
@@ -166,27 +171,32 @@ src/testcode/mcp/
   - 将 MCP tool schema 转换为 `SimpleTool` 或等价 `Tool` 实现。
   - 将 resource metadata 转换为后续上下文索引对象。
 - `provider.py`
-  - 从 discovery service 读取快照。
-  - 返回已适配的 tool 列表和 resource provider 入口。
+  - 为 MCP resource 提供索引和读取入口。
+  - 保留 provider 状态与兼容性 tool 适配接口，但不作为当前启动期工具注册主链路。
+- `capabilities/mcp_source.py`
+  - 从配置生成外层工具箱目录。
+  - 打开工具箱时读取 discovery snapshot 并形成有界 manifest。
+  - 只在叶子能力激活时调用 adapter 生成内部 `Tool`。
 
 ## 6. 运行时数据流
 
-在当前实现里，数据流先落成了组合骨架：
+在当前实现里，工具可见性采用能力仓库主链路：
 
 1. `load_runtime_config()` 读取 `.testcode/config.toml` 中的 `[[mcp.servers]]`。
-2. `app.py` 基于这些配置创建 `MCPManager`、`MCPDiscoveryService` 和 `MCPToolProvider`。
-3. `MCPToolProvider.get_tools()` 从 discovery snapshot 读取 descriptor，并通过 adapter 生成内部 `Tool`。
-4. 当 transport 尚未实现时，discovery 会记录 `mcp_server_unavailable` 级别的受控错误，provider 返回空集合，builtin tools 仍可继续工作。
+2. `app.py` 创建 `MCPManager`、`MCPDiscoveryService` 和 `MCPToolboxSource`，外层目录仅使用配置中的用途描述和能力标签，不连接远端。
+3. 模型打开选中的 MCP 工具箱时，discovery 才按需读取 descriptor snapshot 或刷新远端 manifest。
+4. 模型激活少量叶子能力后，adapter 生成内部 `Tool`，仓库完成预算与名称冲突校验，并在下一模型回合把工具 schema 暴露给模型。
+5. discovery 或 transport 失败只更新对应工具箱的分层状态，builtin tools 和其他工具箱继续工作。
 
 ### 6.1 Tool Discovery
 
 应用启动或建 app 时：
 
 1. `app.py` 加载 runtime config。
-2. `MCPDiscoveryService` 读取启用的 server 配置和本地缓存元数据。
-3. `MCPToolProvider` 从 discovery service 获取当前可注册的 descriptor snapshot。
-4. adapter 将每个 MCP tool descriptor 转换为内部 `Tool`。
-5. `ToolRegistry` 注册这些 tool。
+2. `MCPDiscoveryService` 读取本地缓存元数据，但不主动连接全部 server。
+3. `MCPToolboxSource` 为每个配置生成一个不含完整 schema 的仓库条目。
+4. 只有 `toolbox_open` 会取得有界 descriptor manifest。
+5. 只有 `capability_activate` 会适配并向 `ToolRegistry` 注册选中的叶子工具。
 
 关键约束：
 
@@ -194,15 +204,16 @@ src/testcode/mcp/
 - 对没有缓存的新 server，可选择延迟到首次相关操作或显式刷新时再执行 `initialize` / `tools/list`。
 - discovery 失败只影响对应 server，不应拖垮整个 CLI 启动。
 
-### 6.3 Composition Root Wiring
+### 6.2 Composition Root Wiring
 
 MCP 必须只在 application composition root 装配，不允许由 engine 内部懒创建。推荐装配顺序：
 
 1. 加载 runtime config，得到 `mcp_servers`
 2. 创建 `MCPManager`
 3. 创建 `MCPDiscoveryService`
-4. 创建 `MCPToolProvider`
-5. 与 `BuiltinToolProvider` 一起注册到同一个 `ToolRegistry`
+4. 创建 `MCPToolboxSource` 并加入 `CapabilityWarehouse`
+5. 只把 builtin 与仓库导航工具注册到 `ToolRegistry`
+6. 保留 `MCPResourceProvider` 作为独立的资源候选入口
 
 这样能保证：
 
@@ -210,7 +221,7 @@ MCP 必须只在 application composition root 装配，不允许由 engine 内�
 - policy、approval、logger 不需要感知 MCP 来源
 - transport/client/discovery 的演进不会污染 orchestration loop
 
-### 6.2 Tool Execution
+### 6.3 Tool Execution
 
 模型调用某个 MCP tool 时：
 
@@ -266,6 +277,8 @@ MCP 必须只在 application composition root 装配，不允许由 engine 内�
 - `env` 仅 `stdio` 使用。
 - `headers` 对 URL 型 transport 可选。
 - `enabled` 默认 `true`。
+- `description` 是模型进入仓库后首先看到的工具箱用途说明，应直接描述能完成什么专业任务。
+- `capabilities` 是可选的短能力词列表；未设置 `description` 时，运行时用它们组成外层用途描述。两者至少应提供一个，避免模型无法判断是否需要打开工具箱。
 - `tool_name_prefix` 可选；未设置时默认使用 `name`，但最终生成的稳定 id 必须通过全局唯一性校验。
 - `risk_overrides` 用于覆盖单个 MCP tool 的默认风险级别。
 - `timeout` 表示连接或首包超时。
@@ -278,6 +291,8 @@ MCP 必须只在 application composition root 装配，不允许由 engine 内�
 ```toml
 [[mcp.servers]]
 name = "github"
+description = "Search GitHub repositories and manage issues and pull requests."
+capabilities = ["repository search", "issues", "pull requests"]
 transport = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
@@ -298,6 +313,8 @@ create_issue = "write"
 ```toml
 [[mcp.servers]]
 name = "amap"
+description = "Search places, geocode addresses, and plan driving or transit routes."
+capabilities = ["地图搜索", "地理编码", "路线规划"]
 transport = "streamable_http"
 url = "https://mcp.amap.com/mcp?key=${AMAP_MCP_KEY}"
 timeout = 60
@@ -311,6 +328,8 @@ tool_name_prefix = "amap"
 ```toml
 [[mcp.servers]]
 name = "amap_sse"
+description = "Search places and plan routes with Amap."
+capabilities = ["地图搜索", "路线规划"]
 transport = "sse"
 url = "https://mcp.amap.com/sse?key=${AMAP_MCP_KEY}"
 timeout = 60
@@ -361,7 +380,7 @@ tool_name_prefix = "amap"
 
 高德这类 URL 配置还有两个额外约束：
 
-- URL 中可能包含 `key`；日志、details 和错误输出必须脱敏
+- URL 中可能包含 userinfo 或 query key；日志、details、仓库目录、状态和错误输出必须脱敏。展示 target 时只保留 scheme、host、port 和 path
 - `timeout` 与 `read_timeout` 必须分离，否则排查连接失败和读流超时会混在一起
 
 ### 7.5 环境变量展开与脱敏
@@ -649,6 +668,7 @@ MCP 相关日志建议至少记录：
 
 URL 型 transport 还应对以下字段默认脱敏：
 
+- URL userinfo 中的用户名和密码
 - query string 中的 `key`、`token`
 - `Authorization`
 - 自定义认证 header
@@ -691,6 +711,7 @@ URL 型 transport 还应对以下字段默认脱敏：
 - 无效 transport 拒绝
 - risk override 解析
 - `${VAR}` 展开
+- URL userinfo 中用户名和密码不进入目录、状态或日志
 - URL query 中敏感 key 脱敏
 - header token 脱敏
 

@@ -14,7 +14,10 @@
 
 - MCP 的 transport、discovery、risk、lifecycle 见 `docs/mcp-integration.md`
 - Skill 的目录结构、匹配和注入流程见 `docs/skill-system.md`
+- 能力仓库、工具箱分层、渐进暴露和按需激活见 `docs/capability-warehouse.md`
 - 总体 runtime 分层见 `docs/architecture.md`
+
+`ToolProvider` 的现有接口描述反映当前直接注册模型。目标架构中，外部来源先进入能力仓库，只有被选中的叶子能力才通过 provider/adapter 进入当前激活集；该演进以 `docs/capability-warehouse.md` 为准。
 
 To support features like the **Skill System (P2)**, **Project Rules (P1.2)**, **Explicit Context (P1.4)**, and **MCP Integration (P3)** without bloating the core execution loop, we introduce three generic extension interfaces into the `testcode` runtime:
 1. **`ContextLoader`**: Hook interface for loading dynamic context, rules, summaries, explicit user context, and skills at the start of a run. Loaders provide candidate context and archive references; they should not treat the prompt as long-term storage or own final pruning policy.

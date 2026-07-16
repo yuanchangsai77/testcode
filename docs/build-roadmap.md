@@ -401,6 +401,19 @@
 - 不允许 MCP 通过专用通道绕过现有 `ToolRegistry`、policy 或 approval。
 - URL query、headers、env 中的 key/token 必须脱敏后再进入日志。
 
+### P3.4 能力仓库与渐进激活
+
+目标设计见 [docs/capability-warehouse.md](capability-warehouse.md)。MCP、Skill、插件和单体工具统一作为仓库资产，不再默认把全部外部能力注册到当前模型工具列表。
+
+- 核心工作台只常驻文件、shell、编辑、询问和仓库操作等少量基础能力。
+- MCP server 和 Skill 作为工具箱，默认只暴露外层名称、描述、类型和能力标签。
+- 打开工具箱时按需获取受限 manifest，不立即注入全部 schema 或正文。
+- 只把当前步骤需要的少量叶子工具、Skill 指令或引用放入 activation set。
+- `ToolRegistry` 只承载核心工具与当前激活集；仓库总目录由独立组件维护。
+- 激活按 turn/run/session 管理范围，并受数量、schema 字符数、TTL 和回收策略约束。
+- 未打开的 MCP 不连接、不 discovery、不报错，也不影响当前任务。
+- 激活不绕过 policy、approval、logger 和结果裁剪。
+
 ## P4：Team / Subagent
 
 目标：先实现本地 subagent 编排，再扩展到远程 A2A。

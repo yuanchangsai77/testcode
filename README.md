@@ -20,6 +20,7 @@ Design documents by responsibility:
 - [docs/architecture.md](docs/architecture.md): runtime 总体架构、层次边界、核心对象职责
 - [docs/build-roadmap.md](docs/build-roadmap.md): 演进顺序、阶段目标、当前缺口、验收标准
 - [docs/runtime-extensibility.md](docs/runtime-extensibility.md): 可扩展点抽象，如 `ContextLoader`、`ToolProvider`、`ResourceProvider`
+- [docs/capability-warehouse.md](docs/capability-warehouse.md): 能力仓库、工具箱分层、渐进暴露、按需激活与回收
 - [docs/mcp-integration.md](docs/mcp-integration.md): MCP 专项设计，聚焦 discovery、transport、lifecycle、adapter、risk
 - [docs/skill-system.md](docs/skill-system.md): Skill 专项设计，聚焦发现、匹配、加载、注入和后续 artifacts/scripts
 - [docs/tool-contract.md](docs/tool-contract.md): tool schema、tool result、metadata、summary 的字段契约
@@ -29,8 +30,9 @@ Recommended reading order:
 1. `README.md`
 2. `docs/architecture.md`
 3. `docs/build-roadmap.md`
-4. 专项文档：`docs/runtime-extensibility.md` / `docs/skill-system.md` / `docs/mcp-integration.md`
-5. `docs/tool-contract.md`
+4. 能力可见性：`docs/capability-warehouse.md`
+5. 专项文档：`docs/runtime-extensibility.md` / `docs/skill-system.md` / `docs/mcp-integration.md`
+6. `docs/tool-contract.md`
 
 ## Project Layout
 

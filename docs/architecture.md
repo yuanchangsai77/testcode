@@ -122,7 +122,7 @@ Orchestration structure:
 
 Responsibilities:
 
-- load project rules and workspace summaries before model invocation
+- load project rules before model invocation and load workspace summaries only for project-relevant requests
 - keep context gathering independent from packaging and prompt rendering
 - collect user-selected context paths, workspace summaries, active skills, checkpoints, and archive references as candidate context
 - bound context size and keep paths inside the active workspace
@@ -137,7 +137,7 @@ Core files:
 Context structure:
 
 - `ProjectRulesLoader` loads `AGENTS.md` from the current path up to the nearest project boundary. Project boundaries are detected from `.git`, `pyproject.toml`, `package.json`, `Cargo.toml`, or `go.mod`.
-- `WorkspaceSummaryLoader` detects common project markers, suggested test commands, git branch/status/latest commit, and a bounded workspace tree.
+- `WorkspaceSummaryLoader` first decides whether workspace context is relevant, then detects common project markers, suggested test commands, git branch/status/latest commit, and a bounded workspace tree. Explicit enablement, selected context paths, clear repository terms, code-action plus code-target intent (including mixed Chinese/English prompts), or an explicit code path enable the summary. Ambiguous words such as `code`, `test`, or `project` alone do not.
 - `ExplicitContextLoader` expands CLI-provided `--context` files, directories, and globs under the workspace. It refuses out-of-workspace paths and binary files, clips individual reads defensively, and records source metadata for packaging.
 - A future `ContextPackager` sits after loaders and before prompt rendering. It selects, orders, clips, summarizes, and annotates candidate context into a `PromptContextPackage`.
 
@@ -293,7 +293,7 @@ Persistence structure:
 2. `app.py` loads configuration, wires the runtime objects, and chooses the requested CLI mode.
 3. The interaction layer creates a `UserRequest`.
 4. The orchestration layer creates a `SessionContext` with available tool definitions and prior conversation metadata.
-5. Registered context loaders add candidate project rules, workspace summaries, explicit context, active skill guidance, and source metadata to the session.
+5. Registered context loaders add candidate project rules, relevant workspace summaries, explicit context, active skill guidance, and source metadata to the session. Non-project external or general-knowledge requests skip the workspace tree, Git status, and test signals unless explicitly enabled.
 6. `ContextPackager` builds a budgeted `PromptContextPackage` from session state, checkpoint/archive references, and candidate context.
 7. `ModelPromptBuilder` renders the packaged context into provider messages.
 8. `OpenAICompatibleModelClient` invokes the provider, or `StubModelClient` is used when no model base URL is configured.
@@ -327,6 +327,7 @@ The code is intentionally minimal. It establishes the system boundaries and the 
 - approval workflows for destructive tools
 - richer terminal UI with streaming updates
 - additional context loaders behind the unified `ContextLoader` hook, including rules, workspace summaries, explicit user context, and skills (see [docs/runtime-extensibility.md](runtime-extensibility.md))
+- a unified capability warehouse with toolbox manifests, progressive disclosure, bounded activation sets, and release policies (see [docs/capability-warehouse.md](capability-warehouse.md))
 - MCP-backed external tool discovery (via the unified `ToolProvider` extensibility hook, see [docs/runtime-extensibility.md](runtime-extensibility.md))
 - layered MCP integration through provider/manager/client/transport boundaries, so external tools reuse the same registry, policy, approval, and observability path as built-ins (see [docs/mcp-integration.md](mcp-integration.md))
 - local subagents, team workflows, and remote A2A agents
