@@ -98,7 +98,7 @@ def path_error(action: ToolAction, resolved: ResolvedPath, expected: str | None 
     return None
 
 
-def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, input_text: str | None = None) -> ToolResult:
+def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, input_text: str | None = None, max_output_bytes: int = MAX_OUTPUT_BYTES) -> ToolResult:
     try:
         completed = subprocess.run(
             command,
@@ -110,8 +110,8 @@ def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, 
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
-        stdout = clip(error.stdout or "")
-        stderr = clip(error.stderr or "")
+        stdout = clip(error.stdout or "", max_output_bytes)
+        stderr = clip(error.stderr or "", max_output_bytes)
         return ToolResult(
             name="command",
             success=False,
@@ -122,8 +122,8 @@ def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, 
     except FileNotFoundError as error:
         return ToolResult(name="command", success=False, output=str(error), error_code="command_not_found")
 
-    stdout = clip(completed.stdout)
-    stderr = clip(completed.stderr)
+    stdout = clip(completed.stdout, max_output_bytes)
+    stderr = clip(completed.stderr, max_output_bytes)
     return ToolResult(
         name="command",
         success=completed.returncode == 0,
@@ -156,13 +156,13 @@ def looks_binary(data: bytes) -> bool:
     return b"\0" in data
 
 
-def clip(value: str | bytes) -> str:
+def clip(value: str | bytes, max_bytes: int = MAX_OUTPUT_BYTES) -> str:
     if isinstance(value, bytes):
         value = value.decode("utf-8", errors="replace")
     encoded = value.encode("utf-8")
-    if len(encoded) <= MAX_OUTPUT_BYTES:
+    if len(encoded) <= max_bytes:
         return value
-    return encoded[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace") + "\n...truncated..."
+    return encoded[:max_bytes].decode("utf-8", errors="replace") + "\n...truncated..."
 
 
 def retarget(result: ToolResult, name: str) -> ToolResult:

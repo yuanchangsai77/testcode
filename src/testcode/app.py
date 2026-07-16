@@ -81,20 +81,27 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
 
     # Only builtin and warehouse-navigation tools are initially visible. External
     # MCP/Skill capabilities remain in the warehouse until explicitly activated.
-    providers = [BuiltinToolProvider(logger)]
+    providers = [BuiltinToolProvider(logger, limits=config.limits)]
     mcp_manager = None
     mcp_discovery = None
     capability_sources = [SkillToolboxSource(skills_registry, logger=logger)]
     if config.mcp_servers:
+        def create_configured_mcp_client(server):
+            client = create_mcp_client(server)
+            if isinstance(client, TransportBackedMCPClient):
+                client.max_tools_per_server = config.limits.mcp_tools_per_server
+            return client
+
         mcp_manager = MCPManager(
             configs={server.name: server for server in config.mcp_servers},
-            client_factory=create_mcp_client,
+            client_factory=create_configured_mcp_client,
             logger=logger,
         )
         mcp_discovery = MCPDiscoveryService(
             manager=mcp_manager,
             logger=logger,
             cache_path=root / ".testcode" / "mcp-discovery-cache.json",
+            max_tools_per_server=config.limits.mcp_tools_per_server,
         )
         capability_sources.append(
             MCPToolboxSource(
@@ -104,7 +111,7 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
                 logger=logger,
             )
         )
-    tools = ToolRegistry(logger=logger)
+    tools = ToolRegistry(logger=logger, max_output_bytes=config.limits.tool_output_bytes)
     for provider in providers:
         for tool in provider.get_tools():
             tools.register(tool)
@@ -112,6 +119,7 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
         sources=capability_sources,
         registry=tools,
         logger=logger,
+        max_active_capabilities=config.limits.active_capabilities,
     )
     for tool in build_warehouse_tools(capability_warehouse):
         tools.register(tool)
@@ -130,6 +138,9 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
         capability_warehouse=capability_warehouse,
         approval_callback=presenter.confirm_tool_action,
         progress_reporter=presenter,
+        max_model_retries=config.model_retry.max_retries,
+        model_retry_delays=config.model_retry.delays,
+        max_turns=config.orchestration.max_turns,
     )
     engine.resource_providers = []
     if mcp_manager is not None and mcp_discovery is not None:

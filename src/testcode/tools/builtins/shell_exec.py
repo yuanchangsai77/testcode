@@ -102,9 +102,9 @@ class ShellSession:
             return ToolResult(
                 name="command",
                 success=False,
-                output=format_process_output(clip(output), "", None),
+                output=format_process_output(clip(output, self.context.max_output_bytes), "", None),
                 error_code="timeout",
-                metadata={"timeout": timeout, "stdout": clip(output), "stderr": ""},
+                metadata={"timeout": timeout, "stdout": clip(output, self.context.max_output_bytes), "stderr": ""},
             )
 
         stdout, exit_code, reported_cwd = self._split_marker(output, marker)
@@ -117,7 +117,7 @@ class ShellSession:
                 success=False,
                 output="persistent shell returned an invalid command marker",
                 error_code="shell_protocol_error",
-                metadata={"stdout": clip(output), "stderr": ""},
+                metadata={"stdout": clip(output, self.context.max_output_bytes), "stderr": ""},
             )
 
         cwd_check = resolve_workspace_path(self.context, reported_cwd)
@@ -130,7 +130,7 @@ class ShellSession:
             return cwd_check
 
         self.cwd = cwd_check.path
-        stdout = clip(stdout)
+        stdout = clip(stdout, self.context.max_output_bytes)
         return ToolResult(
             name="command",
             success=exit_code == 0,

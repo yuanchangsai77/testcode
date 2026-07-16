@@ -604,7 +604,7 @@ MCP 最大的工程风险不在 schema，而在连接和进程生命周期。
 - server 崩溃后，不复用失效 client；下一次发现或调用时允许重建。
 - stdio、Streamable HTTP 和 SSE 都应接受单条 JSON-RPC 消息或 batch，并按请求 id 选择对应响应。
 - project MCP 配置、Skill 目录和 discovery cache 必须绑定请求或 resumed session 的 workspace，而不是启动命令所在目录。
-- 单个 server 最多暴露 256 个 tools、1,000 个 resources，单个 descriptor 最大 100,000 字符；超限项丢弃并记录诊断事件。
+- 单个 server 默认最多发现 256 个 tools，可在 `limits.mcp_tools_per_server` 调整，内部硬上限为 1,024；超限项丢弃并记录诊断事件。resources 默认上限 1,000、descriptor 最大 100,000 字符，仍是内部防御边界。
 - transport 在 JSON 解析前将单条 HTTP、SSE 或 stdio 消息限制为 10 MiB，避免远端异常响应导致无界内存占用。
 
 连接状态不应散落在 provider 和单个 tool 实例里；应由 manager 集中管理。

@@ -5,13 +5,14 @@ from .base import ToolContext
 
 
 class ToolRegistry:
-    def __init__(self, logger) -> None:
+    def __init__(self, logger, max_output_bytes: int = 32_000) -> None:
         self._tools = {}
         self._logger = logger
         self._state = {}
         self._persistent_state_names: set[str] = set()
         self._providers = []
         self._provider_tool_owners: dict[str, int] = {}
+        self._max_output_bytes = max(1, int(max_output_bytes))
 
     def register(self, tool) -> bool:
         if tool.name in self._tools:
@@ -117,7 +118,7 @@ class ToolRegistry:
             return validation_error
 
         self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
-        result = tool.run(action, ToolContext(cwd=cwd, state=self._state, allowed_roots=list(allowed_roots or [])))
+        result = tool.run(action, ToolContext(cwd=cwd, state=self._state, allowed_roots=list(allowed_roots or []), max_output_bytes=self._max_output_bytes))
         self._record_result(result)
         return result
 

@@ -262,7 +262,8 @@ Core files:
 
 Responsibilities:
 
-- load runtime configuration from `.env` and environment variables
+- load model connection settings from `.env` and environment variables
+- load runtime policy and MCP settings from global/project `config.toml`
 - keep application assembly separate from configuration parsing
 - persist resumable CLI conversations independently from the interaction loop
 - list, load, resume, and close stored conversations
@@ -277,8 +278,9 @@ Core files:
 Configuration structure:
 
 - `.env` loading only fills missing environment variables.
-- `RuntimeConfig` normalizes model base URL, model name, timeout, and safety mode.
-- Invalid or missing numeric timeout values fall back to the default.
+- `RuntimeConfig` normalizes model connection settings, retry policy, runtime limits, safety mode, and MCP servers.
+- `~/.testcode/config.toml` supplies user defaults; `.testcode/config.toml` overrides them for the current project.
+- Configurable limits have internal hard caps. Exceeding a cap is a startup error rather than a silent fallback; see `docs/configuration.md`.
 
 Persistence structure:
 

@@ -29,6 +29,7 @@ class ToolContext:
     cwd: str
     state: dict = field(default_factory=dict)
     allowed_roots: list[str] = field(default_factory=list)
+    max_output_bytes: int = 32_000
 
 
 @dataclass(slots=True)

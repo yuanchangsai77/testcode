@@ -40,6 +40,9 @@ class ExecutionEngine:
         approval_callback=None,
         progress_reporter: ProgressReporter | None = None,
         presenter=None,
+        max_model_retries: int = 7,
+        model_retry_delays: tuple[float, ...] | None = None,
+        max_turns: int = 100,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -49,7 +52,9 @@ class ExecutionEngine:
         self.capability_warehouse = capability_warehouse
         self.approval_callback = approval_callback
         self.progress_reporter = progress_reporter or presenter
-        self.max_turns = 100
+        self.max_model_retries = max(0, int(max_model_retries))
+        self.model_retry_delays = tuple(model_retry_delays or self.model_retry_delays)
+        self.max_turns = max(1, int(max_turns))
         self.max_duplicate_skips = 3
         self._tool_state_session_key: str | None = None
         self._keep_tool_state = False
@@ -120,7 +125,7 @@ class ExecutionEngine:
                                 f"after the initial request: {error}"
                             ) from error
                         retry_count += 1
-                        retry_delay = self.model_retry_delays[retry_count - 1]
+                        retry_delay = self.model_retry_delays[min(retry_count - 1, len(self.model_retry_delays) - 1)]
                         self.logger.record(
                             "model.retry",
                             {

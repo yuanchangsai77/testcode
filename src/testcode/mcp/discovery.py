@@ -26,6 +26,7 @@ class MCPDiscoveryService:
     cache_ttl: float = 60.0
     logger: object | None = None
     cache_path: Path | None = None
+    max_tools_per_server: int = MAX_MCP_TOOLS_PER_SERVER
 
     def __post_init__(self) -> None:
         self._load_cache()
@@ -124,7 +125,7 @@ class MCPDiscoveryService:
                 "input_schema": tool.input_schema,
                 "annotations": tool.annotations,
             }, ensure_ascii=False, default=str))
-            if size > MAX_MCP_DESCRIPTOR_CHARS or len(accepted) >= MAX_MCP_TOOLS_PER_SERVER:
+            if size > MAX_MCP_DESCRIPTOR_CHARS or len(accepted) >= self.max_tools_per_server:
                 dropped += 1
                 continue
             accepted.append(tool)
@@ -133,7 +134,7 @@ class MCPDiscoveryService:
                 "server_name": server_name,
                 "accepted": len(accepted),
                 "dropped": dropped,
-                "max_items": MAX_MCP_TOOLS_PER_SERVER,
+                "max_items": self.max_tools_per_server,
                 "max_descriptor_chars": MAX_MCP_DESCRIPTOR_CHARS,
             })
         return tuple(accepted)
@@ -193,7 +194,7 @@ class MCPDiscoveryService:
                     continue
                 tools = tuple(
                     MCPToolDescriptor(**item)
-                    for item in raw_tools[: MAX_MCP_TOOLS_PER_SERVER + 1]
+                    for item in raw_tools[: self.max_tools_per_server + 1]
                     if isinstance(item, dict)
                 )
                 resources = tuple(

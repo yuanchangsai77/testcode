@@ -15,24 +15,23 @@ The project is organized around six layers:
 
 Detailed design is in [docs/architecture.md](docs/architecture.md).
 
-Design documents by responsibility:
+## Documentation Map
 
-- [docs/architecture.md](docs/architecture.md): runtime 总体架构、层次边界、核心对象职责
-- [docs/build-roadmap.md](docs/build-roadmap.md): 演进顺序、阶段目标、当前缺口、验收标准
-- [docs/runtime-extensibility.md](docs/runtime-extensibility.md): 可扩展点抽象，如 `ContextLoader`、`ToolProvider`、`ResourceProvider`
-- [docs/capability-warehouse.md](docs/capability-warehouse.md): 能力仓库、工具箱分层、渐进暴露、按需激活与回收
-- [docs/mcp-integration.md](docs/mcp-integration.md): MCP 专项设计，聚焦 discovery、transport、lifecycle、adapter、risk
-- [docs/skill-system.md](docs/skill-system.md): Skill 专项设计，聚焦发现、匹配、加载、注入和后续 artifacts/scripts
-- [docs/tool-contract.md](docs/tool-contract.md): tool schema、tool result、metadata、summary 的字段契约
+| 目的 | 文档 |
+| --- | --- |
+| 安装、运行、模型接入与常用命令 | 本文档 |
+| 所有运行配置、默认值与硬上限 | [配置参考](docs/configuration.md) |
+| runtime 分层、对象职责与数据流 | [总体架构](docs/architecture.md) |
+| 当前阶段、未完成事项与验收标准 | [演进路线图](docs/build-roadmap.md) |
+| ContextLoader、ToolProvider、ResourceProvider | [运行时扩展](docs/runtime-extensibility.md) |
+| 工具箱、渐进披露、激活与回收 | [能力仓库](docs/capability-warehouse.md) |
+| MCP transport、discovery、风险与生命周期 | [MCP 集成](docs/mcp-integration.md) |
+| Skill 的目录、加载和注入 | [Skill 系统](docs/skill-system.md) |
+| Tool 定义、结果、metadata 和摘要的契约 | [工具契约](docs/tool-contract.md) |
+| TUI 交互与实现决策 | [TUI 设计](docs/tui_design_and_architecture.md) |
+| 版本快照与已完成修复记录 | [版本快照](docs/versions/v0.1.md)、[MCP 修复记录](docs/mcp-pr-review-remediation.md) |
 
-Recommended reading order:
-
-1. `README.md`
-2. `docs/architecture.md`
-3. `docs/build-roadmap.md`
-4. 能力可见性：`docs/capability-warehouse.md`
-5. 专项文档：`docs/runtime-extensibility.md` / `docs/skill-system.md` / `docs/mcp-integration.md`
-6. `docs/tool-contract.md`
+建议阅读顺序：本文档 → 配置参考 → 总体架构 → 路线图；需要开发某个子系统时，再进入对应专题文档。
 
 ## Project Layout
 
@@ -131,6 +130,12 @@ Behavior:
 - The proxy in `/opt/repos/test` remains responsible for the real upstream base URL and API key
 - The real-model path now supports tool-call loops: the model can request built-in tools, receive tool results, and continue until it produces a final answer
 - Each run automatically writes observability logs under `.testcode/runs/<timestamp>/`, including `events.jsonl` and a layered `details.log`
+
+## Configuration
+
+模型连接信息继续放在 `.env`；运行策略和 MCP 服务放在 `~/.testcode/config.toml` 或项目的
+`.testcode/config.toml`。项目配置覆盖全局同名项。完整示例、参数中文说明和内部硬上限见
+[配置参考](docs/configuration.md)。
 
 Run:
 

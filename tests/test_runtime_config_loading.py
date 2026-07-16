@@ -1,6 +1,6 @@
 import pytest
 
-from testcode.config import load_dotenv, load_runtime_config
+from testcode.config import MAX_MODEL_RETRIES, MAX_TOOL_RESULTS, load_dotenv, load_runtime_config
 from testcode.mcp.adapter import build_stable_tool_name, map_mcp_tool_risk
 from testcode.mcp.config import MCPServerConfig
 from testcode.mcp.types import MCPToolDescriptor
@@ -113,6 +113,62 @@ command = "second"
 
     with pytest.raises(ValueError, match="duplicate MCP server name 'duplicate'"):
         load_runtime_config()
+
+
+def test_load_runtime_config_reads_tuning_and_project_values_override_global(tmp_path, monkeypatch):
+    global_dir = tmp_path / "global"
+    project_dir = tmp_path / "project"
+    (global_dir / ".testcode").mkdir(parents=True)
+    (project_dir / ".testcode").mkdir(parents=True)
+    (global_dir / ".testcode" / "config.toml").write_text(
+        """
+[model.retry]
+max_retries = 2
+delays = [0.1]
+
+[limits]
+search_results = 100
+        """.strip(), encoding="utf-8"
+    )
+    (project_dir / ".testcode" / "config.toml").write_text(
+        """
+[model.retry]
+max_retries = 4
+
+[orchestration]
+max_turns = 12
+
+[limits]
+active_capabilities = 5
+search_results = 300
+        """.strip(), encoding="utf-8"
+    )
+    monkeypatch.setattr("testcode.config.Path.home", lambda: global_dir)
+
+    config = load_runtime_config(cwd=project_dir)
+
+    assert config.model_retry.max_retries == 4
+    assert config.model_retry.delays == (0.1,)
+    assert config.orchestration.max_turns == 12
+    assert config.limits.active_capabilities == 5
+    assert config.limits.search_results == 300
+
+
+@pytest.mark.parametrize(
+    ("table", "message"),
+    [
+        (f"[model.retry]\nmax_retries = {MAX_MODEL_RETRIES + 1}", "model.retry.max_retries"),
+        (f"[limits]\nsearch_results = {MAX_TOOL_RESULTS + 1}", "limits.search_results"),
+    ],
+)
+def test_load_runtime_config_rejects_values_above_hard_limit(tmp_path, monkeypatch, table, message):
+    config_dir = tmp_path / ".testcode"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(table, encoding="utf-8")
+    monkeypatch.setattr("testcode.config.Path.home", lambda: tmp_path / "empty")
+
+    with pytest.raises(ValueError, match=message):
+        load_runtime_config(cwd=tmp_path)
 
 
 def test_mcp_adapter_helpers_apply_stable_names_and_risk_overrides():

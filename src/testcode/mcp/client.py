@@ -56,6 +56,7 @@ class TransportBackedMCPClient:
     server_capabilities: dict[str, Any] = field(default_factory=dict)
     server_info: dict[str, Any] = field(default_factory=dict)
     protocol_version: str = DEFAULT_PROTOCOL_VERSION
+    max_tools_per_server: int = MAX_MCP_TOOLS_PER_SERVER
 
     def initialize(self) -> None:
         if self.initialized:
@@ -93,7 +94,7 @@ class TransportBackedMCPClient:
         raw_tools = self._list_all(
             "tools/list",
             "tools",
-            max_items=MAX_MCP_TOOLS_PER_SERVER,
+            max_items=self.max_tools_per_server,
         )
 
         tools: list[MCPToolDescriptor] = []
