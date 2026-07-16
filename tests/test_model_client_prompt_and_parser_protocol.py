@@ -187,6 +187,18 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
     assert "- read_file: Read a workspace file." not in user
 
 
+def test_build_messages_explains_staged_warehouse_without_exposing_contents():
+    session = SessionContext(request=UserRequest(prompt="使用 MCP 查询路线", cwd="/repo"))
+
+    system = str(ModelPromptBuilder().build_messages(session)[0]["content"])
+
+    assert "warehouse_list" in system
+    assert "The warehouse contents are not shown by default" in system
+    assert "mcp:amap" not in system
+    assert "Do not inspect project source, config files, or environment variables" in system
+    assert "Never infer that credentials, transports, or integrations are missing" in system
+
+
 def test_build_messages_includes_recent_session_trace_summary():
     builder = ModelPromptBuilder()
     session = SessionContext(

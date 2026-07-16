@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import time
+from urllib.parse import urlsplit, urlunsplit
 
 from ..orchestration.ext import ResourceProvider
 from ..tools.base import Tool
@@ -10,11 +13,12 @@ from .adapter import (
     adapt_resource_content,
     adapt_resource_descriptor,
     build_stable_resource_id,
+    build_stable_tool_name,
 )
 from .config import MCPServerConfig
 from .discovery import MCPDiscoveryService
 from .manager import MCPManager
-from ..safety.redaction import redact_text
+from ..safety.redaction import redact, redact_text
 
 
 MAX_MCP_RESOURCE_CHARS = 100_000
@@ -57,6 +61,68 @@ class MCPToolProvider:
                 registered_names.add(tool.name)
                 tools.append(tool)
         return tools
+
+    def get_statuses(self) -> list[dict[str, object]]:
+        """Expose bounded, secret-safe MCP availability diagnostics."""
+        statuses: list[dict[str, object]] = []
+        now = time.time()
+        for config in self.configs:
+            snapshot = self.discovery.peek_snapshot(config.name)
+            if not config.enabled:
+                state = "disabled"
+            elif snapshot is None:
+                state = "not_discovered"
+            elif snapshot.error_code and not snapshot.tools:
+                state = "unavailable"
+            elif snapshot.error_code or snapshot.resource_error_code:
+                state = "degraded"
+            else:
+                state = "ready"
+
+            tool_names = (
+                [build_stable_tool_name(config, item.tool_name) for item in snapshot.tools]
+                if snapshot is not None
+                else []
+            )
+            refreshed_at = snapshot.refreshed_at if snapshot is not None else 0.0
+            status: dict[str, object] = {
+                "provider": "mcp",
+                "server_name": config.name,
+                "tool_name_prefix": config.stable_prefix,
+                "transport": config.transport,
+                "target": self._safe_target(config),
+                "configured": True,
+                "enabled": config.enabled,
+                "state": state,
+                "source": snapshot.source if snapshot is not None else "none",
+                "tool_count": len(snapshot.tools) if snapshot is not None else 0,
+                "resource_count": len(snapshot.resources) if snapshot is not None else 0,
+                "tool_names": tool_names,
+                "refreshed_at": refreshed_at,
+                "age_seconds": round(max(0.0, now - refreshed_at), 3) if refreshed_at else None,
+                "error_code": (
+                    snapshot.cause_error_code or snapshot.error_code
+                    if snapshot is not None
+                    else None
+                ),
+                "error_message": redact_text(snapshot.error_message) if snapshot is not None else "",
+                "error_details": redact(dict(snapshot.error_details)) if snapshot is not None else {},
+                "resource_error_code": snapshot.resource_error_code if snapshot is not None else None,
+                "resource_error_message": (
+                    redact_text(snapshot.resource_error_message) if snapshot is not None else ""
+                ),
+            }
+            statuses.append(status)
+        return statuses
+
+    def _safe_target(self, config: MCPServerConfig) -> str:
+        if config.url:
+            parsed = urlsplit(config.url)
+            safe_netloc = parsed.netloc.rsplit("@", 1)[-1]
+            return urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
+        if config.command:
+            return Path(config.command).name
+        return ""
 
 
 @dataclass(slots=True)

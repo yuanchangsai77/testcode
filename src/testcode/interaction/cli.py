@@ -89,8 +89,10 @@ class CLI:
                     continue
 
             active_skills = []
+            active_capability_ids = []
             if session is not None:
                 active_skills = getattr(session, "active_skills", [])
+                active_capability_ids = getattr(session, "active_capability_ids", [])
 
             request = UserRequest(
                 prompt=prompt,
@@ -99,6 +101,7 @@ class CLI:
                     "conversation": list(conversation),
                     "session_id": session.session_id if session is not None else None,
                     "active_skills": list(active_skills),
+                    "active_capability_ids": list(active_capability_ids),
                     "session_trace": list(getattr(session, "trace", [])[-6:]) if session is not None else [],
                     "resume_state": getattr(session, "resume_state", None),
                     "context_paths": list(context_paths or []),
@@ -125,6 +128,9 @@ class CLI:
                     session.status = "active"
                     if hasattr(summary, "active_skills"):
                         session.active_skills = [s.metadata.name for s in summary.active_skills]
+                    session.active_capability_ids = list(
+                        getattr(summary, "active_capability_ids", [])
+                    )
                     run_summary = getattr(self.logger, "last_run_summary", None)
                     if run_summary is not None and all(item.run_id != run_summary.run_id for item in session.trace):
                         session.trace.append(run_summary)
@@ -176,6 +182,9 @@ class CLI:
         session.status = status
         if hasattr(summary, "active_skills"):
             session.active_skills = [skill.metadata.name for skill in summary.active_skills]
+        session.active_capability_ids = list(
+            getattr(summary, "active_capability_ids", [])
+        )
         run_summary = getattr(self.logger, "last_run_summary", None)
         if run_summary is not None and all(item.run_id != run_summary.run_id for item in session.trace):
             session.trace.append(run_summary)

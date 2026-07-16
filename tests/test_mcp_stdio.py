@@ -302,7 +302,7 @@ def test_stdio_bounds_unsolicited_response_queue(tmp_path):
     transport.close()
 
 
-def test_create_app_registers_stdio_mcp_tools(tmp_path, monkeypatch):
+def test_create_app_activates_stdio_mcp_tool_on_demand(tmp_path, monkeypatch):
     script_path = write_stdio_server(tmp_path)
     monkeypatch.chdir(tmp_path)
     config_dir = tmp_path / ".testcode"
@@ -319,7 +319,11 @@ args = ["-u", "{script_path}"]
     )
 
     app = create_app()
-    app.engine.tools.definitions()
+    warehouse = app.engine.capability_warehouse
+    assert app.engine.tools.definition_for("local__ping") is None
+    manifest = warehouse.open_toolbox("mcp:local")
+    assert [item.name for item in manifest.items] == ["ping"]
+    warehouse.activate(["mcp:local:ping"])
     definition = app.engine.tools.definition_for("local__ping")
 
     assert definition is not None

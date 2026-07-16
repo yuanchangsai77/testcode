@@ -86,6 +86,262 @@ url = "http://example.test/mcp"
     assert app.engine.tools.definition_for("read_file") is not None
 
 
+def test_explicit_mcp_request_opens_only_selected_toolbox_and_reports_failure(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".testcode"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        """
+[[mcp.servers]]
+name = "amap"
+transport = "stdio"
+command = "missing-mcp-server-command"
+        """.strip(),
+        encoding="utf-8",
+    )
+    app = create_app()
+
+    calls = 0
+
+    def respond(session):
+        nonlocal calls
+        calls += 1
+        assert session.workspace_summary is None
+        if calls == 1:
+            return ModelReply(
+                message="list warehouse",
+                actions=[ToolAction(name="warehouse_list", arguments={})],
+            )
+        if calls == 2:
+            assert "mcp:amap" in session.tool_results[-1].output
+            return ModelReply(
+                message="opening requested toolbox",
+                actions=[ToolAction(name="toolbox_open", arguments={"toolbox_id": "mcp:amap"})],
+            )
+        return ModelReply(message=session.tool_results[-1].output, done=True)
+
+    monkeypatch.setattr(app.engine.model, "respond", respond)
+
+    summary = app.run(UserRequest(prompt="使用 MCP 帮我查询路线", cwd=str(tmp_path)))
+
+    assert calls == 3
+    assert "amap" in summary.final_message
+    assert "unavailable" in summary.final_message
+    event_names = [event.name for event in app.logger.events]
+    assert "capability.toolbox.opened" in event_names
+    assert "context.workspace_summary" not in event_names
+    assert "context.workspace_summary.skipped" in event_names
+
+
+def test_explicit_mcp_request_without_configuration_exposes_no_mcp_toolbox(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = create_app()
+
+    observed = {"calls": 0}
+
+    def respond(session):
+        observed["calls"] += 1
+        observed["tools"] = [tool.name for tool in session.available_tools]
+        observed["workspace"] = session.workspace_summary
+        if observed["calls"] == 1:
+            return ModelReply(
+                message="list warehouse",
+                actions=[ToolAction(name="warehouse_list", arguments={})],
+            )
+        observed["warehouse_output"] = session.tool_results[-1].output
+        return ModelReply(message="No configured MCP toolbox is present.", done=True)
+
+    monkeypatch.setattr(app.engine.model, "respond", respond)
+
+    summary = app.engine.execute(UserRequest(prompt="使用 MCP 查询路线", cwd=str(tmp_path)))
+
+    assert "No configured MCP toolbox" in summary.final_message
+    entries = json.loads(observed["warehouse_output"])["entries"]
+    assert not any(entry["source"] == "mcp" for entry in entries)
+    assert "warehouse_list" in observed["tools"]
+    assert observed["workspace"] is None
+
+
+def test_mcp_code_task_is_not_mistaken_for_external_tool_request(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = create_app()
+    observed = {"called": False}
+
+    def respond(session):
+        observed["called"] = True
+        observed["workspace_summary"] = session.workspace_summary
+        return ModelReply(message="reviewed MCP code", done=True)
+
+    monkeypatch.setattr(app.engine.model, "respond", respond)
+
+    summary = app.engine.execute(
+        UserRequest(prompt="检查并修复 MCP integration code", cwd=str(tmp_path))
+    )
+
+    assert summary.final_message == "reviewed MCP code"
+    assert observed["called"] is True
+    assert observed["workspace_summary"] is not None
+
+
+def test_healthy_mcp_request_reaches_model_without_workspace_summary(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".testcode"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        """
+[[mcp.servers]]
+name = "amap"
+transport = "stdio"
+command = "fake-amap"
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    lifecycle = {"initialized": 0}
+
+    class Client:
+        def initialize(self):
+            lifecycle["initialized"] += 1
+
+        def list_tools(self):
+            from testcode.mcp.types import MCPToolDescriptor
+
+            return (
+                MCPToolDescriptor(
+                    server_name="amap",
+                    tool_name="maps_direction_driving",
+                    description="Plan a driving route",
+                ),
+            )
+
+        def list_resources(self):
+            return ()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("testcode.app.create_mcp_client", lambda _config: Client())
+    app = create_app()
+    observed = {"turn_tools": []}
+
+    def respond(session):
+        tools = [tool.name for tool in session.available_tools]
+        observed["turn_tools"].append(tools)
+        observed["workspace_summary"] = session.workspace_summary
+        turn = len(observed["turn_tools"])
+        if turn == 1:
+            assert lifecycle["initialized"] == 0
+            return ModelReply(
+                message="list warehouse",
+                actions=[ToolAction(name="warehouse_list", arguments={})],
+            )
+        if turn == 2:
+            assert lifecycle["initialized"] == 0
+            assert "mcp:amap" in session.tool_results[-1].output
+            return ModelReply(
+                message="open maps",
+                actions=[ToolAction(name="toolbox_open", arguments={"toolbox_id": "mcp:amap"})],
+            )
+        if turn == 3:
+            assert lifecycle["initialized"] == 1
+            return ModelReply(
+                message="activate route planner",
+                actions=[ToolAction(
+                    name="capability_activate",
+                    arguments={"capability_ids": ["mcp:amap:maps_direction_driving"]},
+                )],
+            )
+        return ModelReply(message="route ready", done=True)
+
+    monkeypatch.setattr(app.engine.model, "respond", respond)
+
+    summary = app.engine.execute(
+        UserRequest(prompt="使用 MCP 帮我查询留仙洞到梅塘路线", cwd=str(tmp_path))
+    )
+
+    assert summary.final_message == "route ready"
+    assert "amap__maps_direction_driving" not in observed["turn_tools"][0]
+    assert "amap__maps_direction_driving" not in observed["turn_tools"][1]
+    assert "amap__maps_direction_driving" not in observed["turn_tools"][2]
+    assert "amap__maps_direction_driving" in observed["turn_tools"][3]
+    assert observed["workspace_summary"] is None
+    assert lifecycle["initialized"] == 1
+
+
+def test_newly_activated_tool_cannot_run_in_same_model_turn(tmp_path):
+    logger = InMemoryLogger()
+    registry = build_builtin_registry(logger)
+
+    class Source:
+        def catalog_entries(self):
+            from testcode.capabilities.model import CapabilityEntry
+
+            return (CapabilityEntry("fake:box", "box", "toolbox", "fake", "Fake box"),)
+
+        def owns_toolbox(self, toolbox_id):
+            return toolbox_id == "fake:box"
+
+        def open_toolbox(self, toolbox_id):
+            from testcode.capabilities.model import CapabilityManifest, ManifestItem
+
+            return CapabilityManifest(
+                toolbox_id=toolbox_id,
+                name="box",
+                source="fake",
+                state="ready",
+                items=(ManifestItem("fake:box:leaf", toolbox_id, "leaf", "tool", "Leaf"),),
+            )
+
+        def activate(self, capability_id):
+            from testcode.capabilities.model import ActivatedCapability
+            from testcode.tools.base import SimpleTool
+
+            tool = SimpleTool(
+                name="leaf",
+                description="Leaf",
+                arguments={},
+                input_schema={"type": "object", "properties": {}},
+                handler=lambda action, _context: ToolResult(action.name, True, "used"),
+            )
+            return ActivatedCapability(capability_id, "fake:box", "tool", tool=tool)
+
+    from testcode.capabilities.tools import build_warehouse_tools
+    from testcode.capabilities.warehouse import CapabilityWarehouse
+
+    warehouse = CapabilityWarehouse([Source()], registry, logger=logger)
+    for tool in build_warehouse_tools(warehouse):
+        registry.register(tool)
+    warehouse.open_toolbox("fake:box")
+
+    class Model:
+        calls = 0
+
+        def respond(self, session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="activate and use",
+                    actions=[
+                        ToolAction("capability_activate", {"capability_ids": ["fake:box:leaf"]}),
+                        ToolAction("leaf", {}),
+                    ],
+                )
+            assert any(tool.name == "leaf" for tool in session.available_tools)
+            return ModelReply(message="done", done=True)
+
+    engine = ExecutionEngine(
+        model=Model(),
+        tools=registry,
+        guardrails=Guardrails(DefaultPolicy(mode="auto"), logger),
+        logger=logger,
+        capability_warehouse=warehouse,
+    )
+    summary = engine.execute(UserRequest(prompt="use leaf", cwd=str(tmp_path), metadata={"session_id": "s"}))
+
+    assert summary.tool_results[0].success is True
+    assert summary.tool_results[1].error_code == "tool_not_visible_this_turn"
+
+
 def test_engine_stops_repeated_non_retryable_tool_failures(tmp_path):
     class RepeatingBlockedModel:
         calls = 0
@@ -1081,6 +1337,7 @@ def test_session_store_persists_session_trace_and_writes_trace_log(tmp_path):
             {"role": "assistant", "content": "done"},
         ],
     )
+    session.active_capability_ids = ["mcp:amap:maps_direction_driving"]
     session.trace.append(
         SessionRunTrace(
             run_id="run-1",
@@ -1113,6 +1370,7 @@ def test_session_store_persists_session_trace_and_writes_trace_log(tmp_path):
     assert loaded.trace[0].run_id == "run-1"
     assert loaded.resume_state.last_run_id == "run-1"
     assert loaded.resume_state.last_outcome == "completed"
+    assert loaded.active_capability_ids == ["mcp:amap:maps_direction_driving"]
     trace_log = tmp_path / ".testcode" / "sessions" / f"{session.session_id}.trace.log"
     assert trace_log.exists()
     text = trace_log.read_text(encoding="utf-8")

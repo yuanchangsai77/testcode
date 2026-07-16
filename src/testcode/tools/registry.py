@@ -23,6 +23,16 @@ class ToolRegistry:
         self._tools[tool.name] = tool
         return True
 
+    def unregister(self, name: str) -> bool:
+        if name not in self._tools:
+            return False
+        self._tools.pop(name, None)
+        self._provider_tool_owners.pop(name, None)
+        return True
+
+    def state_for(self, name: str, default=None):
+        return self._state.get(name, default)
+
     def attach_state(self, name: str, value, *, persistent: bool = False) -> None:
         self._state[name] = value
         if persistent:
@@ -74,6 +84,14 @@ class ToolRegistry:
     def definitions(self) -> list[ToolDefinition]:
         self.refresh_providers()
         return [tool.definition() for tool in self._tools.values() if getattr(tool, "exposed", True)]
+
+    def provider_statuses(self) -> list[dict[str, object]]:
+        statuses: list[dict[str, object]] = []
+        for provider in self._providers:
+            get_statuses = getattr(provider, "get_statuses", None)
+            if callable(get_statuses):
+                statuses.extend(get_statuses())
+        return statuses
 
     def definition_for(self, name: str) -> ToolDefinition | None:
         tool = self._tools.get(name)

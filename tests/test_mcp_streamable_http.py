@@ -400,7 +400,7 @@ def test_streamable_http_client_maps_jsonrpc_tool_errors(monkeypatch):
     assert "invalid arguments" in result.content
 
 
-def test_create_app_registers_streamable_http_mcp_tools(tmp_path, monkeypatch):
+def test_create_app_activates_streamable_http_mcp_tools_on_demand(tmp_path, monkeypatch):
     class FakeDiscoveryClient:
         def __init__(self, config):
             self.config = config
@@ -447,7 +447,10 @@ url = "http://example.test/mcp"
     )
 
     app = create_app()
-    app.engine.tools.definitions()
+    warehouse = app.engine.capability_warehouse
+    assert app.engine.tools.definition_for("remote__search") is None
+    warehouse.open_toolbox("mcp:remote")
+    warehouse.activate(["mcp:remote:search"])
     definition = app.engine.tools.definition_for("remote__search")
 
     assert definition is not None

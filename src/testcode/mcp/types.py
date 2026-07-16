@@ -46,4 +46,9 @@ class MCPDiscoverySnapshot:
     resources: tuple[MCPResourceDescriptor, ...] = ()
     error_code: str | None = None
     error_message: str = ""
+    cause_error_code: str | None = None
+    error_details: dict[str, Any] = field(default_factory=dict)
+    resource_error_code: str | None = None
+    resource_error_message: str = ""
     refreshed_at: float = 0.0
+    source: str = "live"

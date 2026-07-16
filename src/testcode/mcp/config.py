@@ -18,6 +18,8 @@ class MCPServerConfig:
     name: str
     transport: str
     enabled: bool = True
+    description: str = ""
+    capabilities: tuple[str, ...] = ()
     tool_name_prefix: str = ""
     risk_overrides: dict[str, str] = field(default_factory=dict)
     timeout: float = 30.0
@@ -82,6 +84,7 @@ def _build_server_config(raw: dict[str, Any]) -> MCPServerConfig | None:
     headers = _string_dict(raw.get("headers"), "headers", name)
     env = _string_dict(raw.get("env"), "env", name)
     args = _string_list(raw.get("args"), "args", name)
+    capabilities = _string_list(raw.get("capabilities"), "capabilities", name)
     risk_overrides = _string_dict(raw.get("risk_overrides"), "risk_overrides", name)
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -93,6 +96,8 @@ def _build_server_config(raw: dict[str, Any]) -> MCPServerConfig | None:
         name=name,
         transport=transport,
         enabled=enabled,
+        description=_string_field(raw.get("description", ""), "description", server_name=name).strip(),
+        capabilities=capabilities,
         tool_name_prefix=_string_field(raw.get("tool_name_prefix", ""), "tool_name_prefix", server_name=name).strip(),
         risk_overrides=risk_overrides,
         timeout=_positive_float(raw.get("timeout"), 30.0),

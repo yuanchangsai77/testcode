@@ -30,6 +30,7 @@ class ExecutionEngine:
         guardrails,
         logger,
         context_loaders: list[ContextLoader] | None = None,
+        capability_warehouse=None,
         approval_callback=None,
         progress_reporter: ProgressReporter | None = None,
         presenter=None,
@@ -39,6 +40,7 @@ class ExecutionEngine:
         self.guardrails = guardrails
         self.logger = logger
         self.context_loaders = context_loaders or []
+        self.capability_warehouse = capability_warehouse
         self.approval_callback = approval_callback
         self.progress_reporter = progress_reporter or presenter
         self.max_turns = 100
@@ -58,11 +60,26 @@ class ExecutionEngine:
         self._prepare_tool_state(session_key)
         self._keep_tool_state = session_key is not None
         permissions = PermissionContext()
-        session = SessionContext(request=request, available_tools=self.tools.definitions())
+        if self.capability_warehouse is not None:
+            self.capability_warehouse.restore_skills(
+                request.metadata.get("active_skills", [])
+            )
+            self.capability_warehouse.restore_capabilities(
+                request.metadata.get("active_capability_ids", [])
+            )
+        available_tools = self.tools.definitions()
+        provider_statuses = getattr(self.tools, "provider_statuses", lambda: [])()
+        session = SessionContext(
+            request=request,
+            available_tools=available_tools,
+            external_tool_statuses=provider_statuses,
+        )
         self.current_session = session
 
         for loader in self.context_loaders:
             loader.load_context(request, session)
+        if self.capability_warehouse is not None:
+            self.capability_warehouse.apply_to_session(session)
 
         consecutive_non_retryable_turns = 0
         consecutive_failed_test_turns = 0
@@ -72,6 +89,15 @@ class ExecutionEngine:
         progress_recovery_sent = False
 
         for turn in range(1, self.max_turns + 1):
+            session.available_tools = self.tools.definitions()
+            visible_tool_names = {definition.name for definition in session.available_tools}
+            expiring_turn_capabilities = (
+                self.capability_warehouse.active_ids({"turn"})
+                if self.capability_warehouse is not None
+                else []
+            )
+            if self.capability_warehouse is not None:
+                self.capability_warehouse.apply_to_session(session)
             progress_handle = None
             if self.progress_reporter:
                 progress_handle = self.progress_reporter.model_started()
@@ -102,6 +128,21 @@ class ExecutionEngine:
 
             turn_results: list[ToolResult] = []
             for action in reply.actions:
+                if action.name not in visible_tool_names:
+                    result = ToolResult(
+                        name=action.name,
+                        success=False,
+                        output=(
+                            f"tool was not visible at the start of this model turn: {action.name}. "
+                            "A newly activated capability can be used on the next model turn."
+                        ),
+                        error_code="tool_not_visible_this_turn",
+                    )
+                    self._attach_action_metadata(result, action)
+                    self._record_synthetic_tool_result(result)
+                    session.add_tool_result(result)
+                    turn_results.append(result)
+                    continue
                 action_key = self._action_key(action)
                 if action_key in completed_actions:
                     duplicate_counts[action_key] = duplicate_counts.get(action_key, 0) + 1
@@ -175,6 +216,12 @@ class ExecutionEngine:
                     )
                 )
 
+            if expiring_turn_capabilities and self.capability_warehouse is not None:
+                self.capability_warehouse.release(
+                    expiring_turn_capabilities,
+                    reason="turn scope consumed",
+                )
+
             if self._has_failed_test_result(turn_results):
                 consecutive_failed_test_turns += 1
                 if consecutive_failed_test_turns >= 3:
@@ -222,6 +269,10 @@ class ExecutionEngine:
 
     def _finish(self, summary: ExecutionSummary) -> ExecutionSummary:
         self.current_session = None
+        if self._keep_tool_state and self.capability_warehouse is not None:
+            summary.active_skills = self.capability_warehouse.persisted_skills()
+            summary.active_capability_ids = self.capability_warehouse.persisted_capability_ids()
+            self.capability_warehouse.release_scopes({"turn", "run"})
         if not self._keep_tool_state:
             close_state = getattr(self.tools, "reset_state", None)
             if callable(close_state):
@@ -369,6 +420,12 @@ class ExecutionEngine:
                     retried.metadata["workspace_grant"] = grant.path
                     retried.metadata["workspace_grant_scope"] = grant.scope
                     result = retried
+            if self.capability_warehouse is not None and result is not None:
+                self.capability_warehouse.mark_used(
+                    action.name,
+                    success=result.success,
+                    error_code=result.error_code,
+                )
             return result
         finally:
             if progress_handle is not None:

@@ -306,7 +306,7 @@ def test_sse_eof_unblocks_pending_request(monkeypatch):
     transport.close()
 
 
-def test_create_app_registers_sse_mcp_tools(tmp_path, monkeypatch):
+def test_create_app_activates_sse_mcp_tools_on_demand(tmp_path, monkeypatch):
     class FakeDiscoveryClient:
         def __init__(self, config):
             self.config = config
@@ -353,7 +353,10 @@ url = "http://example.test/sse"
     )
 
     app = create_app()
-    app.engine.tools.definitions()
+    warehouse = app.engine.capability_warehouse
+    assert app.engine.tools.definition_for("remote__search") is None
+    warehouse.open_toolbox("mcp:remote")
+    warehouse.activate(["mcp:remote:search"])
     definition = app.engine.tools.definition_for("remote__search")
 
     assert definition is not None

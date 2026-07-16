@@ -27,7 +27,7 @@ from testcode.mcp.discovery import (
     MCPDiscoveryService,
 )
 from testcode.mcp.manager import MCPManager
-from testcode.mcp.provider import MAX_MCP_RESOURCE_CHARS, MCPResourceProvider
+from testcode.mcp.provider import MAX_MCP_RESOURCE_CHARS, MCPResourceProvider, MCPToolProvider
 from testcode.mcp.transport import MCPHTTPError
 from testcode.mcp.types import (
     MCPDiscoverySnapshot,
@@ -349,6 +349,49 @@ def test_discovery_cache_is_reused_without_connecting(tmp_path):
     second_manager = MCPManager({"cached": config}, must_not_connect)
     second = MCPDiscoveryService(second_manager, cache_path=cache_path)
     assert second.get_snapshot("cached").tools[0].tool_name == "ping"
+
+
+def test_discovery_cache_preserves_redacted_failure_status(tmp_path):
+    config = MCPServerConfig(name="cached", transport="stdio", command="server")
+
+    class Client:
+        def initialize(self):
+            pass
+
+        def list_tools(self):
+            raise MCPClientError(
+                "initialize failed for key=topsecret",
+                error_code="mcp_protocol_error",
+                metadata={"key": "topsecret", "jsonrpc": None},
+            )
+
+        def close(self):
+            pass
+
+    cache_path = tmp_path / "mcp-cache.json"
+    first = MCPDiscoveryService(
+        MCPManager({"cached": config}, lambda _config: Client()),
+        cache_path=cache_path,
+    )
+    failed = first.get_snapshot("cached")
+
+    assert failed.cause_error_code == "mcp_protocol_error"
+    assert "topsecret" not in cache_path.read_text(encoding="utf-8")
+
+    def must_not_connect(_config):
+        raise AssertionError("fresh failure cache should preserve status without reconnecting")
+
+    second = MCPDiscoveryService(
+        MCPManager({"cached": config}, must_not_connect),
+        cache_path=cache_path,
+    )
+    cached = second.get_snapshot("cached")
+
+    assert cached.source == "cache"
+    assert cached.error_code == "mcp_server_unavailable"
+    assert cached.cause_error_code == "mcp_protocol_error"
+    assert cached.error_details["key"] == "[REDACTED]"
+    assert "topsecret" not in cached.error_message
 
 
 def test_invalid_discovery_cache_shape_is_ignored(tmp_path):
@@ -815,6 +858,42 @@ def test_registry_provider_refresh_does_not_replace_builtin_tool():
     registry.definitions()
 
     assert registry.execute(ToolAction(name="same")).output == "builtin"
+
+
+def test_mcp_provider_exposes_rich_secret_safe_status():
+    config = MCPServerConfig(
+        name="amap",
+        transport="streamable_http",
+        url="https://user:password@mcp.example.test/mcp?key=topsecret",
+    )
+    snapshot = MCPDiscoverySnapshot(
+        server_name="amap",
+        error_code="mcp_server_unavailable",
+        error_message="initialize failed for key=topsecret",
+        cause_error_code="mcp_protocol_error",
+        error_details={"key": "topsecret", "jsonrpc": None},
+        refreshed_at=time.time() - 2,
+        source="live",
+    )
+
+    class Discovery:
+        def peek_snapshot(self, _server_name):
+            return snapshot
+
+    provider = MCPToolProvider((config,), Discovery(), manager=None)
+    status = provider.get_statuses()[0]
+
+    assert status["state"] == "unavailable"
+    assert status["configured"] is True
+    assert status["enabled"] is True
+    assert status["transport"] == "streamable_http"
+    assert status["target"] == "https://mcp.example.test/mcp"
+    assert status["source"] == "live"
+    assert status["tool_count"] == 0
+    assert status["resource_count"] == 0
+    assert status["error_code"] == "mcp_protocol_error"
+    assert status["error_details"]["key"] == "[REDACTED]"
+    assert 1 <= status["age_seconds"] <= 4
 
 
 def test_resource_provider_redacts_and_truncates_remote_content():

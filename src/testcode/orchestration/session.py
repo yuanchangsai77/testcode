@@ -22,6 +22,7 @@ class SessionContext:
     project_rules: list[ProjectRule] = field(default_factory=list)
     workspace_summary: WorkspaceSummary | None = None
     explicit_context: list[ExplicitContextItem] = field(default_factory=list)
+    external_tool_statuses: list[dict[str, object]] = field(default_factory=list)
 
 
     def add_model_message(self, message: str) -> None:

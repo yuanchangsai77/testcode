@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from testcode.app import create_app
 from testcode.context import WorkspaceSummaryLoader
 from testcode.model.prompt import ModelPromptBuilder
@@ -90,6 +92,70 @@ def test_workspace_summary_loader_logs_context_event(tmp_path):
     assert logger.events[-1].payload["root"] == str(tmp_path)
 
 
+def test_workspace_summary_skips_non_project_external_service_request(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(prompt="使用高德 MCP 查询留仙洞到梅塘路线", cwd=str(tmp_path))
+    logger.start_run(request)
+    session = SessionContext(request=request)
+
+    WorkspaceSummaryLoader(logger=logger).load_context(request, session)
+
+    assert session.workspace_summary is None
+    assert logger.events[-1].name == "context.workspace_summary.skipped"
+    assert logger.events[-1].payload["reason"] == "non_project_request"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "What is the genetic code?",
+        "How does a blood test work?",
+        "What makes a successful science project?",
+    ],
+)
+def test_workspace_summary_skips_general_questions_with_ambiguous_project_words(
+    tmp_path,
+    prompt,
+):
+    request = UserRequest(prompt=prompt, cwd=str(tmp_path))
+    session = SessionContext(request=request)
+
+    WorkspaceSummaryLoader().load_context(request, session)
+
+    assert session.workspace_summary is None
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "review the code changes",
+        "fix the project tests",
+        "检查并修复 MCP integration code",
+    ],
+)
+def test_workspace_summary_keeps_project_action_and_target_requests(tmp_path, prompt):
+    request = UserRequest(prompt=prompt, cwd=str(tmp_path))
+    session = SessionContext(request=request)
+
+    WorkspaceSummaryLoader().load_context(request, session)
+
+    assert session.workspace_summary is not None
+
+
+def test_workspace_summary_can_be_explicitly_enabled_for_non_project_prompt(tmp_path):
+    request = UserRequest(
+        prompt="查询路线",
+        cwd=str(tmp_path),
+        metadata={"include_workspace_context": True},
+    )
+    session = SessionContext(request=request)
+
+    WorkspaceSummaryLoader().load_context(request, session)
+
+    assert session.workspace_summary is not None
+
+
 def test_create_app_registers_workspace_summary_loader(tmp_path, monkeypatch):
     monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
     monkeypatch.chdir(tmp_path)
@@ -97,9 +163,8 @@ def test_create_app_registers_workspace_summary_loader(tmp_path, monkeypatch):
     app = create_app()
 
     loader_names = [loader.__class__.__name__ for loader in app.engine.context_loaders]
-    assert loader_names[:4] == [
+    assert loader_names == [
         "ProjectRulesLoader",
         "WorkspaceSummaryLoader",
         "ExplicitContextLoader",
-        "SkillContextLoader",
     ]

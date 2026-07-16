@@ -97,9 +97,8 @@ def test_create_app_registers_project_rules_loader(tmp_path, monkeypatch):
     app = create_app()
 
     loader_names = [loader.__class__.__name__ for loader in app.engine.context_loaders]
-    assert loader_names[:4] == [
+    assert loader_names == [
         "ProjectRulesLoader",
         "WorkspaceSummaryLoader",
         "ExplicitContextLoader",
-        "SkillContextLoader",
     ]

@@ -86,6 +86,9 @@ class SkillRegistry:
         _, body = load_skill_content(Path(metadata.path))
         return Skill(metadata=metadata, content=body)
 
+    def metadata_items(self) -> tuple[SkillMetadata, ...]:
+        return tuple(self._skills.values())
+
     def match_skills(self, prompt: str) -> list[Skill]:
         """Matches a user prompt against triggers and returns populated Skill instances.
 

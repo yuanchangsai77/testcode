@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..safety.redaction import redact, redact_text
 from .manager import MCPManager
 from .types import (
     MAX_MCP_RESOURCES_PER_SERVER,
@@ -35,6 +36,10 @@ class MCPDiscoveryService:
             return snapshot
         return self.refresh(server_name)
 
+    def peek_snapshot(self, server_name: str) -> MCPDiscoverySnapshot | None:
+        """Return the current snapshot without triggering network discovery."""
+        return self._snapshots.get(server_name)
+
     def refresh(self, server_name: str) -> MCPDiscoverySnapshot:
         previous = self._snapshots.get(server_name)
         try:
@@ -42,18 +47,22 @@ class MCPDiscoveryService:
             tools = self._bounded_tools(server_name, client.list_tools())
         except Exception as exc:
             self.manager.invalidate(server_name)
+            cause_error_code = getattr(exc, "error_code", "mcp_tool_list_failed")
             snapshot = MCPDiscoverySnapshot(
                 server_name=server_name,
                 tools=previous.tools if previous is not None else (),
                 resources=previous.resources if previous is not None else (),
                 error_code="mcp_server_unavailable",
-                error_message=str(exc),
+                error_message=redact_text(str(exc)),
+                cause_error_code=cause_error_code,
+                error_details=self._error_details(exc),
                 refreshed_at=time.time(),
+                source="stale" if previous is not None and (previous.tools or previous.resources) else "live",
             )
             if self.logger is not None:
                 self.logger.record("mcp.server.error", {
                     "server_name": server_name,
-                    "error_code": getattr(exc, "error_code", "mcp_tool_list_failed"),
+                    "error_code": cause_error_code,
                     "error": str(exc),
                 })
             self._snapshots[server_name] = snapshot
@@ -61,12 +70,14 @@ class MCPDiscoveryService:
             return snapshot
 
         resource_error = ""
+        resource_error_code = None
         try:
             resources = self._bounded_resources(server_name, client.list_resources())
         except Exception as exc:
             self.manager.invalidate(server_name)
             resources = ()
-            resource_error = str(exc)
+            resource_error = redact_text(str(exc))
+            resource_error_code = getattr(exc, "error_code", "mcp_resource_list_failed")
             if self.logger is not None:
                 self.logger.record("mcp.resource.error", {
                     "server_name": server_name,
@@ -78,7 +89,10 @@ class MCPDiscoveryService:
             tools=tools,
             resources=resources,
             error_message=resource_error,
+            resource_error_code=resource_error_code,
+            resource_error_message=resource_error,
             refreshed_at=time.time(),
+            source="live",
         )
         self._snapshots[server_name] = snapshot
         self._save_cache()
@@ -191,7 +205,18 @@ class MCPDiscoveryService:
                     server_name=server_name,
                     tools=self._bounded_tools(server_name, tools),
                     resources=self._bounded_resources(server_name, resources),
+                    error_code=self._optional_string(raw.get("error_code")),
+                    error_message=self._string_value(raw.get("error_message")),
+                    cause_error_code=self._optional_string(raw.get("cause_error_code")),
+                    error_details=(
+                        redact(dict(raw.get("error_details", {})))
+                        if isinstance(raw.get("error_details", {}), dict)
+                        else {}
+                    ),
+                    resource_error_code=self._optional_string(raw.get("resource_error_code")),
+                    resource_error_message=self._string_value(raw.get("resource_error_message")),
                     refreshed_at=float(raw.get("refreshed_at", 0.0)),
+                    source="cache",
                 )
         except (AttributeError, OSError, UnicodeError, ValueError, TypeError):
             self._snapshots.clear()
@@ -203,6 +228,12 @@ class MCPDiscoveryService:
         for server_name, snapshot in self._snapshots.items():
             payload[server_name] = {
                 "refreshed_at": snapshot.refreshed_at,
+                "error_code": snapshot.error_code,
+                "error_message": redact_text(snapshot.error_message),
+                "cause_error_code": snapshot.cause_error_code,
+                "error_details": redact(snapshot.error_details),
+                "resource_error_code": snapshot.resource_error_code,
+                "resource_error_message": redact_text(snapshot.resource_error_message),
                 "tools": [
                     {
                         "server_name": item.server_name,
@@ -232,3 +263,15 @@ class MCPDiscoveryService:
             self.cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         except (OSError, TypeError, ValueError):
             return
+
+    def _optional_string(self, value: object) -> str | None:
+        return value if isinstance(value, str) and value else None
+
+    def _string_value(self, value: object) -> str:
+        return redact_text(value) if isinstance(value, str) else ""
+
+    def _error_details(self, error: Exception) -> dict[str, object]:
+        metadata = getattr(error, "metadata", {})
+        if not isinstance(metadata, dict):
+            return {}
+        return redact(dict(metadata))

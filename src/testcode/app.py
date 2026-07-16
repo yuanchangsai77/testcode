@@ -3,6 +3,10 @@ from __future__ import annotations
 import argparse
 import os
 
+from .capabilities.mcp_source import MCPToolboxSource
+from .capabilities.skill_source import SkillToolboxSource
+from .capabilities.tools import build_warehouse_tools
+from .capabilities.warehouse import CapabilityWarehouse
 from .config import load_dotenv, load_runtime_config
 from .context import ExplicitContextLoader, ProjectRulesLoader, WorkspaceSummaryLoader
 from .interaction.cli import CLI
@@ -10,7 +14,7 @@ from .interaction.presenter import ConsolePresenter
 from .mcp.client import TransportBackedMCPClient, UnsupportedMCPClient
 from .mcp.discovery import MCPDiscoveryService
 from .mcp.manager import MCPManager
-from .mcp.provider import MCPResourceProvider, MCPToolProvider
+from .mcp.provider import MCPResourceProvider
 from .mcp.transport import SSETransport, StdioTransport, StreamableHttpTransport
 from .model.client import OpenAICompatibleModelClient, StubModelClient
 from .model.types import ModelClientConfig
@@ -19,11 +23,9 @@ from .orchestration.engine import ExecutionEngine
 from .safety.guardrails import Guardrails
 from .safety.policy import DefaultPolicy
 from .sessions import SessionStore
-from .tools.builtin import build_builtin_registry
 from .tools.builtin_provider import BuiltinToolProvider
 from .tools.registry import ToolRegistry
 from .skills.registry import SkillRegistry
-from .skills.loader import SkillContextLoader
 from .types import ExecutionSummary, UserRequest
 from pathlib import Path
 
@@ -76,13 +78,13 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
     project_rules_loader = ProjectRulesLoader(logger=logger)
     workspace_summary_loader = WorkspaceSummaryLoader(logger=logger)
     explicit_context_loader = ExplicitContextLoader(logger=logger)
-    skill_loader = SkillContextLoader(registry=skills_registry, logger=logger)
 
-    # Initialize tools via providers. MCP is wired as an optional provider layer
-    # so discovery/runtime boundaries exist even before concrete transports land.
+    # Only builtin and warehouse-navigation tools are initially visible. External
+    # MCP/Skill capabilities remain in the warehouse until explicitly activated.
     providers = [BuiltinToolProvider(logger)]
-    mcp_tool_provider = None
     mcp_manager = None
+    mcp_discovery = None
+    capability_sources = [SkillToolboxSource(skills_registry, logger=logger)]
     if config.mcp_servers:
         mcp_manager = MCPManager(
             configs={server.name: server for server in config.mcp_servers},
@@ -94,18 +96,26 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
             logger=logger,
             cache_path=root / ".testcode" / "mcp-discovery-cache.json",
         )
-        mcp_tool_provider = MCPToolProvider(
-            configs=config.mcp_servers,
-            discovery=mcp_discovery,
-            manager=mcp_manager,
-            logger=logger,
+        capability_sources.append(
+            MCPToolboxSource(
+                configs=config.mcp_servers,
+                discovery=mcp_discovery,
+                manager=mcp_manager,
+                logger=logger,
+            )
         )
     tools = ToolRegistry(logger=logger)
     for provider in providers:
         for tool in provider.get_tools():
             tools.register(tool)
-    if mcp_tool_provider is not None:
-        tools.attach_provider(mcp_tool_provider)
+    capability_warehouse = CapabilityWarehouse(
+        sources=capability_sources,
+        registry=tools,
+        logger=logger,
+    )
+    for tool in build_warehouse_tools(capability_warehouse):
+        tools.register(tool)
+    tools.attach_state("capability_warehouse", capability_warehouse, persistent=True)
     if mcp_manager is not None:
         tools.attach_state("mcp_manager", mcp_manager, persistent=True)
 
@@ -116,12 +126,13 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
         tools=tools,
         guardrails=guardrails,
         logger=logger,
-        context_loaders=[project_rules_loader, workspace_summary_loader, explicit_context_loader, skill_loader],
+        context_loaders=[project_rules_loader, workspace_summary_loader, explicit_context_loader],
+        capability_warehouse=capability_warehouse,
         approval_callback=presenter.confirm_tool_action,
         progress_reporter=presenter,
     )
     engine.resource_providers = []
-    if mcp_manager is not None:
+    if mcp_manager is not None and mcp_discovery is not None:
         engine.resource_providers.append(
             MCPResourceProvider(
                 configs=config.mcp_servers,
@@ -221,6 +232,9 @@ def main() -> None:
                 metadata["conversation"] = list(resumed_session.messages)
                 metadata["session_id"] = resumed_session.session_id
                 metadata["active_skills"] = list(getattr(resumed_session, "active_skills", []))
+                metadata["active_capability_ids"] = list(
+                    getattr(resumed_session, "active_capability_ids", [])
+                )
                 metadata["session_trace"] = list(getattr(resumed_session, "trace", [])[-6:])
                 metadata["resume_state"] = getattr(resumed_session, "resume_state", None)
             metadata["context_paths"] = list(args.context)

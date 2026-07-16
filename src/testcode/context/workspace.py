@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,72 @@ IGNORED_DIRS = {
 }
 MAX_TREE_ENTRIES = 80
 MAX_TREE_DEPTH = 2
+ENGLISH_STRONG_PROJECT_REQUEST_TERMS = {
+    "inspect",
+    "workspace",
+    "repository",
+    "repo",
+    "bug",
+    "implement",
+    "refactor",
+    "git",
+    "commit",
+    "pull request",
+}
+ENGLISH_PROJECT_ACTION_TERMS = {
+    "build",
+    "debug",
+    "edit",
+    "fix",
+    "review",
+    "test",
+    "update",
+    "write",
+}
+ENGLISH_PROJECT_TARGET_TERMS = {
+    "changes",
+    "code",
+    "diff",
+    "directory",
+    "docs",
+    "document",
+    "file",
+    "folder",
+    "project",
+    "source",
+    "tests",
+}
+CHINESE_STRONG_PROJECT_REQUEST_TERMS = {
+    "工作区",
+    "仓库",
+}
+CHINESE_PROJECT_ACTION_TERMS = {
+    "编辑",
+    "构建",
+    "检查",
+    "审查",
+    "调试",
+    "修复",
+    "实现",
+    "重构",
+    "测试",
+    "提交",
+    "修改",
+}
+CHINESE_PROJECT_TARGET_TERMS = {
+    "变更",
+    "差异",
+    "代码",
+    "源码",
+    "文档",
+    "项目",
+    "文件",
+    "目录",
+}
+CODE_PATH_RE = re.compile(
+    r"(?:^|[\s'\"`])(?:\.?\.?/)?[^\s'\"`]+\.(?:py|js|ts|tsx|jsx|go|rs|java|kt|toml|yaml|yml|json|md)(?:$|[\s'\"`])",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -60,6 +127,15 @@ class WorkspaceSummaryLoader(ContextLoader):
         self.max_tree_depth = max(1, int(max_tree_depth))
 
     def load_context(self, request: UserRequest, session: SessionContext) -> None:
+        if not self._is_workspace_request(request):
+            session.workspace_summary = None
+            if self.logger is not None:
+                self.logger.record(
+                    "context.workspace_summary.skipped",
+                    {"reason": "non_project_request"},
+                )
+            return
+
         root = Path(request.cwd).expanduser().resolve()
         summary = WorkspaceSummary(
             root=str(root),
@@ -79,6 +155,38 @@ class WorkspaceSummaryLoader(ContextLoader):
                     "tree_truncated": summary.tree_truncated,
                 },
             )
+
+    def _is_workspace_request(self, request: UserRequest) -> bool:
+        override = request.metadata.get("include_workspace_context")
+        if isinstance(override, bool):
+            return override
+        context_paths = request.metadata.get("context_paths", [])
+        if isinstance(context_paths, list) and any(isinstance(path, str) and path for path in context_paths):
+            return True
+
+        prompt = request.prompt.casefold()
+        if any(term in prompt for term in CHINESE_STRONG_PROJECT_REQUEST_TERMS):
+            return True
+        if any(
+            re.search(rf"\b{re.escape(term)}\b", prompt)
+            for term in ENGLISH_STRONG_PROJECT_REQUEST_TERMS
+        ):
+            return True
+        has_english_action = any(
+            re.search(rf"\b{re.escape(term)}\b", prompt)
+            for term in ENGLISH_PROJECT_ACTION_TERMS
+        )
+        has_english_target = any(
+            re.search(rf"\b{re.escape(term)}\b", prompt)
+            for term in ENGLISH_PROJECT_TARGET_TERMS
+        )
+        has_chinese_action = any(term in prompt for term in CHINESE_PROJECT_ACTION_TERMS)
+        has_chinese_target = any(term in prompt for term in CHINESE_PROJECT_TARGET_TERMS)
+        if (has_english_action or has_chinese_action) and (
+            has_english_target or has_chinese_target
+        ):
+            return True
+        return CODE_PATH_RE.search(request.prompt) is not None
 
     def _project_signals(self, root: Path) -> list[ProjectSignal]:
         signals = []
