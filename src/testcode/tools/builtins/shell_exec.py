@@ -3,6 +3,7 @@ from __future__ import annotations
 import selectors
 import os
 import shlex
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from ..shared import clip, format_process_output, path_error, resolve_workspace_
 from ..summary import process_result_summary
 
 MAX_MARKER_TRAILER_BYTES = 8_192
+PROCESS_STOP_GRACE_SECONDS = 0.5
 
 
 def tool() -> SimpleTool:
@@ -157,8 +159,17 @@ class ShellSession:
     def close(self) -> None:
         if self.process.poll() is not None:
             return
-        self.process.kill()
-        self.process.wait(timeout=1)
+        self._signal_process_group(signal.SIGTERM)
+        try:
+            self.process.wait(timeout=PROCESS_STOP_GRACE_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        self._signal_process_group(signal.SIGKILL)
+        try:
+            self.process.wait(timeout=PROCESS_STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
 
     def _start(self, cwd: Path):
         return subprocess.Popen(
@@ -168,7 +179,19 @@ class ShellSession:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=0,
+            start_new_session=os.name == "posix",
         )
+
+    def _signal_process_group(self, sig: int) -> None:
+        if self.process.poll() is not None:
+            return
+        if os.name == "posix":
+            try:
+                os.killpg(self.process.pid, sig)
+                return
+            except ProcessLookupError:
+                return
+        self.process.send_signal(sig)
 
     def _read_until_marker(self, marker: str, timeout: float) -> tuple[str, bool, bool]:
         assert self.process.stdout is not None

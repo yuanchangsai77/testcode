@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 import subprocess
 
 from testcode.observability.logger import InMemoryLogger
@@ -203,6 +205,36 @@ def test_shell_exec_bounds_captured_output_without_losing_shell_state(tmp_path):
     assert "...truncated..." in result.metadata["stdout"]
     assert follow_up.success is True
     assert follow_up.metadata["stdout"].strip() == "ready"
+
+
+def test_shell_exec_reset_terminates_the_entire_process_group(tmp_path):
+    registry = make_registry()
+    result = registry.execute(
+        ToolAction(name="shell_exec", arguments={"command": "sleep 30 & printf %s \"$!\""}),
+        cwd=str(tmp_path),
+    )
+    child_pid = int(result.metadata["stdout"].strip())
+    shell = registry.state_for("shell_session")
+
+    assert result.success is True
+    assert shell is not None
+    if os.name == "posix":
+        assert os.getpgid(shell.process.pid) == shell.process.pid
+
+    registry.reset_state()
+
+    deadline = time.monotonic() + 1
+    while _process_exists(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _process_exists(child_pid) is False
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def test_shell_exec_persists_cd_and_environment_within_registry_state(tmp_path):

@@ -1676,6 +1676,63 @@ def test_chat_close_cleans_up_runtime_tool_state(tmp_path, monkeypatch):
     assert stored.status == "closed"
 
 
+def test_interrupted_run_cleans_up_runtime_tool_state(tmp_path):
+    class Tools:
+        reset_count = 0
+
+        def reset_state(self):
+            self.reset_count += 1
+
+    class Engine:
+        tools = Tools()
+        current_session = None
+
+        def execute(self, _request):
+            raise KeyboardInterrupt
+
+        def _finish(self, _summary):
+            pass
+
+    cli = CLI(engine=Engine(), presenter=ConsolePresenter())
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run(UserRequest(prompt="run", cwd=str(tmp_path)))
+
+    assert cli.engine.tools.reset_count == 1
+
+
+def test_engine_interrupt_cleans_up_runtime_tool_state_for_direct_call(tmp_path):
+    class Tools:
+        reset_count = 0
+
+        def definitions(self):
+            return []
+
+        def provider_statuses(self):
+            return []
+
+        def reset_state(self):
+            self.reset_count += 1
+
+    class InterruptingModel:
+        def respond(self, _session):
+            raise KeyboardInterrupt
+
+    tools = Tools()
+    engine = ExecutionEngine(
+        model=InterruptingModel(),
+        tools=tools,
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=InMemoryLogger()),
+        logger=InMemoryLogger(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        engine.execute(UserRequest(prompt="run", cwd=str(tmp_path), metadata={"session_id": "session-1"}))
+
+    assert tools.reset_count == 2
+    assert engine.current_session is None
+
+
 def test_logger_summary_captures_action_and_result_details(tmp_path):
     logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
     request = UserRequest(prompt="inspect", cwd=str(tmp_path))

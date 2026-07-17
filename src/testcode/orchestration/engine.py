@@ -58,13 +58,33 @@ class ExecutionEngine:
         self.max_duplicate_skips = 3
         self._tool_state_session_key: str | None = None
         self._keep_tool_state = False
+        self._runtime_cancelled = False
 
     def execute(self, request: UserRequest) -> ExecutionSummary:
+        self._runtime_cancelled = False
         try:
             return self._execute(request)
+        except KeyboardInterrupt:
+            self.cancel_current_run()
+            raise
         except Exception:
             self.current_session = None
             raise
+
+    def cancel_current_run(self) -> None:
+        """Stop runtime tools after an interrupted execution.
+
+        This is idempotent because both an execution frontend and the engine
+        itself may observe the same KeyboardInterrupt.
+        """
+        if self._runtime_cancelled:
+            return
+        self._runtime_cancelled = True
+        self.current_session = None
+        self._tool_state_session_key = None
+        reset_state = getattr(self.tools, "reset_state", None)
+        if callable(reset_state):
+            reset_state()
 
     def _execute(self, request: UserRequest) -> ExecutionSummary:
         session_key = self._session_key(request)

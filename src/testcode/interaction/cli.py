@@ -238,6 +238,14 @@ class CLI:
             if hasattr(self.engine, "current_session") and self.engine.current_session:
                 tools_count = len(self.engine.current_session.tool_results)
                 interrupted_results = list(self.engine.current_session.tool_results)
+            cancel_run = getattr(self.engine, "cancel_current_run", None)
+            if callable(cancel_run):
+                cancel_run()
+            else:
+                tools = getattr(self.engine, "tools", None)
+                reset_state = getattr(tools, "reset_state", None)
+                if callable(reset_state):
+                    reset_state()
             self.presenter.clear_running_status_bar(tools_count)
             self.presenter.show_interrupted()
             interrupted_summary = ExecutionSummary(final_message="Interrupted", tool_results=interrupted_results)

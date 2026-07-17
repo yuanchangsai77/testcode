@@ -169,6 +169,19 @@ codes, and workspace-bounded path handling:
 
 `apply_change` is deprecated and is not exposed to the model by default.
 
+### Shell 会话与中断
+
+每个交互会话最多维护一个串行的 Bash 会话，以保留工作目录和环境变量。
+在 POSIX/Linux 环境中，该 Bash 在独立进程组中运行：正常退出、输入阶段的 Ctrl+C、
+执行阶段的 Ctrl+C 以及命令超时时，testcode 会终止整个进程组，而不是只终止 Bash
+主进程。因此由该会话启动的普通后台子进程也会一并停止。超时后会立即重置为干净的
+Bash，后续命令继续在该新 Bash 中执行。
+完整的终止时机、并发边界和安全边界见[Shell 会话生命周期](docs/shell-session-lifecycle.md)。
+
+这是一种进程生命周期管理机制，不是操作系统级沙盒：命令仍以启动 testcode 的用户
+权限执行。对不可信代码或需要限制文件、网络和资源访问的任务，应在容器或系统级
+沙盒中运行 testcode。
+
 Concrete tool implementations live under `src/testcode/tools/builtins/`.
 Each built-in tool is described in its own module and exported through a
 `tool()` factory. Shared helpers for schema creation, workspace path resolution,
