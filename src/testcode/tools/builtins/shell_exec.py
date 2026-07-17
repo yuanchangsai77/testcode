@@ -12,6 +12,8 @@ from ..base import SimpleTool, ToolContext
 from ..shared import clip, format_process_output, path_error, resolve_workspace_path, retarget, schema
 from ..summary import process_result_summary
 
+MAX_MARKER_TRAILER_BYTES = 8_192
+
 
 def tool() -> SimpleTool:
     return SimpleTool(
@@ -94,8 +96,9 @@ class ShellSession:
         self.process.stdin.write(wrapped.encode("utf-8"))
         self.process.stdin.flush()
 
-        output, timed_out = self._read_until_marker(marker, timeout)
+        output, timed_out, truncated = self._read_until_marker(marker, timeout)
         if timed_out:
+            truncated = truncated or len(output.encode("utf-8")) > self.context.max_output_bytes
             self.close()
             self.process = self._start(cwd)
             self.cwd = cwd
@@ -104,10 +107,16 @@ class ShellSession:
                 success=False,
                 output=format_process_output(clip(output, self.context.max_output_bytes), "", None),
                 error_code="timeout",
-                metadata={"timeout": timeout, "stdout": clip(output, self.context.max_output_bytes), "stderr": ""},
+                metadata={
+                    "timeout": timeout,
+                    "stdout": clip(output, self.context.max_output_bytes),
+                    "stderr": "",
+                    "truncated": truncated,
+                },
             )
 
         stdout, exit_code, reported_cwd = self._split_marker(output, marker)
+        truncated = truncated or len(stdout.encode("utf-8")) > self.context.max_output_bytes
         if exit_code is None or reported_cwd is None:
             self.close()
             self.process = self._start(cwd)
@@ -117,7 +126,7 @@ class ShellSession:
                 success=False,
                 output="persistent shell returned an invalid command marker",
                 error_code="shell_protocol_error",
-                metadata={"stdout": clip(output, self.context.max_output_bytes), "stderr": ""},
+                metadata={"stdout": clip(output, self.context.max_output_bytes), "stderr": "", "truncated": truncated},
             )
 
         cwd_check = resolve_workspace_path(self.context, reported_cwd)
@@ -136,7 +145,13 @@ class ShellSession:
             success=exit_code == 0,
             output=format_process_output(stdout, "", exit_code),
             error_code=None if exit_code == 0 else "nonzero_exit",
-            metadata={"exit_code": exit_code, "stdout": stdout, "stderr": "", "cwd": str(self.cwd)},
+            metadata={
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": "",
+                "cwd": str(self.cwd),
+                "truncated": truncated,
+            },
         )
 
     def close(self) -> None:
@@ -155,28 +170,52 @@ class ShellSession:
             bufsize=0,
         )
 
-    def _read_until_marker(self, marker: str, timeout: float) -> tuple[str, bool]:
+    def _read_until_marker(self, marker: str, timeout: float) -> tuple[str, bool, bool]:
         assert self.process.stdout is not None
         marker_bytes = marker.encode("utf-8")
         selector = selectors.DefaultSelector()
         selector.register(self.process.stdout, selectors.EVENT_READ)
         deadline = time.monotonic() + timeout
-        output = b""
+        capture_limit = max(1, self.context.max_output_bytes) + MAX_MARKER_TRAILER_BYTES
+        output = bytearray()
+        trailer = bytearray()
+        truncated = False
         try:
-            while marker_bytes not in output:
+            while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return output.decode("utf-8", errors="replace"), True
+                    return bytes(output).decode("utf-8", errors="replace"), True, truncated
                 events = selector.select(remaining)
                 if not events:
-                    return output.decode("utf-8", errors="replace"), True
+                    return bytes(output).decode("utf-8", errors="replace"), True, truncated
                 chunk = os.read(self.process.stdout.fileno(), 4096)
                 if not chunk:
                     break
-                output += chunk
+                trailer.extend(chunk)
+                if len(trailer) > MAX_MARKER_TRAILER_BYTES:
+                    del trailer[:-MAX_MARKER_TRAILER_BYTES]
+
+                remaining_capacity = capture_limit - len(output)
+                if remaining_capacity > 0:
+                    output.extend(chunk[:remaining_capacity])
+                if len(chunk) > remaining_capacity:
+                    truncated = True
+
+                if marker_bytes not in trailer:
+                    continue
+                if not truncated:
+                    return bytes(output).decode("utf-8", errors="replace"), False, False
+
+                marker_start = trailer.index(marker_bytes)
+                marker_end = trailer.find(b"\n", marker_start)
+                if marker_end == -1:
+                    continue
+                output.extend(b"\n...truncated...\n")
+                output.extend(trailer[marker_start : marker_end + 1])
+                return bytes(output).decode("utf-8", errors="replace"), False, True
         finally:
             selector.close()
-        return output.decode("utf-8", errors="replace"), False
+        return bytes(output).decode("utf-8", errors="replace"), False, truncated
 
     def _split_marker(self, output: str, marker: str) -> tuple[str, int | None, str | None]:
         lines = output.splitlines()
@@ -214,7 +253,17 @@ def _shell_cd_error(action: ToolAction, context: ToolContext, cwd_path) -> ToolR
     except ValueError:
         return None
 
+    command_start = True
     for index, token in enumerate(tokens):
+        if token in {"&&", "||", ";", "|", "&", "(", "{", "then", "do"}:
+            command_start = True
+            continue
+        if not command_start:
+            continue
+        command_start = False
+        if token in {"if", "while", "until", "!"}:
+            command_start = True
+            continue
         if token != "cd":
             continue
 

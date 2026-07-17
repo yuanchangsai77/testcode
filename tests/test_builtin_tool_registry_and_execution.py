@@ -7,8 +7,8 @@ from testcode.tools.builtin import build_builtin_registry
 from testcode.types import ToolAction
 
 
-def make_registry():
-    return build_builtin_registry(logger=InMemoryLogger())
+def make_registry(*, max_output_bytes: int = 32_000):
+    return build_builtin_registry(logger=InMemoryLogger(), max_output_bytes=max_output_bytes)
 
 
 def test_registry_rejects_unknown_tool_and_arguments(tmp_path):
@@ -179,6 +179,32 @@ def test_shell_exec_rejects_cd_outside_workspace(tmp_path):
     assert dynamic_outside.error_code == "path_outside_workspace"
 
 
+def test_shell_exec_allows_cd_in_command_arguments(tmp_path):
+    result = make_registry().execute(
+        ToolAction(name="shell_exec", arguments={"command": "printf '%s\\n' cd /tmp"}),
+        cwd=str(tmp_path),
+    )
+
+    assert result.success is True
+    assert result.metadata["stdout"].strip() == "cd\n/tmp"
+
+
+def test_shell_exec_bounds_captured_output_without_losing_shell_state(tmp_path):
+    registry = make_registry(max_output_bytes=32)
+
+    result = registry.execute(
+        ToolAction(name="shell_exec", arguments={"command": "head -c 4096 /dev/zero | tr '\\0' x"}),
+        cwd=str(tmp_path),
+    )
+    follow_up = registry.execute(ToolAction(name="shell_exec", arguments={"command": "printf ready"}), cwd=str(tmp_path))
+
+    assert result.success is True
+    assert result.metadata["truncated"] is True
+    assert "...truncated..." in result.metadata["stdout"]
+    assert follow_up.success is True
+    assert follow_up.metadata["stdout"].strip() == "ready"
+
+
 def test_shell_exec_persists_cd_and_environment_within_registry_state(tmp_path):
     (tmp_path / "child").mkdir()
     registry = make_registry()
@@ -337,6 +363,36 @@ def test_patch_applies_multiple_files_and_rejects_outside_workspace(tmp_path):
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "aa\n"
     assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "bb\n"
     assert rejected.error_code == "path_outside_workspace"
+
+
+def test_patch_applies_to_authorized_external_root(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    target = outside / "target.txt"
+    target.write_text("old\n", encoding="utf-8")
+    registry = make_registry()
+    diff = f"""--- {target}
++++ {target}
+@@ -1 +1 @@
+-old
++new
+"""
+
+    registry.execute(
+        ToolAction(name="read_file", arguments={"path": str(target)}),
+        cwd=str(workspace),
+        allowed_roots=[str(outside)],
+    )
+    result = registry.execute(
+        ToolAction(name="patch", arguments={"diff": diff}),
+        cwd=str(workspace),
+        allowed_roots=[str(outside)],
+    )
+
+    assert result.success is True
+    assert target.read_text(encoding="utf-8") == "new\n"
 
 
 def test_patch_rejects_empty_diff_and_symlink_escape(tmp_path):

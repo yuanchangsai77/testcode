@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
-from ..shared import resolve_workspace_path, retarget, run_command, schema
+from ..shared import ResolvedPath, resolve_workspace_path, retarget, run_command, schema
 from ..summary import patch_summary
 
 MAX_PATCH_FILES = 20
@@ -48,17 +48,30 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
             metadata={"changed_files": changed_files, "max_files": MAX_PATCH_FILES},
         )
 
-    root = Path(context.cwd).expanduser().resolve()
+    resolved_files = {}
     for path in changed_files:
         resolved = resolve_workspace_path(context, path)
         if isinstance(resolved, ToolResult):
             return retarget(resolved, action.name)
-        resolved.path.relative_to(root)
+        resolved_files[path] = resolved
         if resolved.path.exists():
             read_error = validate_file_was_read(action.name, resolved.path, context.state)
             if read_error is not None:
                 read_error.metadata.setdefault("changed_files", changed_files)
                 return read_error
+
+    roots = {resolved.root for resolved in resolved_files.values()}
+    if len(roots) != 1:
+        return ToolResult(
+            name=action.name,
+            success=False,
+            output="a patch may only modify files within one authorized workspace root",
+            error_code="patch_multiple_roots",
+            metadata={"changed_files": changed_files, "roots": sorted(str(root) for root in roots)},
+        )
+
+    root = roots.pop()
+    diff = rebase_diff_paths(diff, resolved_files, root)
 
     check = run_command(["git", "apply", "--check", "-"], root, input_text=diff, shell=False)
     if not check.success:
@@ -102,6 +115,31 @@ def changed_files_from_diff(diff: str) -> list[str]:
             if raw_path not in files:
                 files.append(raw_path)
     return sorted(set(files))
+
+
+def rebase_diff_paths(diff: str, resolved_files: dict[str, ResolvedPath], root: Path) -> str:
+    """Make accepted absolute paths relative to the root used by git apply."""
+    relative_paths = {
+        path: resolved.path.relative_to(root).as_posix()
+        for path, resolved in resolved_files.items()
+    }
+    rewritten = []
+    for line in diff.splitlines():
+        if line.startswith(("--- ", "+++ ")):
+            raw_path = line[4:].strip()
+            path = _diff_path(raw_path)
+            relative_path = relative_paths.get(path)
+            if relative_path is not None:
+                prefix = "a/" if line.startswith("--- ") else "b/"
+                line = line[:4] + prefix + relative_path
+        rewritten.append(line)
+    return "\n".join(rewritten) + ("\n" if diff.endswith("\n") else "")
+
+
+def _diff_path(raw_path: str) -> str:
+    if raw_path.startswith(("a/", "b/")):
+        return raw_path[2:]
+    return raw_path
 
 
 def validate_file_was_read(tool_name: str, path: Path, state: dict) -> ToolResult | None:

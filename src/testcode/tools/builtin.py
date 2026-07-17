@@ -17,8 +17,8 @@ from .builtins import (
 from .registry import ToolRegistry
 
 
-def build_builtin_registry(logger) -> ToolRegistry:
-    registry = ToolRegistry(logger=logger)
+def build_builtin_registry(logger, *, max_output_bytes: int = 32_000) -> ToolRegistry:
+    registry = ToolRegistry(logger=logger, max_output_bytes=max_output_bytes)
     for factory in (
         list_dir_tool,
         read_file_tool,
@@ -38,5 +38,4 @@ def build_builtin_registry(logger) -> ToolRegistry:
 
 
 from .builtin_provider import BuiltinToolProvider
-
 
