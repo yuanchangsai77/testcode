@@ -43,6 +43,7 @@ class ExecutionEngine:
         max_model_retries: int = 7,
         model_retry_delays: tuple[float, ...] | None = None,
         max_turns: int = 100,
+        mcp_server_count: int = 0,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -55,6 +56,7 @@ class ExecutionEngine:
         self.max_model_retries = max(0, int(max_model_retries))
         self.model_retry_delays = tuple(model_retry_delays or self.model_retry_delays)
         self.max_turns = max(1, int(max_turns))
+        self.mcp_server_count = max(0, int(mcp_server_count))
         self.max_duplicate_skips = 3
         self._tool_state_session_key: str | None = None
         self._keep_tool_state = False

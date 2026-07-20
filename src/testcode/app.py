@@ -141,6 +141,7 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
         max_model_retries=config.model_retry.max_retries,
         model_retry_delays=config.model_retry.delays,
         max_turns=config.orchestration.max_turns,
+        mcp_server_count=sum(server.enabled for server in config.mcp_servers),
     )
     engine.resource_providers = []
     if mcp_manager is not None and mcp_discovery is not None:

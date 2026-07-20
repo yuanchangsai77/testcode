@@ -1,4 +1,5 @@
 import os
+import re
 
 from testcode.interaction.presenter import ConsolePresenter
 from testcode.interaction.terminal import Spinner, colored_border
@@ -196,6 +197,7 @@ def test_show_session_state(capsys):
                 def __init__(self):
                     self._skills = {"s1": object()}
             self.skills_registry = DummyRegistry()
+            self.mcp_server_count = 1
             class DummyGuardrails:
                 def __init__(self):
                     class DummyPolicy:
@@ -208,12 +210,16 @@ def test_show_session_state(capsys):
     presenter.show_session_state(session, resumed=True, engine=engine)
 
     output = capsys.readouterr().out
+    plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
     assert "test-session-123" in output
     assert "/tmp/fake-cwd" in output
     assert "confirm" in output
-    assert "Context Loaders" in output
-    assert "Tools" in output
-    assert "Skills" in output
+    assert "Runtime:" in plain_output
+    assert "2 Context Loaders" in plain_output
+    assert "3 Tools" in plain_output
+    assert "Capability Catalog:" in plain_output
+    assert "1 Skill" in plain_output
+    assert "1 MCP Server" in plain_output
 
 
 def test_show_tool_start_and_end(capsys):

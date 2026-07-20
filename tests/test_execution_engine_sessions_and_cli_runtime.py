@@ -156,6 +156,7 @@ command = "missing-mcp-server-command"
     app = create_app()
 
     assert app.engine.tools.definition_for("read_file") is not None
+    assert app.engine.mcp_server_count == 1
 
 
 def test_create_app_does_not_connect_mcp_servers_during_startup(tmp_path, monkeypatch):

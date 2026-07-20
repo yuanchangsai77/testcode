@@ -186,18 +186,26 @@ class ConsolePresenter:
             border,
         ]
 
-        # Print loaded component stats if engine is provided
+        # Separate immediately usable runtime components from lazily activated
+        # capabilities so the startup summary does not imply everything is loaded.
         if engine:
             loaders_count = len(getattr(engine, "context_loaders", []))
             tools_count = len(getattr(engine.tools, "_tools", {})) if hasattr(engine, "tools") else 0
             skills_count = len(getattr(engine.skills_registry, "_skills", {})) if hasattr(engine, "skills_registry") else 0
+            mcp_server_count = getattr(engine, "mcp_server_count", 0)
+            loader_label = "Context Loader" if loaders_count == 1 else "Context Loaders"
+            tool_label = "Tool" if tools_count == 1 else "Tools"
+            skill_label = "Skill" if skills_count == 1 else "Skills"
+            mcp_label = "MCP Server" if mcp_server_count == 1 else "MCP Servers"
 
             output.extend(
                 [
-                    f" {GRAY}›{RESET} {BOLD}Loaded Components:{RESET}",
-                    f"   {GREEN}•{RESET} {BOLD}{loaders_count}{RESET} Context Loaders",
-                    f"   {GREEN}•{RESET} {BOLD}{tools_count}{RESET} Tools",
-                    f"   {GREEN}•{RESET} {BOLD}{skills_count}{RESET} Skills",
+                    f" {GRAY}›{RESET} {BOLD}Runtime:{RESET}",
+                    f"   {GREEN}•{RESET} {BOLD}{loaders_count}{RESET} {loader_label}",
+                    f"   {GREEN}•{RESET} {BOLD}{tools_count}{RESET} {tool_label}",
+                    f" {GRAY}›{RESET} {BOLD}Capability Catalog:{RESET}",
+                    f"   {GREEN}•{RESET} {BOLD}{skills_count}{RESET} {skill_label}",
+                    f"   {GREEN}•{RESET} {BOLD}{mcp_server_count}{RESET} {mcp_label}",
                     border,
                 ]
             )

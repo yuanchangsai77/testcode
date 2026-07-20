@@ -36,10 +36,12 @@ This document owns terminal interaction behavior: prompt editing, visual width, 
  › Safety Mode: confirm (Tool calls require approval)
  › System:      Python 3.14.4 (.venv) on Linux
 ─────────────────────────────────────────────────────────────────
- › Loaded Components:
+ › Runtime:
    • 3 Context Loaders
    • 17 Tools
+ › Capability Catalog:
    • 2 Skills
+   • 1 MCP Server
 ─────────────────────────────────────────────────────────────────
   Type "exit" or "quit" to end the session.
 ```
