@@ -1,7 +1,7 @@
 import os
 
 from testcode.interaction.presenter import ConsolePresenter
-from testcode.interaction.terminal import Spinner
+from testcode.interaction.terminal import Spinner, colored_border
 from testcode.types import ExecutionSummary, SessionResumeState, ToolAction, ToolResult
 
 
@@ -101,6 +101,72 @@ def test_input_border_preserves_ansi_reset_in_narrow_terminal(monkeypatch, capsy
 
     output = capsys.readouterr().out
     assert output == "\033[90m──────────\033[0m\n"
+
+
+def test_full_width_tty_border_suppresses_pending_autowrap(monkeypatch):
+    monkeypatch.setattr("testcode.interaction.terminal.sys.stdout.isatty", lambda: True)
+
+    border = colored_border(4)
+
+    assert border == "\033[?7l\033[90m────\033[0m\r\033[?7h"
+
+
+def test_resize_preserves_prompt_and_refreshes_only_the_chrome(monkeypatch, capsys):
+    presenter = ConsolePresenter()
+    columns = 30
+    monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((columns, 24)))
+    presenter.prompt_box._render_expanding_input("abcdefghij", cursor=10)
+    capsys.readouterr()
+
+    columns = 20
+    presenter.prompt_box._reset_after_resize("abcdefghij", cursor=10)
+
+    output = capsys.readouterr().out
+    assert output.startswith("\r\033[3A\r\033[J")
+    assert "testcode>" in output
+    assert output.count("────────────────────") == 2
+    assert output.endswith("\r\033[2A\033[2C")
+
+
+def test_resize_erases_all_reflowed_top_border_rows(monkeypatch, capsys):
+    presenter = ConsolePresenter()
+    columns = 100
+    monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((columns, 24)))
+    presenter.prompt_box._render_expanding_input("", cursor=0)
+    capsys.readouterr()
+
+    columns = 20
+    presenter.prompt_box._reset_after_resize("", cursor=0)
+
+    output = capsys.readouterr().out
+    assert output.startswith("\r\033[5A\r\033[J")
+    assert output.count("────────────────────") == 2
+    assert "testcode>" in output
+    assert output.endswith("\r\033[2A\033[11C")
+
+
+def test_growing_frame_stays_attached_to_transcript(monkeypatch, capsys):
+    presenter = ConsolePresenter()
+    monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((20, 24)))
+    presenter.prompt_box._reset_after_resize("", cursor=0)
+    capsys.readouterr()
+
+    presenter.prompt_box._render_expanding_input("a" * 30, cursor=30)
+
+    output = capsys.readouterr().out
+    assert output.startswith("\r\033[1A\r\033[J")
+    assert "\033[24;1H" not in output
+
+
+def test_submitted_input_keeps_both_history_borders(monkeypatch, capsys):
+    presenter = ConsolePresenter()
+    monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((20, 24)))
+
+    presenter.prompt_box._show_submitted_input("hello")
+
+    output = capsys.readouterr().out
+    assert output.count("────────────────────") == 2
+    assert "testcode>" in output
 
 
 def test_show_session_state(capsys):

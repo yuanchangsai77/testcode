@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from html import unescape
 
 from ..types import ExecutionSummary, SessionRecord, StoredSession, ToolResult, UserRequest
 from .input import PromptBox, StatusBar
-from .terminal import Spinner
+from .terminal import Spinner, colored_border
 
 
 class ConsolePresenter:
@@ -16,6 +17,13 @@ class ConsolePresenter:
         self.tool_result_summarizer = tool_result_summarizer
         self.status_bar = StatusBar()
         self.prompt_box = PromptBox(self.status_bar)
+
+    def _print(self, value: str = "") -> None:
+        print(value)
+
+    def _print_many(self, values: list[str]) -> None:
+        for value in values:
+            print(value)
 
     def show_start(self, request: UserRequest) -> None:
         pass
@@ -27,13 +35,13 @@ class ConsolePresenter:
         RESET = "\033[0m"
         
         if thinking:
-            print(f"\n {GRAY}› thinking:{RESET}")
+            self._print(f"\n {GRAY}› thinking:{RESET}")
             indented_thinking = "\n".join(f"   {line}" for line in thinking.splitlines())
-            print(f"{GRAY}{indented_thinking}{RESET}")
+            self._print(f"{GRAY}{indented_thinking}{RESET}")
             
         response_text = self._display_text(summary.final_message)
         indented_response = "\n".join(f"   {line}" for line in response_text.splitlines())
-        print(f"\n{indented_response}\n")
+        self._print(f"\n{indented_response}\n")
 
     def _summarize_tool_result(self, result: ToolResult) -> str:
         if self.tool_result_summarizer is not None:
@@ -55,22 +63,22 @@ class ConsolePresenter:
         RESET = "\033[0m"
         BOLD = "\033[1m"
 
-        print(f"\n {YELLOW}•{RESET} {BOLD}Requesting permission for:{RESET} {CYAN}{action.name}{RESET}")
-        print(f"   {BOLD}Reason:{RESET} {reason}")
+        self._print(f"\n {YELLOW}•{RESET} {BOLD}Requesting permission for:{RESET} {CYAN}{action.name}{RESET}")
+        self._print(f"   {BOLD}Reason:{RESET} {reason}")
         
         if action.arguments:
             arguments = json.dumps(action.arguments, ensure_ascii=False)
             if len(arguments) > 80:
                 arguments = json.dumps(action.arguments, ensure_ascii=False, indent=2)
             indented_args = "\n".join(f"      {line}" for line in arguments.splitlines())
-            print(f"   {BOLD}Arguments:{RESET}\n{indented_args}")
+            self._print(f"   {BOLD}Arguments:{RESET}\n{indented_args}")
             
         if action.name == "patch" and isinstance(action.arguments.get("diff"), str):
-            print(f"   {BOLD}Patch Preview:{RESET}")
+            self._print(f"   {BOLD}Patch Preview:{RESET}")
             indented_diff = "\n".join(f"      {line}" for line in action.arguments["diff"].splitlines())
-            print(indented_diff)
+            self._print(indented_diff)
 
-        print(f"   {BOLD}Do you want to proceed?{RESET}")
+        self._print(f"   {BOLD}Do you want to proceed?{RESET}")
 
         engine = getattr(self, "engine", None)
         choice = self.prompt_box.read_selection(engine=engine, options=("Yes", "No"))
@@ -131,8 +139,6 @@ class ConsolePresenter:
  | ||  __/\\__ \\ || (__| (_) | (_| |  __/
   \\__\\___||___/\\__\\___|\\___/ \\__,_|\\___|{RESET}
 """
-        print(logo)
-
         import sys
         import platform
         import os
@@ -168,14 +174,17 @@ class ConsolePresenter:
             mode_colored = f"{YELLOW}confirm{RESET} (Tool calls require approval)"
 
         # Border Line
-        border = f"{GRAY}─────────────────────────────────────────────────────────────────{RESET}"
+        border = colored_border()
 
-        print(border)
-        print(f" {GRAY}›{RESET} {BOLD}Workspace:{RESET}   {session.cwd}")
-        print(f" {GRAY}›{RESET} {BOLD}Session:{RESET}     {action_str} - {session_id_colored}")
-        print(f" {GRAY}›{RESET} {BOLD}Safety Mode:{RESET} {mode_colored}")
-        print(f" {GRAY}›{RESET} {BOLD}System:{RESET}      {env_str}")
-        print(border)
+        output = [
+            logo,
+            border,
+            f" {GRAY}›{RESET} {BOLD}Workspace:{RESET}   {session.cwd}",
+            f" {GRAY}›{RESET} {BOLD}Session:{RESET}     {action_str} - {session_id_colored}",
+            f" {GRAY}›{RESET} {BOLD}Safety Mode:{RESET} {mode_colored}",
+            f" {GRAY}›{RESET} {BOLD}System:{RESET}      {env_str}",
+            border,
+        ]
 
         # Print loaded component stats if engine is provided
         if engine:
@@ -183,29 +192,33 @@ class ConsolePresenter:
             tools_count = len(getattr(engine.tools, "_tools", {})) if hasattr(engine, "tools") else 0
             skills_count = len(getattr(engine.skills_registry, "_skills", {})) if hasattr(engine, "skills_registry") else 0
 
-            print(f" {GRAY}›{RESET} {BOLD}Loaded Components:{RESET}")
-            print(f"   {GREEN}•{RESET} {BOLD}{loaders_count}{RESET} Context Loaders")
-            print(f"   {GREEN}•{RESET} {BOLD}{tools_count}{RESET} Tools")
-            print(f"   {GREEN}•{RESET} {BOLD}{skills_count}{RESET} Skills")
-            print(border)
+            output.extend(
+                [
+                    f" {GRAY}›{RESET} {BOLD}Loaded Components:{RESET}",
+                    f"   {GREEN}•{RESET} {BOLD}{loaders_count}{RESET} Context Loaders",
+                    f"   {GREEN}•{RESET} {BOLD}{tools_count}{RESET} Tools",
+                    f"   {GREEN}•{RESET} {BOLD}{skills_count}{RESET} Skills",
+                    border,
+                ]
+            )
 
-        print(f"  {GRAY}Type \"exit\" or \"quit\" to end the session.{RESET}")
-        print()
+        output.append(f"  {GRAY}Type \"exit\" or \"quit\" to end the session.{RESET}")
+        self._print_many(output)
 
     def show_session_list(self, sessions: list[SessionRecord]) -> None:
         if not sessions:
-            print("[testcode] no saved sessions")
+            self._print("[testcode] no saved sessions")
             return
 
-        print("[testcode] saved sessions:")
+        self._print("[testcode] saved sessions:")
         for index, session in enumerate(sessions, start=1):
             preview = session.preview or "(no user messages yet)"
-            print(
+            self._print(
                 f"{index}. {session.session_id} | {session.status} | "
                 f"{session.updated_at} | {session.message_count} messages"
             )
-            print(f"  cwd: {session.cwd}")
-            print(f"  preview: {preview}")
+            self._print(f"  cwd: {session.cwd}")
+            self._print(f"  preview: {preview}")
 
     def show_thinking_start(self) -> Spinner:
         spinner = Spinner(message="Model is thinking...", interruptible=True)
@@ -259,9 +272,9 @@ class ConsolePresenter:
         output_summary = self._summarize_tool_result(result)
         
         if result.success:
-            print(f" {GREEN}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {output_summary}")
+            self._print(f" {GREEN}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {output_summary}")
         else:
-            print(f" {RED}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {RED}{output_summary}{RESET}")
+            self._print(f" {RED}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {RED}{output_summary}{RESET}")
 
     def show_tool_skipped(self, action, reason: str) -> None:
         YELLOW = "\033[1;33m"
@@ -270,7 +283,7 @@ class ConsolePresenter:
 
         args_str = self._format_args(action.arguments)
         args_display = f"({args_str})" if args_str else ""
-        print(f" {YELLOW}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {YELLOW}{reason}{RESET}")
+        self._print(f" {YELLOW}•{RESET} {CYAN}{action.name}{RESET}{args_display} -> {YELLOW}{reason}{RESET}")
 
     def tool_started(self, action_name: str) -> Spinner:
         return self.show_tool_start(action_name)
@@ -312,15 +325,15 @@ class ConsolePresenter:
         RESET = "\033[0m"
         GRAY = "\033[90m"
         
-        print(f"\n{BOLD}testcode CLI Workbench Shortcuts & Commands:{RESET}")
-        print(f"  {CYAN}/help, ?{RESET}       Show this help message")
-        print(f"  {CYAN}/tasks{RESET}         List active background tasks")
-        print(f"  {CYAN}/skills{RESET}        List all scanned skills and metadata")
-        print(f"  {CYAN}/mode [mode]{RESET}  Show or change safety mode ({GRAY}readonly{RESET}/{GRAY}confirm{RESET}/{GRAY}auto{RESET})")
-        print(f"  {CYAN}exit, quit{RESET}     Exit the current workbench session\n")
+        self._print(f"\n{BOLD}testcode CLI Workbench Shortcuts & Commands:{RESET}")
+        self._print(f"  {CYAN}/help, ?{RESET}       Show this help message")
+        self._print(f"  {CYAN}/tasks{RESET}         List active background tasks")
+        self._print(f"  {CYAN}/skills{RESET}        List all scanned skills and metadata")
+        self._print(f"  {CYAN}/mode [mode]{RESET}  Show or change safety mode ({GRAY}readonly{RESET}/{GRAY}confirm{RESET}/{GRAY}auto{RESET})")
+        self._print(f"  {CYAN}exit, quit{RESET}     Exit the current workbench session\n")
 
     def show_tasks(self) -> None:
-        print("\nNo active background tasks running in this session.\n")
+        self._print("\nNo active background tasks running in this session.\n")
 
     def show_skills(self, engine) -> None:
         CYAN = "\033[1;36m"
@@ -331,18 +344,18 @@ class ConsolePresenter:
         if engine and hasattr(engine, "skills_registry") and engine.skills_registry:
             skills = getattr(engine.skills_registry, "_skills", {})
             
-        print(f"\n{BOLD}Scanned Skill Registry:{RESET}")
+        self._print(f"\n{BOLD}Scanned Skill Registry:{RESET}")
         if not skills:
-            print("  No skills found in registry.")
+            self._print("  No skills found in registry.")
         else:
             for name, meta in skills.items():
                 version = getattr(meta, "version", "0.1.0")
                 desc = getattr(meta, "description", "")
                 triggers = getattr(meta, "triggers", [])
-                print(f"  {CYAN}• {name}{RESET} (v{version}) - {desc}")
+                self._print(f"  {CYAN}• {name}{RESET} (v{version}) - {desc}")
                 if triggers:
-                    print(f"    Triggers: {', '.join(triggers)}")
-        print()
+                    self._print(f"    Triggers: {', '.join(triggers)}")
+        self._print()
 
     def show_or_change_mode(self, engine, mode_arg: str | None = None) -> None:
         GREEN = "\033[1;32m"
@@ -352,22 +365,22 @@ class ConsolePresenter:
         BOLD = "\033[1m"
         
         if not engine or not hasattr(engine, "guardrails") or not hasattr(engine.guardrails, "policy"):
-            print("Engine policy configuration is not available.\n")
+            self._print("Engine policy configuration is not available.\n")
             return
             
         policy = engine.guardrails.policy
         
         if not mode_arg:
             current_mode = getattr(policy, "mode", "confirm")
-            print(f"\nCurrent safety mode: {BOLD}{current_mode}{RESET}\n")
+            self._print(f"\nCurrent safety mode: {BOLD}{current_mode}{RESET}\n")
             return
             
         if mode_arg not in {"readonly", "confirm", "auto"}:
-            print(f"\n{RED}Error:{RESET} Invalid mode '{mode_arg}'. Use readonly, confirm, or auto.\n")
+            self._print(f"\n{RED}Error:{RESET} Invalid mode '{mode_arg}'. Use readonly, confirm, or auto.\n")
             return
             
         policy.mode = mode_arg
-        print(f"\nSafety mode successfully updated to: {BOLD}{mode_arg}{RESET}\n")
+        self._print(f"\nSafety mode successfully updated to: {BOLD}{mode_arg}{RESET}\n")
 
     def show_input_border(self) -> None:
         self.prompt_box.show_border()
@@ -382,7 +395,7 @@ class ConsolePresenter:
     def show_interrupted(self) -> None:
         RED = "\033[1;31m"
         RESET = "\033[0m"
-        print(f"\n {RED}⎿  Interrupted · What should testcode CLI do instead?{RESET}\n")
+        self._print(f"\n {RED}⎿  Interrupted · What should testcode CLI do instead?{RESET}\n")
 
     def clear_running_status_bar(self, tools_count: int) -> None:
         self.status_bar.clear_running(tools_count)

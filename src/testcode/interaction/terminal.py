@@ -23,14 +23,22 @@ class Ansi:
 
 def terminal_columns(default: int = 80) -> int:
     try:
-        return os.get_terminal_size().columns
+        columns = os.get_terminal_size().columns
+        return columns if columns > 0 else default
     except OSError:
         return default
 
 
+def stable_terminal_line(value: str) -> str:
+    """Render a full-width TTY line without setting pending autowrap."""
+    if not sys.stdout.isatty():
+        return value
+    return f"\033[?7l{value}\r\033[?7h"
+
+
 def colored_border(columns: int | None = None) -> str:
     width = max(columns if columns is not None else terminal_columns(), 1)
-    return f"{Ansi.GRAY}{'─' * width}{Ansi.RESET}"
+    return stable_terminal_line(f"{Ansi.GRAY}{'─' * width}{Ansi.RESET}")
 
 
 class Spinner:
