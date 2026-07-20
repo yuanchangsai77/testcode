@@ -31,6 +31,7 @@ Detailed design is in [docs/architecture.md](docs/architecture.md).
 | [Skill 系统](docs/skill-system.md) | Skill 格式、来源、箱内资产及激活语义 | 通用仓库策略 |
 | [工具契约](docs/tool-contract.md) | Tool 定义、结果、metadata 和摘要的字段流向 | 工具实现教程 |
 | [TUI 设计](docs/tui_design_and_architecture.md) | 终端交互、输入编辑、重绘和兼容性边界 | runtime orchestration |
+| [完整 TUI 架构](docs/full-tui-architecture.md) | 状态驱动 TUI 的目标架构、迁移顺序和验收标准 | 当前实现细节和产品优先级 |
 | [Shell 生命周期](docs/shell-session-lifecycle.md) | 串行 Bash 的保留、中断、清理和安全边界 | OS 级隔离 |
 | [版本快照](docs/versions/v0.1.md) | 发布时点的不可变能力记录 | 当前状态 |
 

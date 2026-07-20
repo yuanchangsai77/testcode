@@ -68,7 +68,7 @@
 - Skill metadata 扫描、能力仓库目录展示、instructions 按需激活及 active skill 注入 prompt。
 - 内置、用户全局、项目级 Skill 目录。
 - run 日志写入 `.testcode/runs/`。
-- pytest 覆盖了核心 engine、model、policy、tools、context、Skill、MCP、能力仓库和 CLI 的关键路径；当前 276 个用例通过。
+- pytest 覆盖了核心 engine、model、policy、tools、context、Skill、MCP、能力仓库、CLI 和 TUI 事件链路的关键路径；当前 298 个用例通过。
 
 仍存在的关键缺口：
 
@@ -458,10 +458,10 @@
 
 - `/help`、`/status`、`/sessions`、`/mode`、`/skill`、`/mcp`。
 - Ctrl+C 已支持中断当前输入、模型或工具并保留 session 流程。
-- 已实现 TTY UTF-8 输入、光标编辑、视觉折行和 resize 重绘；持久化输入历史仍待实现。
+- 交互 TTY 已切换到项目内原生输入器，支持 UTF-8、多行编辑、会话内历史、bracketed paste 和 resize；`prompt_toolkit` 依赖已移除，持久化跨进程历史仍待实现。
 - 已支持 TTY 彩色输出、全宽边框和窄屏状态栏；非 TTY 保留纯流式输入回退。
-- 普通屏幕模式下，部分终端缩放时可能保留上边框回流行；后续需在“实时单下边框”与完整 TUI 之间选择结构性方案。
-- 工具 start/finish 进度展示和耗时展示。
+- 状态驱动完整 TUI 已完成 Phase 0 和 Phase 1/2 首版：有界事件队列、集中状态、单一运行时 renderer、Working 计时、工具生命周期、审批和 Esc 中断已经接入；目标架构与剩余阶段见 `docs/full-tui-architecture.md`。
+- 原生 inline TUI 已接入：启动信息、消息和稳定结果只写入终端 scrollback 一次，程序只重绘底部瞬态区域；不进入 fullscreen、不捕获鼠标，因此滚轮、选择和复制保持终端原生行为。运行期间保留可编辑 composer，模型信息位于输入框下方，支持中断并排队下一条消息；每轮结束写入耗时分隔线和空白间隔。模型 streaming、overlay 命令栈、持久化输入历史和跨终端兼容快照仍待实施。
 
 ### P6.2 配置命令
 

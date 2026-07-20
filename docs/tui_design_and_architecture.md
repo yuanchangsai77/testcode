@@ -1,196 +1,168 @@
-# testcode CLI: TUI Design & Architecture Specification
+# testcode CLI TUI 设计与实现
 
-This document provides a unified overview of the design decisions, TUI layout specifications, and architectural patterns implemented in the `testcode` workbench CLI. It details how the terminal user interface mimics the styling of **Antigravity CLI** (`agy`) while maintaining professional software development standards.
+## 文档范围
 
----
+本文档描述当前交互式 TTY 的实际行为。`--once`、重定向、CI 和非 TTY 环境继续使用 `ConsolePresenter` 的逐行输出；交互式会话使用 `TUIConsolePresenter` 的原生终端 backend。
 
-## Document Scope
+当前实现不依赖 `prompt_toolkit`，也不进入 alternate screen。目标是同时保留终端原生 scrollback、鼠标滚轮、文本选择与复制，并只让程序拥有底部的瞬态活动区域。
 
-This document owns terminal interaction behavior: prompt editing, visual width, borders, status lines, selection input, resize redraw, and terminal compatibility limits. It does not define execution-engine flow, tool contracts, capability activation, or product priority; those belong to `docs/architecture.md`, `docs/tool-contract.md`, `docs/capability-warehouse.md`, and `docs/build-roadmap.md`.
+## 1. 屏幕所有权
 
----
+终端内容分为两类：
 
-## 1. Design & TUI Layout
+```text
+终端原生 scrollback
+├── 启动 Logo 和环境信息
+├── 已提交的用户消息
+├── 已完成的工具结果
+├── 助手回答
+└── Worked for … 分隔线
 
-### Design Principles
-- **Futuristic & Clean**: Uses a Cyan ASCII art logo and clean thin borders (`─`) to establish visual hierarchy.
-- **Environment & Mode Awareness**: Clear visibility into safety modes (`confirm`, `auto`, `readonly`) with distinct colors (yellow, magenta, green).
-- **Consolidated Progress**: Displays live progress (Model thinking spinner, tool executions, and user approvals) using elegant status symbols.
-- **Clean Input Sandboxing**: Inputs and confirmation dialogs are sandwiched between horizontal lines, with bottom status bars (`? for shortcuts`, `esc to cancel`) dynamically erased upon submission.
-- **TTY-aware Editing**: Interactive terminals use a cbreak-mode editor with UTF-8 input, cursor movement, deletion, visual wrapping, and resize handling. Redirected input keeps a plain-stream fallback.
-- **Status Bullets**: Tool logs use bullet points (`•`) with status color-coding (Green for success, Red for failure, Yellow for executing/skipped/requesting permission) instead of busy checkmarks.
-
-### Visual Previews
-
-#### A. Startup Banner
+程序控制的瞬态尾部
+├── 工具/审批/Thinking 状态
+├── 可编辑输入框
+└── 模型名称与工作目录
 ```
-  _            _                 _                 
- | |_ ___  ___| |_ ___  ___   __| | ___ 
- | __/ _ \/ __| __/ __|/ _ \ / _` |/ _ \
- | ||  __/\__ \ || (__| (_) | (_| |  __/
-  \__\___||___/\__\___|\___/ \__,_|\___|
 
-─────────────────────────────────────────────────────────────────
- › Workspace:   /home/changsai/testcode
- › Session:     Started - 9289f744-35a7-41a4-a462-12a0de37dc6b
+稳定内容只写入 stdout 一次，之后由终端保存、重排、滚动、选择和复制。程序不保存第二份可见 transcript，也不捕获鼠标。
+
+瞬态尾部紧跟稳定内容，不强制占用终端物理底边。每次刷新只清理上一次尾部覆盖的区域，再绘制新帧；窗口缩放时会按新宽度计算旧帧可能产生的视觉行数和光标位置，避免留下重复的 Working、输入框、模型状态或空白占位。
+
+## 2. 当前布局
+
+### 启动区
+
+```text
+  _            _                 _
+ | |_ ___  ___| |_ ___  ___   __| | ___
+ ...
+────────────────────────────────────────────────────────
+ › Workspace:   /workspace
+ › Session:     Started - ...
  › Safety Mode: confirm (Tool calls require approval)
- › System:      Python 3.14.4 (.venv) on Linux
-─────────────────────────────────────────────────────────────────
+ › System:      Python ... on Linux
+────────────────────────────────────────────────────────
  › Runtime:
    • 3 Context Loaders
    • 17 Tools
  › Capability Catalog:
    • 2 Skills
    • 1 MCP Server
-─────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────
   Type "exit" or "quit" to end the session.
 ```
 
-#### B. Active Sandboxed Input TUI (Typing state)
-```
-─────────────────────────────────────────────────────────────────
- testcode> _
-─────────────────────────────────────────────────────────────────
- ? for shortcuts                                     qwen3.6-plus
-```
+这些内容立即进入原生历史，不会在 resize 时由应用重新打印。
 
-#### C. Live Progress & Tool Calls
-```
- • Model is thinking... ⠋
- • read_file -> Executing ⠋
- • read_file(path=src/app.py) -> 178 lines
- • Model is thinking... ⠋
+### 空闲输入
+
+```text
+
+ testcode> editable input
+
+ ? for shortcuts                                      model
 ```
 
----
+输入区有上下留白和灰色背景。内容按 Unicode 显示宽度折行，最多显示三行；模型状态位于输入框下方。
 
-## 2. Software Architecture
+### 运行中
 
-The TUI follows a small Presenter-oriented architecture. The REPL loop, execution engine, progress reporting, and terminal rendering are kept separate so the core model/tool loop can run without depending on a concrete terminal UI.
+```text
+
+ • read_file → README.md
+ ⠋ Model is thinking (8s • esc to interrupt)
+
+
+ testcode> steer the next turn
+
+  qwen3.6-plus · /workspace
+```
+
+Thinking/Working 活动块上下各保留一行终端底色空白。输入提示符和其后的可编辑文本会分别着色，但共享同一层灰色背景；行尾通过当前背景色的 erase-to-end 完成填充，不输出会在 resize 时参与 reflow 的空格。
+
+模型或工具工作时输入器仍然存活。提交非空内容会请求中断当前 run，并把内容排队为下一轮消息；没有提交的草稿会回到下一次空闲输入框。
+
+每轮结束后写入：
+
+```text
+─ Worked for 3m 40s ───────────────────────────────────
+
+```
+
+## 3. 事件与状态边界
+
+`ExecutionEngine` 不直接操作终端。模型、工具、审批、重试、取消和 resize 都先进入有界事件队列，再由 reducer 生成 `TUIState`。
 
 ```mermaid
-graph TD
-    APP[Application Composition / app.py] --> CLI[CLI REPL Loop / cli.py]
-    APP --> EE[ExecutionEngine / engine.py]
-    APP --> CP[ConsolePresenter / presenter.py]
-    CLI -->|Orchestrates Runs| EE[ExecutionEngine / engine.py]
-    CLI -->|Delegates Prompting & UI| CP
-    EE -->|Emits ProgressReporter events| PR[ProgressReporter / progress.py]
-    CP -->|Implements| PR
-    CP --> PB[PromptBox / input.py]
-    CP --> SB[StatusBar / input.py]
-    CP --> TERM[Terminal primitives / terminal.py]
-    EE -->|Uses| TS[SessionContext / session.py]
-    TERM -->|Graceful Degradation| TTY{sys.stdout.isatty?}
-    TTY -->|True| ANSI[ANSI Cursor Manipulation]
-    TTY -->|False| Plain[Standard Streams / Safe Fallback]
+flowchart LR
+    ENGINE[ExecutionEngine] -->|progress events| QUEUE[Bounded Event Queue]
+    INPUT[Native Input Loop] -->|edit / submit / cancel| INTENT[UI Intent]
+    QUEUE --> REDUCER[TUI State Reducer]
+    REDUCER --> RENDERER[Width-bounded Renderer]
+    RENDERER --> SURFACE[Inline Terminal Surface]
+    SURFACE --> TAIL[Transient Bottom Tail]
+    ENGINE --> STABLE[Committed Output]
+    STABLE --> SCROLLBACK[Native Scrollback]
 ```
 
-### Key Software Principles Checked
+职责边界：
 
-- **Modularity & Separation of Concerns**: `ConsolePresenter` is the public presentation facade, while prompt frame handling, status bar state, terminal width, borders, and spinners are split into smaller interaction modules. The main loop in `CLI` has no knowledge of colors or cursor movement.
-- **Single Responsibility Principle (SRP)**:
-  - `CLI`: Manages sessions, command history, and loops the REPL shell.
-  - `ExecutionEngine`: Controls the model client, policy checks, duplicate suppression, and tool execution.
-  - `ProgressReporter`: Defines execution progress events without terminal concepts.
-  - `ConsolePresenter`: Renders session state, summaries, approvals, and progress events.
-  - `PromptBox`: Owns TTY input editing, prompt frames, resize handling, and confirmation selection input.
-  - `StatusBar`: Owns status line rendering and cleanup state.
-  - `terminal.py`: Owns low-level terminal primitives such as ANSI constants, width detection, borders, and spinner behavior.
-- **Open/Closed Principle & Extensibility (OCP)**: A non-terminal UI can implement `ProgressReporter` without modifying `ExecutionEngine`. The current terminal UI adapts dynamically to terminal size via `os.get_terminal_size()`.
-- **Robustness & Graceful Degradation**: Direct cursor movements can corrupt output streams in non-interactive environments (CI/CD, subprocesses, tests). Terminal components check `sys.stdout.isatty()` before executing cursor movement, falling back to clean line-by-line output.
-- **Failure Transparency**: Tool execution exceptions are not masked by progress rendering. If a tool raises before returning a `ToolResult`, the progress handle is stopped through `tool_aborted()` and the original exception continues upward.
+- `TUIController`：有序消费事件并维护不可变视图状态。
+- `TUIRenderer`：生成 Working、工具、审批和运行环境行。
+- `ComposerState`：维护文本、光标和会话内输入历史。
+- `InlineTerminalSurface`：唯一负责瞬态尾部的清理、底部锚定和光标定位。
+- `TUIConsolePresenter`：把 engine 回调转换为事件，协调输入、渲染和稳定内容提交。
+- `ConsolePresenter`：非 TTY 和兼容路径。
 
----
+## 4. 输入语义
 
-## 3. Core Implementation Details
+原生编辑器使用 cbreak 模式，但不启用任何鼠标协议。它支持：
 
-### A. TTY Input Editor and Plain-Stream Fallback
+- UTF-8、中文、宽字符和组合字符；
+- 左右移动、Home、End、Backspace、Ctrl-D 删除；
+- 上下键浏览会话内输入历史；
+- bracketed paste，粘贴内容不会被拆成控制命令；
+- Alt+Enter 插入换行，Enter 提交；
+- 空输入时 Ctrl-D 结束会话；
+- 运行时 Esc/Ctrl-C 请求中断；
+- 审批时方向键选择，Enter 确认，`y`/`n` 直接决定。
 
-On an interactive TTY, `PromptBox` switches stdin to cbreak mode and owns the editable value and cursor index. The editor supports:
+终端设置由输入上下文保存并在正常结束、异常、中断时恢复。运行期间只有一个输入线程读取 stdin，不会再出现 Spinner、审批器和输入框争抢输入的问题。
 
-- UTF-8 characters read across multiple terminal bytes, including Chinese input;
-- Backspace, Ctrl-D deletion, left/right arrows, Home, and End;
-- Ctrl-C as `KeyboardInterrupt` and Ctrl-D on an empty value as `EOFError`;
-- complete escape-sequence consumption so mouse and unsupported control sequences do not leak into prompt text.
+## 5. 滚动、选择与复制
 
-When stdin or stdout is not a TTY, the code falls back to standard `input()`. ANSI prompt fragments in that fallback retain Readline ignore markers so visible prompt width remains correct where Readline is available.
+应用从不发送鼠标捕获序列，因此：
 
-### B. Visual Width, Wrapping, and Frame Redraw
+- 鼠标滚轮由终端处理原生 scrollback；
+- 鼠标保持终端文本选择语义；
+- 不需要 F2 模式，也不需要按住 Shift 才能选择；
+- 滚轮不会被输入器解释为上下键历史。
 
-Input wrapping is calculated before rendering instead of being delegated entirely to terminal autowrap:
+这是当前 backend 与旧 fullscreen 方案的核心区别。稳定历史属于终端，程序只更新底部瞬态帧。
 
-- East Asian full-width and wide characters count as two columns;
-- combining marks do not add a display column;
-- one terminal column is deliberately left unused to avoid pending-autowrap ambiguity;
-- the input frame expands by visual rows while keeping the cursor at the corresponding wrapped position.
+## 6. Resize 规则
 
-The live frame is rendered directly after the transcript. On each edit, the previous frame is cleared and redrawn with the current input, borders, and status line. Submitted input is then written back as a stable transcript block with both borders.
+- 稳定历史不重画，交给终端原生 reflow。
+- 瞬态行始终限制在当前宽度以内，并预留一列避免 pending autowrap。
+- 尾部记录旧帧内容、逻辑光标行和光标列；缩窄时计算光标之前的旧行在新宽度下产生的视觉高度。
+- 清理从 reflow 后的实际光标位置回到帧首，不通过换行或空格预留物理底部区域。
+- 空闲输入循环轮询终端尺寸；运行渲染循环以 10 FPS 同时处理 spinner 和 resize。
 
-### C. Resize Handling
+稳定的全宽边框在终端缩窄时可能被终端显示为续行，这是原生 scrollback 的正常 reflow，不是应用重复输出。
 
-`PromptBox` installs a temporary `SIGWINCH` handler while reading input. Resize bursts are settled briefly before redraw, then the frame recomputes wrapping from the new terminal width. The renderer records the previous width and cursor row so it can account for old rows that reflowed after a shrink.
+## 7. 回退与验证
 
-This is a best-effort normal-screen implementation. See **Known Limitations** below for the remaining terminal-history constraint.
+只有 stdin/stdout 同时为 TTY 时才选择原生 TUI。plain 路径不输出光标移动、隐藏光标或 bracketed-paste 控制序列。
 
-### D. Confirmation Selection
+回归至少覆盖：
 
-TTY confirmations accept arrow keys or `j`/`k`, direct numeric choices, `y`/`n`, Enter, Escape, and Ctrl-C. A renderer hook allows the selection frame to be replaced without coupling the execution engine to a specific terminal UI.
-
-### E. Vertical Space and Status-Line Recovery
-
-The bottom status line can be rendered without a trailing newline while an input frame is active. This is important when it occupies the last terminal row: emitting a newline there would scroll the whole screen once per keypress. Running-status cleanup separately reclaims its printed row without leaving growing vertical gaps.
-
-### F. Progress Reporting Boundary
-`ExecutionEngine` does not call terminal-specific methods directly. It emits lifecycle events through `ProgressReporter`:
-
-- `model_started` / `model_finished`
-- `tool_started` / `tool_finished`
-- `tool_aborted`
-- `tool_skipped`
-
-`ConsolePresenter` implements this protocol by delegating to spinner and tool-line rendering methods. This keeps the orchestration layer usable in headless tests, alternate UIs, or future logging-only execution modes.
-
-### G. ANSI-Safe Full-Width Lines
-
-Borders are generated from visible width first and then wrapped in ANSI color codes. On a TTY, autowrap is temporarily disabled while a full-width border or status line is written, preventing the final column from leaving a pending wrap. Narrow status bars truncate their left and right labels instead of overflowing onto another row.
-
-### H. Input and Exception Semantics
-Ctrl-C and Ctrl-D retain distinct meanings in the prompt layer. Ctrl-C raises `KeyboardInterrupt`; Ctrl-D raises `EOFError` so the CLI can close the session through its EOF branch. Engine runtime state is also cleared on exceptional model/tool exits, preventing stale `current_session` data from leaking into later UI decisions.
-
----
-
-## 4. Known Limitations and Design Boundary
-
-The current UI intentionally stays on the terminal's normal screen so native scrollback remains available. This creates one unresolved compatibility boundary:
-
-- a live full-width top border sits above the input cursor;
-- some terminals, especially during repeated shrink-and-grow operations, preserve intermediate reflowed border rows as history;
-- ANSI cursor movement can clear the visible frame but cannot reliably identify or rewrite rows that a terminal has already committed to scrollback.
-
-Resize debouncing and old-width row accounting reduce the occurrence but cannot guarantee removal across Windows Terminal, WSL, tmux, SSH clients, and other emulators.
-
-Two future designs can provide a strict guarantee:
-
-1. **Live single-bottom-border frame**: keep all mutable chrome at or below the cursor, then write both borders only after submission. This is the smallest robust change.
-2. **Full-screen or alternate-screen TUI**: keep a program-owned screen/history model and repaint from that model. This preserves the full live frame but requires program-managed scrolling and substantially more terminal state handling.
-
-The project should not keep adding terminal-specific cursor offsets to solve this limitation; a future fix should choose one of these structural designs.
-
----
-
-## 5. Verification Contract
-
-TUI changes should keep regression coverage for:
-
-- TTY and plain-stream input paths;
-- UTF-8 decoding, cursor editing, visual-width wrapping, and narrow terminals;
-- resize row accounting and submitted-frame history;
-- approval selection, Ctrl-C, Ctrl-D, and exceptional session cleanup;
-- status-line fitting, progress completion/abort, and ANSI-safe full-width borders.
-
-Run the project test suite with:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m pytest -q
-```
+- 事件队列背压和 reducer 状态；
+- UTF-8、多行、光标和历史编辑；
+- 窄屏 Unicode 宽度；
+- 瞬态尾部局部清理且不进入 alternate screen；
+- resize 后无重复活动行；
+- 运行中输入、中断排队、审批和草稿恢复；
+- 模型状态位于输入框下方；
+- 稳定工具结果只提交一次；
+- `Worked for …` 后保留空行；
+- 完整 CLI 的真实终端 shrink/grow 验证。

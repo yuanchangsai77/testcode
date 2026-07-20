@@ -210,7 +210,12 @@ class ConsolePresenter:
                 ]
             )
 
-        output.append(f"  {GRAY}Type \"exit\" or \"quit\" to end the session.{RESET}")
+        output.extend(
+            [
+                f"  {GRAY}Type \"exit\" or \"quit\" to end the session.{RESET}",
+                "",
+            ]
+        )
         self._print_many(output)
 
     def show_session_list(self, sessions: list[SessionRecord]) -> None:

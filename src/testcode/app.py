@@ -11,6 +11,7 @@ from .config import load_dotenv, load_runtime_config
 from .context import ExplicitContextLoader, ProjectRulesLoader, WorkspaceSummaryLoader
 from .interaction.cli import CLI
 from .interaction.presenter import ConsolePresenter
+from .interaction.tui import TUIConsolePresenter, should_use_tui
 from .mcp.client import TransportBackedMCPClient, UnsupportedMCPClient
 from .mcp.discovery import MCPDiscoveryService
 from .mcp.manager import MCPManager
@@ -56,7 +57,12 @@ def create_model_client(logger, config=None) -> StubModelClient | OpenAICompatib
     return OpenAICompatibleModelClient(config=model_config, logger=logger)
 
 
-def create_app(mode: str | None = None, workspace_root: str | Path | None = None) -> CLI:
+def create_app(
+    mode: str | None = None,
+    workspace_root: str | Path | None = None,
+    *,
+    interactive: bool = False,
+) -> CLI:
     root = Path(workspace_root or os.getcwd()).resolve()
     config = load_runtime_config(mode=mode, cwd=root)
     logger = InMemoryLogger()
@@ -128,7 +134,8 @@ def create_app(mode: str | None = None, workspace_root: str | Path | None = None
         tools.attach_state("mcp_manager", mcp_manager, persistent=True)
 
     model = create_model_client(logger, config=config)
-    presenter = ConsolePresenter(tool_result_summarizer=tools.summarize_result)
+    presenter_type = TUIConsolePresenter if interactive and should_use_tui() else ConsolePresenter
+    presenter = presenter_type(tool_result_summarizer=tools.summarize_result)
     engine = ExecutionEngine(
         model=model,
         tools=tools,
@@ -199,7 +206,11 @@ def main() -> None:
         )
         args = parser.parse_args()
 
-        app = create_app(mode=args.mode)
+        interactive = not args.once and not args.list
+        if interactive:
+            app = create_app(mode=args.mode, interactive=True)
+        else:
+            app = create_app(mode=args.mode)
         initial_prompt = " ".join(args.prompt).strip() or None
 
         resume_requested = args.resume is not None
@@ -231,7 +242,10 @@ def main() -> None:
             if callable(reset_state):
                 reset_state()
             session_id = resumed_session.session_id if resumed_session is not None else None
-            app = create_app(mode=args.mode, workspace_root=cwd)
+            if interactive:
+                app = create_app(mode=args.mode, workspace_root=cwd, interactive=True)
+            else:
+                app = create_app(mode=args.mode, workspace_root=cwd)
             if session_id is not None:
                 resumed_session = app.load_session(session_id) or resumed_session
 
