@@ -65,10 +65,10 @@
 - write/execute/test/destructive 风险审批。
 - 明显危险 shell 命令识别。
 - 项目规则、workspace summary、显式 `--context` 上下文加载。
-- Skill metadata 扫描、按 trigger 或 `/skill` 显式触发、active skill 注入 prompt。
+- Skill metadata 扫描、能力仓库目录展示、instructions 按需激活及 active skill 注入 prompt。
 - 内置、用户全局、项目级 Skill 目录。
 - run 日志写入 `.testcode/runs/`。
-- pytest 覆盖了核心 engine、model、policy、tools、context、Skill、CLI 的关键路径；当前 135 个用例通过。
+- pytest 覆盖了核心 engine、model、policy、tools、context、Skill、MCP、能力仓库和 CLI 的关键路径；当前 276 个用例通过。
 
 仍存在的关键缺口：
 
@@ -287,16 +287,15 @@
 
 进展：
 
-- 已实现启动和运行前 metadata 扫描，避免一次性加载所有正文。
-- 已实现 trigger 关键词自动匹配。
-- 已实现 `/skill <name>` 显式触发。
-- 已实现被选中的 Skill 才加载正文。
+- 已实现启动时 metadata 扫描，避免一次性加载所有正文。
+- 已通过 `SkillToolboxSource` 将 Skill metadata 暴露为能力仓库目录。
+- 已实现打开 toolbox 只返回 instructions manifest，显式激活后才加载正文。
 - 已实现 active skills 跨多轮 session 传递。
-- 已记录 `skills.matched` 事件，并在 run start/details log 中展示相关 Skill 信息。
+- `SkillContextLoader` 及 trigger/`/skill` 匹配仍作为兼容组件和测试路径保留，但当前 `create_app()` 主链路不注册该 loader。
 
 剩余：
 
-- `/skill` 目前作为 prompt 触发机制存在，尚未形成完整交互命令体验。
+- 尚未形成 `/skill` CLI 命令体验；当前通过能力仓库工具打开和激活 Skill。
 - 尚未实现 Skill 引用额外文件时的按需读取。
 - 尚未实现 Skill 内容的独立预算裁剪和过长内容摘要。
 
@@ -304,7 +303,7 @@
 
 - 已完成 Skill instructions 注入 system prompt。
 - 已明确 Skill 只能提供上下文和流程建议，不绕过 policy，不自动获得更高权限。
-- 已补充自动触发、显式触发、未触发不加载、prompt 注入、跨轮保留等测试。
+- 已补充兼容 trigger loader、能力仓库激活、prompt 注入和跨轮保留测试。
 
 剩余：
 
@@ -380,8 +379,8 @@
 
 - 先定义统一 `MCPTransport` 抽象，再分别接入 `stdio`、`streamable_http`、`sse`。
 - 当前已具备 `stdio`、`streamable_http`、`sse` 主链路、专项 observability、磁盘 discovery cache 与一次性失效重连。
-- 将运行时拆为 `MCPTransport`、`MCPClient`、`MCPManager`、`MCPDiscoveryService`、adapter、`MCPToolProvider`、`MCPResourceProvider` 七层，分别负责消息传输、协议调用、生命周期管理、懒发现与缓存、schema/result 适配、tool 注册、resource 索引入口。
-- `MCPToolProvider` 只消费 discovery snapshot，不直接决定远端连接与刷新时机。
+- 已将运行时拆为 `MCPTransport`、`MCPClient`、`MCPManager`、`MCPDiscoveryService`、adapter、`MCPToolboxSource`、`MCPResourceProvider`，分别负责消息传输、协议调用、生命周期管理、懒发现与缓存、schema/result 适配、按需激活和 resource 入口。
+- `MCPToolProvider` 只作为兼容性直接注册接口保留；当前 `create_app()` 主链路使用 `MCPToolboxSource`。
 - 拉取 MCP tools，转换为内部 `ToolDefinition`。
 - 拉取 MCP resources 的索引和元数据，作为可按需读取的上下文来源；通过独立 `MCPResourceProvider` 暴露，不和 tool provider 混写。
 - MCP tool 执行结果转换为统一 `ToolResult`。
@@ -458,9 +457,10 @@
 ### P6.1 CLI 体验
 
 - `/help`、`/status`、`/sessions`、`/mode`、`/skill`、`/mcp`。
-- Ctrl+C 中断当前模型或工具并保存 session。
-- readline 历史和多行输入。
-- TTY 彩色输出，非 TTY 自动关闭 ANSI。
+- Ctrl+C 已支持中断当前输入、模型或工具并保留 session 流程。
+- 已实现 TTY UTF-8 输入、光标编辑、视觉折行和 resize 重绘；持久化输入历史仍待实现。
+- 已支持 TTY 彩色输出、全宽边框和窄屏状态栏；非 TTY 保留纯流式输入回退。
+- 普通屏幕模式下，部分终端缩放时可能保留上边框回流行；后续需在“实时单下边框”与完整 TUI 之间选择结构性方案。
 - 工具 start/finish 进度展示和耗时展示。
 
 ### P6.2 配置命令

@@ -8,7 +8,7 @@ The project is organized around six layers:
 
 1. Interaction layer: CLI entrypoints, user input, progress output, and result rendering.
 2. Session orchestration layer: task lifecycle, context assembly, and model/tool loop coordination.
-3. Model integration layer: prompt packaging, model invocation, and structured response parsing.
+3. Model integration layer: prompt construction, model invocation, and structured response parsing.
 4. Tool execution layer: shell, file, git, search, and other callable capabilities.
 5. Safety layer: policy checks, confirmations, and execution boundaries.
 6. Observability layer: logs, events, trace records, and execution summaries.
@@ -17,19 +17,22 @@ Detailed design is in [docs/architecture.md](docs/architecture.md).
 
 ## Documentation Map
 
-| 目的 | 文档 |
-| --- | --- |
-| 安装、运行、模型接入与常用命令 | 本文档 |
-| 所有运行配置、默认值与硬上限 | [配置参考](docs/configuration.md) |
-| runtime 分层、对象职责与数据流 | [总体架构](docs/architecture.md) |
-| 当前阶段、未完成事项与验收标准 | [演进路线图](docs/build-roadmap.md) |
-| ContextLoader、ToolProvider、ResourceProvider | [运行时扩展](docs/runtime-extensibility.md) |
-| 工具箱、渐进披露、激活与回收 | [能力仓库](docs/capability-warehouse.md) |
-| MCP transport、discovery、风险与生命周期 | [MCP 集成](docs/mcp-integration.md) |
-| Skill 的目录、加载和注入 | [Skill 系统](docs/skill-system.md) |
-| Tool 定义、结果、metadata 和摘要的契约 | [工具契约](docs/tool-contract.md) |
-| TUI 交互与实现决策 | [TUI 设计](docs/tui_design_and_architecture.md) |
-| 版本快照与已完成修复记录 | [版本快照](docs/versions/v0.1.md)、[MCP 修复记录](docs/mcp-pr-review-remediation.md) |
+每类事实只指定一份主文档，其他文档只链接引用，避免分别维护同一份状态或契约。
+
+| 主文档 | 唯一职责 | 不负责 |
+| --- | --- | --- |
+| 本文档 | 安装、运行、模型接入与常用命令 | 内部对象设计和实施计划 |
+| [配置参考](docs/configuration.md) | 配置来源、覆盖顺序、默认值和硬上限 | MCP 协议语义 |
+| [总体架构](docs/architecture.md) | runtime 分层、对象职责和当前数据流 | 专项接口细节和优先级 |
+| [演进路线图](docs/build-roadmap.md) | 当前完成状态、缺口、优先级和验收标准 | 重复定义架构契约 |
+| [运行时扩展](docs/runtime-extensibility.md) | ContextLoader、ToolProvider、ResourceProvider 通用边界 | MCP、Skill 的内部设计 |
+| [能力仓库](docs/capability-warehouse.md) | 工具箱、渐进披露、激活和回收策略 | transport 或 Skill 文件格式 |
+| [MCP 集成](docs/mcp-integration.md) | MCP transport、discovery、协议、安全和生命周期 | 全局 roadmap |
+| [Skill 系统](docs/skill-system.md) | Skill 格式、来源、箱内资产及激活语义 | 通用仓库策略 |
+| [工具契约](docs/tool-contract.md) | Tool 定义、结果、metadata 和摘要的字段流向 | 工具实现教程 |
+| [TUI 设计](docs/tui_design_and_architecture.md) | 终端交互、输入编辑、重绘和兼容性边界 | runtime orchestration |
+| [Shell 生命周期](docs/shell-session-lifecycle.md) | 串行 Bash 的保留、中断、清理和安全边界 | OS 级隔离 |
+| [版本快照](docs/versions/v0.1.md) | 发布时点的不可变能力记录 | 当前状态 |
 
 建议阅读顺序：本文档 → 配置参考 → 总体架构 → 路线图；需要开发某个子系统时，再进入对应专题文档。
 
@@ -109,9 +112,9 @@ PYTHONPATH=src python3 -m testcode --mode confirm "edit a file after approval"
 PYTHONPATH=src python3 -m testcode --mode auto "apply low-risk file edits automatically"
 ```
 
-## Connect To The Local LLM Proxy
+## Connect To An OpenAI-Compatible Endpoint
 
-If you want `testcode` to use the OpenAI-compatible proxy running in `/opt/repos/test`, start that project first and then configure `.env`:
+Start your OpenAI-compatible endpoint and configure `.env` with its base URL:
 
 ```env
 TESTCODE_MODEL_BASE_URL=http://127.0.0.1:3000
@@ -127,7 +130,7 @@ Behavior:
 - If `TESTCODE_MODEL_BASE_URL` is set, `testcode` sends requests to `POST /v1/chat/completions`
 - `TESTCODE_MODEL_TIMEOUT` controls the model request timeout in seconds and defaults to 60
 - `TESTCODE_MODE` controls tool safety and defaults to `confirm`
-- The proxy in `/opt/repos/test` remains responsible for the real upstream base URL and API key
+- The configured endpoint remains responsible for its upstream credentials and provider-specific authentication
 - The real-model path now supports tool-call loops: the model can request built-in tools, receive tool results, and continue until it produces a final answer
 - Each run automatically writes observability logs under `.testcode/runs/<timestamp>/`, including `events.jsonl` and a layered `details.log`
 
@@ -149,10 +152,10 @@ Interactive conversations are saved under `.testcode/sessions/`. Use `--list` to
 
 If you prefer interactive selection, run `PYTHONPATH=src python3 -m testcode --resume` without an id and pick a numbered session from the list.
 
-For bash completion of `testcode` flags, source [`contrib/testcode-completion.bash`](/opt/repos/testcode/contrib/testcode-completion.bash):
+For bash completion of `testcode` flags, source [`contrib/testcode-completion.bash`](contrib/testcode-completion.bash) from the repository root:
 
 ```bash
-source /opt/repos/testcode/contrib/testcode-completion.bash
+source contrib/testcode-completion.bash
 ```
 
 ## Core Tools
@@ -164,10 +167,11 @@ codes, and workspace-bounded path handling:
 - `find_files`, `search_text`: bounded file and text search
 - `shell_exec`: execute a command in the workspace
 - `patch`: apply a validated unified diff in the workspace
+- `apply_change`: deprecated compatibility editing tool; new workflows should prefer `patch`
 - `run_tests`: execute a test command with captured output and duration
 - `git_status`, `git_diff`, `git_show`: read-only git inspection
 
-`apply_change` is deprecated and is not exposed to the model by default.
+Application composition currently registers `apply_change` for compatibility. It is deprecated and should not be used for new workflows.
 
 ### Shell 会话与中断
 
@@ -186,7 +190,7 @@ Concrete tool implementations live under `src/testcode/tools/builtins/`.
 Each built-in tool is described in its own module and exported through a
 `tool()` factory. Shared helpers for schema creation, workspace path resolution,
 process execution, and output clipping live in `src/testcode/tools/shared.py`.
-`src/testcode/tools/builtin.py` only assembles the default registry.
+`src/testcode/tools/builtin_provider.py` supplies built-ins to application composition. `src/testcode/tools/builtin.py` remains a legacy registry assembly helper.
 
 Risky tools such as `shell_exec` and `patch` require interactive approval in
 the default `confirm` mode before execution. In `readonly` mode only read tools

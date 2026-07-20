@@ -60,9 +60,9 @@ Using this single abstraction, we can cleanly isolate and implement different ro
    - Expands file globs/directories requested via `--context`.
    - Reads workspace-contained text files and bounded directory listings as candidate context.
    - Refuses out-of-workspace paths and binary files.
-4. **`SkillContextLoader`** (For P2: Skill System)
-   - Matches `request.prompt` using `SkillRegistry`.
-   - Adds active skill metadata and candidate guidance into session properties.
+4. **`SkillContextLoader`** (compatibility implementation)
+   - Supports trigger-based prompt matching in isolation and legacy tests.
+   - It is not registered by the current `create_app()` composition; the main Skill path uses `SkillToolboxSource` and capability activation.
 
 Context loaders should return or record enough source metadata for recovery and audit: path, run id, hash, truncation state, or artifact id. Complete raw content belongs in logs or cold archives and should be loaded into prompt only on demand.
 
@@ -101,7 +101,7 @@ class ExecutionEngine:
 
 ## 2. Tool Extension: `ToolProvider` Interface
 
-Currently, tools are hardcoded and loaded via `build_builtin_registry()`. To easily support **MCP (Model Context Protocol)** or other external toolsets, we introduce a `ToolProvider` interface.
+Built-in tools are supplied through `BuiltinToolProvider`. `build_builtin_registry()` remains as a compatibility assembly helper. The narrow `ToolProvider` interface is still useful for registration-ready local tools, while large external catalogs use the capability warehouse instead of registering every leaf eagerly.
 
 ### Interface Definition
 
@@ -121,13 +121,13 @@ This abstraction is intentionally narrow. A `ToolProvider` should not become the
 > 1. Project policy loaders, such as `ProjectRulesLoader`.
 > 2. Automatic workspace loaders, such as `WorkspaceSummaryLoader`.
 > 3. User-explicit parameter loaders, such as `ExplicitContextLoader`.
-> 4. Dynamic trigger-based loaders, such as `SkillContextLoader`.
+> 4. Optional dynamic loaders. Skill activation in the current application composition is handled by the capability warehouse rather than this loader stage.
 
 
 ### Implementations
 
 1. **`BuiltinToolProvider`**: Returns the standard file, search, git, and shell tools.
-2. **`MCPToolProvider`**: Reads tool descriptors from a dedicated MCP discovery service, adapts them into `testcode` tools, and returns them. It does not directly own transport selection, connection lifecycle, or resource indexing.
+2. **`MCPToolProvider`**: Compatibility path for direct registration from a discovery snapshot. Current application composition uses `MCPToolboxSource` so MCP leaves enter the registry only after activation.
 
 ### Integrating into the Registry
 
@@ -136,22 +136,25 @@ During application creation in `src/testcode/app.py`:
 ```python
 def create_app(mode: str | None = None) -> CLI:
     ...
-    # Load all providers
+    # Register only always-visible built-ins here.
     providers: list[ToolProvider] = [
         BuiltinToolProvider(logger),
-        MCPToolProvider(logger, config_path=...)
     ]
     
     tools = ToolRegistry(logger=logger)
     for provider in providers:
         for tool in provider.get_tools():
             tools.register(tool)
+
+    # MCP and Skill catalogs are attached to CapabilityWarehouse sources;
+    # selected leaves are registered later by capability activation.
     ...
 ```
 
 Recommended internal layering for MCP:
 
-- `MCPToolProvider`: registration only
+- `MCPToolProvider`: compatibility registration path
+- `MCPToolboxSource`: current catalog, manifest, and activation path
 - `MCPDiscoveryService`: lazy refresh, cached tool/resource descriptors, provider-facing snapshot API
 - `MCPManager`: shared server lifecycle and client cache
 - `MCPClient`: per-server protocol operations such as `initialize`, `tools/list`, and `tools/call`
@@ -185,14 +188,14 @@ Expected boundary:
 
 - `ResourceProvider` exposes metadata and fetch primitives only.
 - `ContextLoader` or a future resource-aware selector may choose which descriptors become candidate context.
-- `ContextPackager` still owns prompt budget, clipping, summaries, and omission markers.
+- A future `ContextPackager` will own prompt budget, clipping, summaries, and omission markers.
 - Full resource bodies remain outside the prompt until explicitly selected.
 
 ---
 
 ## 4. Advantages of This Design
 
-* **Decoupled Execution Loop**: [ExecutionEngine](orchestration/engine.py) does not need to know about files, markdown frontmatter, git branches, or MCP transport protocols. It only orchestrates prompt, tool execution, safety, and loop termination.
+* **Decoupled Execution Loop**: [ExecutionEngine](../src/testcode/orchestration/engine.py) does not need to know about files, markdown frontmatter, git branches, or MCP transport protocols. It only orchestrates prompt, tool execution, safety, and loop termination.
 * **Easy Testing**: Each `ContextLoader`, `ToolProvider`, `ResourceProvider`, MCP client, and adapter can be tested in isolation without running a full LLM session.
 * **Observe and Log**: We can log context loading events and MCP runtime events to keep trace logs structured and searchable.
 * **Prompt Discipline**: Extension hooks can add candidate context, but the context packaging layer applies the runtime budget and provides source references for omitted or summarized content.

@@ -11,7 +11,7 @@
 - MCP 和 Skill 为什么都是工具箱
 - 仓库目录、工具箱目录、完整 schema/指令如何逐层暴露
 - 激活、使用、回收和失败状态如何管理
-- 当前“provider 直接注册全部工具”的实现如何迁移
+- “provider 直接注册全部工具”的旧实现如何迁移
 
 相关文档：
 
@@ -44,9 +44,9 @@
 
 ## 1. 背景与问题
 
-当前实现把启用的 MCP server 当成普通 `ToolProvider`：每次执行前发现 server 内的全部工具，将它们注册到 `ToolRegistry`，再把所有工具名称、描述和参数 schema 发送给模型。
+能力仓库引入前，启用的 MCP server 曾被当成普通 `ToolProvider`：每次执行前发现 server 内的全部工具，将它们注册到 `ToolRegistry`，再把所有工具名称、描述和参数 schema 发送给模型。当前主链路已经迁移为本文件开头所述的工具箱目录、manifest 和显式激活模型。
 
-这种方式在只有少量工具时可工作，但无法支撑真实规模：
+这种旧方式在只有少量工具时可工作，但无法支撑真实规模；以下均描述迁移前的问题：
 
 - 配置 MCP 等于立即激活其全部工具。
 - MCP server 越多，模型请求中的 function schema 越大。
@@ -494,38 +494,13 @@ Skill script 的激活不代表允许执行；执行仍需走 policy 和 approva
 - 因高德失败而搜索当前项目源码。
 - 为路线查询注入 Git 状态、测试命令和目录树。
 
-## 17. 从当前实现迁移
+## 17. 当前实现边界
 
-### 阶段 1：分离仓库和注册表（已完成）
+当前主链路已经完成仓库与注册表分离，并支持 MCP 工具箱、Skill instructions、目录列举、manifest 打开、显式激活、释放、状态查询和 turn/run/session 范围回收。`ToolRegistry` 只承载核心工具与当前激活集。
 
-- 定义仓库条目、工具箱 manifest 和 activation record。
-- `ToolRegistry` 明确只承载核心与激活工具。
-- 保留现有 MCP transport/client/manager，不重写协议层。
+尚未完成的设计边界包括 Skill `references/`、`assets/`、`scripts/` 的独立索引和生命周期，以及 TTL/LRU 和基于健康度、风险、成本的候选排序。这些能力仍应遵守本文定义的渐进披露、预算、安全与原子激活契约。
 
-### 阶段 2：MCP 变成工具箱（已完成）
-
-- 配置加载只创建 MCP 外层条目。
-- 移除每次 `definitions()` 自动注册全部 MCP 工具的行为。
-- discovery 改为打开工具箱时按需触发。
-- 缓存保存 manifest 和分层状态。
-
-### 阶段 3：增加仓库工作台入口（已完成）
-
-- 增加目录列举、打开、激活、释放、状态查询能力。
-- engine 支持激活后重建下一轮模型 tool schema。
-- 为 activation set 增加数量和字符预算。
-
-### 阶段 4：Skill 统一迁移（instructions 已完成，其余资产待扩展）
-
-- Skill metadata 进入仓库外层目录。
-- instructions/references/assets/scripts 进入 Skill manifest。
-- 只激活当前步骤需要的 Skill 资产。
-
-### 阶段 5：回收与排序（范围回收已完成，TTL/LRU 与排序待实现）
-
-- 增加 turn/run/session scope。
-- 增加 TTL、LRU、固定与显式释放。
-- 使用成功率、健康状态、风险和成本优化候选排序。
+具体优先级和完成状态统一由 [演进路线图](build-roadmap.md) 维护，本文不再保留阶段式实施清单。
 
 ## 18. 验收标准
 

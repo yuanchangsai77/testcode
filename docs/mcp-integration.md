@@ -35,15 +35,14 @@ MCP 接入应满足以下目标：
 - 不修改 `ExecutionEngine` 的核心职责边界。
 - 不引入“外部 tool 特殊通道”；MCP tool 必须走同一套 tool registry、policy、approval、logger。
 - 让 transport、connection lifecycle、schema adaptation、resource indexing 解耦。
-- 第一阶段优先交付最小可用的 MCP tool 接入；resources/prompts 采用延后接入策略。
-- 后续支持多个 server、不同 transport、risk override、resource indexing 和更细粒度缓存，而不要求重写主流程。
+- 支持多个 server、三种 transport、risk override、懒 discovery 和 resource 按需读取，而不要求重写主流程。
+- resource 正文保持按需读取，后续再进入统一上下文选择和预算流程。
 
 ## 2. 非目标
 
-第一阶段不做以下内容：
+持续非目标：
 
 - 不把 MCP resources 全量注入 prompt。
-- 不在第一阶段同时实现所有 transport；先打稳统一抽象和 `stdio` 主路径。
 - 不让 MCP 绕过现有安全模型。
 - 不在 `ModelPromptBuilder` 中加入 MCP 专用分支逻辑。
 - 不把 server 进程管理和 tool adapter 写死在单一 provider 中。
@@ -105,7 +104,8 @@ MCP 协议交互负责：
 - 内部稳定 id 使用 `<tool_name_prefix>__<mcp_tool_name>`。
 - `tool_name_prefix` 默认等于 `server_name`，仅允许在配置中显式覆盖。
 - provider 注册阶段必须校验稳定 id 全局唯一；与内置 tool、其他 MCP tool 或同 server 重复时直接拒绝注册该 tool，并写入用户可见诊断与日志。
-- 日志和审批提示可以额外展示 `server_name`、原始 `tool_name` 和稳定 id，但模型看到和 runtime 执行的名称必须始终使用稳定 id。
+- 模型侧名称还要满足 function tool 契约：合法且不超过 64 字符的稳定 id 保持不变；否则将非法字符替换为 `_`，并追加由原始稳定 id 生成的短哈希。结果只允许 ASCII 字母、数字、下划线和短横线，且不超过 64 字符。
+- 模型使用规范化后的名称选择工具；实际 MCP 调用、风险覆盖、日志和审批仍以远端原始工具名为准，并同时保留稳定 id，避免规范化改变远端语义或造成静默覆盖。
 - 不允许在 prompt 层再引入一套临时别名，否则会破坏恢复、日志检索和 `risk_overrides` 的一致性。
 
 ### 4.4 渐进式接入
@@ -155,7 +155,7 @@ src/testcode/capabilities/
   - 不处理连接逻辑。
 - `transport.py`
   - 抽象消息收发。
-  - 第一阶段先实现 `stdio`，并预留 `streamable_http` 与 `sse` 的统一接口。
+  - 实现 `stdio`、`streamable_http` 与兼容旧版 HTTP+SSE 的 `sse` transport。
 - `client.py`
   - 面向单个 server 的 MCP 会话。
   - 负责 `initialize`、`tools/list`、`tools/call`、可选的 `resources/list` / `resources/read`。
@@ -447,6 +447,8 @@ tool_name_prefix = "amap"
 - 更轻量
 - 但生命周期更偏“流”，因此必须单独定义读取超时、断流重连和事件解析规则
 
+旧版 SSE 的 `endpoint` 事件属于明确的信任边界：只接受相对 URI，或与初始 SSE URL 同源的绝对 URI。scheme、host 或有效端口不同均视为跨源；解析失败或跨源时返回 `mcp_protocol_error`，且不得向目标发送 POST 或转发配置 headers。
+
 ## 9. Timeout、重连与可用性语义
 
 建议一开始就明确区分以下超时：
@@ -494,6 +496,8 @@ tool_name_prefix = "amap"
 - `list_resources()`
 - `read_resource()`
 
+初始化必须先完成协议版本协商。客户端维护显式支持集合，当前仅支持 `2025-03-26`；服务端遗漏版本或返回不支持版本时，关闭 transport 并返回 `mcp_protocol_error`，不得发送 `initialized` 通知。只有版本校验通过后，连接才进入可用状态。
+
 关键要求：
 
 - provider 和 adapter 不应直接感知 HTTP、SSE、stdio 的底层细节
@@ -509,7 +513,7 @@ tool_name_prefix = "amap"
 
 `<tool_name_prefix>__<mcp_tool_name>`
 
-显示给模型和日志时都使用该名称。
+该名称是内部稳定 id；模型侧使用满足 function tool 契约的确定性规范化名称。日志、审批、风险覆盖和远端调用保留原始 tool 名，并按需同时记录稳定 id 与模型侧名称，以便追踪映射关系。
 
 如生成后的名称冲突：
 
@@ -606,6 +610,7 @@ MCP 最大的工程风险不在 schema，而在连接和进程生命周期。
 - project MCP 配置、Skill 目录和 discovery cache 必须绑定请求或 resumed session 的 workspace，而不是启动命令所在目录。
 - 单个 server 默认最多发现 256 个 tools，可在 `limits.mcp_tools_per_server` 调整，内部硬上限为 1,024；超限项丢弃并记录诊断事件。resources 默认上限 1,000、descriptor 最大 100,000 字符，仍是内部防御边界。
 - transport 在 JSON 解析前将单条 HTTP、SSE 或 stdio 消息限制为 10 MiB，避免远端异常响应导致无界内存占用。
+- stdio stdout 或 SSE stream 若在非主动关闭时 EOF，transport 必须立即唤醒等待请求并返回 `mcp_transport_closed`；主动 `close()` 保持安静。manager 收到该错误后沿用一次性重连策略。
 
 连接状态不应散落在 provider 和单个 tool 实例里；应由 manager 集中管理。
 
@@ -619,17 +624,17 @@ manager 还应承担多 transport 共性治理：
 
 resources 应视为“按需上下文来源”，不是 tool 的附属输出，并应通过 `ResourceProvider` 进入统一扩展面。
 
-第一阶段建议：
+当前已实现：
 
-- 只做 `resources/list` 的索引与 metadata 收集
-- 由 `MCPResourceProvider` 暴露 descriptor 与按需读取能力
+- `resources/list` 的 descriptor 与 metadata 收集
+- 由 `MCPResourceProvider` 暴露 descriptor 和 `resources/read` 按需读取能力
+- 对 runtime 暴露 `mcp-resource://<encoded-server>/<encoded-resource-id>` 形式的稳定资源 ID，并在 descriptor metadata 中保留原始 URI；读取时由稳定 ID 定位服务器，再把原始 resource ID 发给对应服务器，避免不同服务器的同名资源互相覆盖
 - 不自动把 resource 正文注入 prompt
 - 不在 model tool schema 中直接暴露所有 resource
 
 后续阶段再做：
 
-- `MCPResourceIndexLoader` 或等价 `ContextLoader`
-- 按需 `resources/read`
+- resource-aware selector、`MCPResourceIndexLoader` 或等价 `ContextLoader`
 - 敏感内容检查
 - 预算裁剪
 - source reference 标记
@@ -747,44 +752,21 @@ URL 型 transport 还应对以下字段默认脱敏：
 - resource index 不直接进入 prompt
 - resource read 经由单独上下文路径接入
 
-## 18. 实施顺序
+## 18. 当前实现边界
 
-推荐按以下顺序落地：
+当前主链路支持三种 transport、协议 client、集中生命周期管理、懒 discovery 与缓存、一次性重连、tool/resource 适配、稳定命名、安全映射，以及通过 `MCPToolboxSource` 按需激活叶子工具。`MCPResourceProvider` 提供资源查询和读取入口。
 
-1. 定义 `mcp` 配置模型和内部类型
-2. 定义统一 transport 接口
-3. 实现 `stdio` transport
-4. 实现单 server client
-5. 实现 `MCPManager`
-6. 实现 MCP tool adapter
-7. 实现 `MCPToolProvider`
-8. 在 `app.py` 中装配 provider
-9. 补齐 policy、logger、tests
-10. 实现 `streamable_http`
-11. 实现 `sse`
-12. 后续再做 resource indexing
+`MCPToolProvider` 仅作为兼容性直接注册接口保留，不是 `create_app()` 的主要 MCP tool 装配路径。公网 server 兼容性、进一步的 capability traits，以及 resource context packaging 尚未完成，但必须继续遵守本文的 transport、协议、安全和生命周期契约。
 
-如果目标包含高德这类 URL 型 MCP，建议阶段拆得更细：
-
-1. P3.1a：统一配置模型与校验
-2. P3.1b：transport 接口与 `stdio`
-3. P3.2a：client/manager/provider/adapter 主链路
-4. P3.2b：`streamable_http`
-5. P3.2c：`sse`
-6. P3.3：resource indexing 与 context integration
-
-当前代码进度可对应到：
-
-- 已完成：三种 transport、真实 MCP 协议 client、manager/discovery/adapter/provider、tool/resource 主链路、稳定命名、冲突拒绝、缓存、一次性重连、专项事件和安全默认值
-- 待增强：真实公网 server 的兼容性矩阵、更丰富的 traits、resource candidate context 与统一 token 预算
+具体优先级和完成状态统一由 [演进路线图](build-roadmap.md) 维护，本文不再维护重复的落地步骤。
 
 ## 19. 结论
 
 对当前项目而言，正确的 MCP 方案不是“在 engine 里加对 MCP 的特殊判断”，而是：
 
-- 在 composition root 增加 provider
+- 在 composition root 增加 capability source 和 resource provider
 - 在 tool layer 增加 adapter
 - 在 runtime 内增加 manager/client/transport
 - 在 context layer 后续增加 resource indexing
 
-这条路线与当前仓库的模块化方向、可扩展性目标和复用现有安全/日志/模型工具链的原则一致，而且能把第一阶段复杂度控制在可验证的范围内。
+这条路线与当前仓库的模块化方向、可扩展性目标和复用现有安全、日志及模型工具链的原则一致；后续工作应集中在兼容性和 resource context，而不是重新引入全量工具注册路径。

@@ -4,6 +4,12 @@ This document provides a unified overview of the design decisions, TUI layout sp
 
 ---
 
+## Document Scope
+
+This document owns terminal interaction behavior: prompt editing, visual width, borders, status lines, selection input, resize redraw, and terminal compatibility limits. It does not define execution-engine flow, tool contracts, capability activation, or product priority; those belong to `docs/architecture.md`, `docs/tool-contract.md`, `docs/capability-warehouse.md`, and `docs/build-roadmap.md`.
+
+---
+
 ## 1. Design & TUI Layout
 
 ### Design Principles
@@ -11,6 +17,7 @@ This document provides a unified overview of the design decisions, TUI layout sp
 - **Environment & Mode Awareness**: Clear visibility into safety modes (`confirm`, `auto`, `readonly`) with distinct colors (yellow, magenta, green).
 - **Consolidated Progress**: Displays live progress (Model thinking spinner, tool executions, and user approvals) using elegant status symbols.
 - **Clean Input Sandboxing**: Inputs and confirmation dialogs are sandwiched between horizontal lines, with bottom status bars (`? for shortcuts`, `esc to cancel`) dynamically erased upon submission.
+- **TTY-aware Editing**: Interactive terminals use a cbreak-mode editor with UTF-8 input, cursor movement, deletion, visual wrapping, and resize handling. Redirected input keeps a plain-stream fallback.
 - **Status Bullets**: Tool logs use bullet points (`•`) with status color-coding (Green for success, Red for failure, Yellow for executing/skipped/requesting permission) instead of busy checkmarks.
 
 ### Visual Previews
@@ -30,8 +37,8 @@ This document provides a unified overview of the design decisions, TUI layout sp
  › System:      Python 3.14.4 (.venv) on Linux
 ─────────────────────────────────────────────────────────────────
  › Loaded Components:
-   • 4 Context Loaders
-   • 12 Tools
+   • 3 Context Loaders
+   • 17 Tools
    • 2 Skills
 ─────────────────────────────────────────────────────────────────
   Type "exit" or "quit" to end the session.
@@ -85,7 +92,7 @@ graph TD
   - `ExecutionEngine`: Controls the model client, policy checks, duplicate suppression, and tool execution.
   - `ProgressReporter`: Defines execution progress events without terminal concepts.
   - `ConsolePresenter`: Renders session state, summaries, approvals, and progress events.
-  - `PromptBox`: Owns readline-safe input frames and confirmation selection input.
+  - `PromptBox`: Owns TTY input editing, prompt frames, resize handling, and confirmation selection input.
   - `StatusBar`: Owns status line rendering and cleanup state.
   - `terminal.py`: Owns low-level terminal primitives such as ANSI constants, width detection, borders, and spinner behavior.
 - **Open/Closed Principle & Extensibility (OCP)**: A non-terminal UI can implement `ProgressReporter` without modifying `ExecutionEngine`. The current terminal UI adapts dynamically to terminal size via `os.get_terminal_size()`.
@@ -96,16 +103,43 @@ graph TD
 
 ## 3. Core Implementation Details
 
-### A. GNU Readline Multibyte & Backspace Fix
-To prevent backspace lag (needing to press backspace twice) or character display freezing, the project:
-1. Imports the standard `readline` module at CLI startup to handle terminal UTF-8 character length calculations.
-2. Moves the cursor up (`\033[3A\r`) *externally* before calling `input()`, rather than embedding cursor movements inside the prompt string, keeping Readline's internal redraw loop in sync.
-3. Wraps ANSI escape sequences in `\x01` and `\x02` readline ignore markers so that readline computes prompt column width correctly.
+### A. TTY Input Editor and Plain-Stream Fallback
 
-### B. Vertical Space Recovery
-When clearing running status bars (`esc to interrupted`), the presenter shifts the cursor down by `lines_up - 1` lines rather than the full `lines_up` lines. This dynamically reclaims the printed status bar newline, avoiding large vertical spacing gaps.
+On an interactive TTY, `PromptBox` switches stdin to cbreak mode and owns the editable value and cursor index. The editor supports:
 
-### C. Progress Reporting Boundary
+- UTF-8 characters read across multiple terminal bytes, including Chinese input;
+- Backspace, Ctrl-D deletion, left/right arrows, Home, and End;
+- Ctrl-C as `KeyboardInterrupt` and Ctrl-D on an empty value as `EOFError`;
+- complete escape-sequence consumption so mouse and unsupported control sequences do not leak into prompt text.
+
+When stdin or stdout is not a TTY, the code falls back to standard `input()`. ANSI prompt fragments in that fallback retain Readline ignore markers so visible prompt width remains correct where Readline is available.
+
+### B. Visual Width, Wrapping, and Frame Redraw
+
+Input wrapping is calculated before rendering instead of being delegated entirely to terminal autowrap:
+
+- East Asian full-width and wide characters count as two columns;
+- combining marks do not add a display column;
+- one terminal column is deliberately left unused to avoid pending-autowrap ambiguity;
+- the input frame expands by visual rows while keeping the cursor at the corresponding wrapped position.
+
+The live frame is rendered directly after the transcript. On each edit, the previous frame is cleared and redrawn with the current input, borders, and status line. Submitted input is then written back as a stable transcript block with both borders.
+
+### C. Resize Handling
+
+`PromptBox` installs a temporary `SIGWINCH` handler while reading input. Resize bursts are settled briefly before redraw, then the frame recomputes wrapping from the new terminal width. The renderer records the previous width and cursor row so it can account for old rows that reflowed after a shrink.
+
+This is a best-effort normal-screen implementation. See **Known Limitations** below for the remaining terminal-history constraint.
+
+### D. Confirmation Selection
+
+TTY confirmations accept arrow keys or `j`/`k`, direct numeric choices, `y`/`n`, Enter, Escape, and Ctrl-C. A renderer hook allows the selection frame to be replaced without coupling the execution engine to a specific terminal UI.
+
+### E. Vertical Space and Status-Line Recovery
+
+The bottom status line can be rendered without a trailing newline while an input frame is active. This is important when it occupies the last terminal row: emitting a newline there would scroll the whole screen once per keypress. Running-status cleanup separately reclaims its printed row without leaving growing vertical gaps.
+
+### F. Progress Reporting Boundary
 `ExecutionEngine` does not call terminal-specific methods directly. It emits lifecycle events through `ProgressReporter`:
 
 - `model_started` / `model_finished`
@@ -115,56 +149,46 @@ When clearing running status bars (`esc to interrupted`), the presenter shifts t
 
 `ConsolePresenter` implements this protocol by delegating to spinner and tool-line rendering methods. This keeps the orchestration layer usable in headless tests, alternate UIs, or future logging-only execution modes.
 
-### D. ANSI-Safe Borders
-Borders are generated from visible width first and then wrapped in ANSI color codes. This avoids truncating reset sequences on narrow terminals, which would otherwise leak color into later output.
+### G. ANSI-Safe Full-Width Lines
 
-### E. Input and Exception Semantics
+Borders are generated from visible width first and then wrapped in ANSI color codes. On a TTY, autowrap is temporarily disabled while a full-width border or status line is written, preventing the final column from leaving a pending wrap. Narrow status bars truncate their left and right labels instead of overflowing onto another row.
+
+### H. Input and Exception Semantics
 Ctrl-C and Ctrl-D retain distinct meanings in the prompt layer. Ctrl-C raises `KeyboardInterrupt`; Ctrl-D raises `EOFError` so the CLI can close the session through its EOF branch. Engine runtime state is also cleared on exceptional model/tool exits, preventing stale `current_session` data from leaking into later UI decisions.
 
 ---
 
-## 4. Code Modifications Inventory
+## 4. Known Limitations and Design Boundary
 
-- **CLI Interaction Layer**: `src/testcode/interaction/cli.py`
-  - Added support for loading the `readline` module.
-  - Delegated input prompting directly to `presenter.prompt_input`.
-  - Integrated graceful keyboard interrupt handling.
-- **Presenter Layer**: `src/testcode/interaction/presenter.py`
-  - Keeps the public presentation facade for CLI output, session state, approvals, and summaries.
-  - Implements the `ProgressReporter` protocol for model/tool lifecycle rendering.
-  - Replaced checkboxes with status-colored bullet points.
-  - Delegates prompt frames and status bar behavior to smaller interaction components.
-- **Terminal Input Layer**: `src/testcode/interaction/input.py`
-  - Adds `PromptBox` for readline-safe prompt and approval selection frames.
-  - Adds `StatusBar` for status line display and cleanup.
-  - Preserves distinct Ctrl-C and Ctrl-D control-flow semantics.
-- **Terminal Primitive Layer**: `src/testcode/interaction/terminal.py`
-  - Adds ANSI constants, terminal width detection, ANSI-safe colored borders, and spinner behavior.
-- **Orchestration Layer**: `src/testcode/orchestration/engine.py`
-  - Emits progress events through `ProgressReporter` instead of depending on `ConsolePresenter`.
-  - Stops progress handles without masking original tool execution exceptions.
-  - Finalizes progress handles using `is not None`, so falsy but valid handles are supported.
-  - Maintains `current_session` while a run is active so the CLI can report interruption state.
-  - Clears `current_session` on exceptional exits to avoid stale run state.
-- **Progress Protocol**: `src/testcode/orchestration/progress.py`
-  - Defines the optional progress sink used by the execution engine.
-- **Model Parsing Layer**: `src/testcode/model/parser.py`
-  - Fixed reply parsing to preserve paragraph newlines.
-- **Testing Layer**: `tests/test_console_presenter_output.py`, `tests/test_execution_engine_sessions_and_cli_runtime.py`
-  - Covers presenter rendering, status bars, spinners, readline-safe mocks, failed tool output formatting, ANSI-safe borders, progress-abort behavior, falsy progress handles, EOF preservation, and exceptional session cleanup.
+The current UI intentionally stays on the terminal's normal screen so native scrollback remains available. This creates one unresolved compatibility boundary:
+
+- a live full-width top border sits above the input cursor;
+- some terminals, especially during repeated shrink-and-grow operations, preserve intermediate reflowed border rows as history;
+- ANSI cursor movement can clear the visible frame but cannot reliably identify or rewrite rows that a terminal has already committed to scrollback.
+
+Resize debouncing and old-width row accounting reduce the occurrence but cannot guarantee removal across Windows Terminal, WSL, tmux, SSH clients, and other emulators.
+
+Two future designs can provide a strict guarantee:
+
+1. **Live single-bottom-border frame**: keep all mutable chrome at or below the cursor, then write both borders only after submission. This is the smallest robust change.
+2. **Full-screen or alternate-screen TUI**: keep a program-owned screen/history model and repaint from that model. This preserves the full live frame but requires program-managed scrolling and substantially more terminal state handling.
+
+The project should not keep adding terminal-specific cursor offsets to solve this limitation; a future fix should choose one of these structural designs.
 
 ---
 
-## 5. Verification
+## 5. Verification Contract
 
-Current verification command:
+TUI changes should keep regression coverage for:
+
+- TTY and plain-stream input paths;
+- UTF-8 decoding, cursor editing, visual-width wrapping, and narrow terminals;
+- resize row accounting and submitted-frame history;
+- approval selection, Ctrl-C, Ctrl-D, and exceptional session cleanup;
+- status-line fitting, progress completion/abort, and ANSI-safe full-width borders.
+
+Run the project test suite with:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest -q
-```
-
-Latest local result:
-
-```text
-135 passed
 ```

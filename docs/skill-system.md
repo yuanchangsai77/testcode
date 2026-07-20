@@ -1,4 +1,4 @@
-# testcode Skill System Specification & Implementation Plan
+# testcode Skill System Design
 
 ## Document Scope
 
@@ -18,13 +18,13 @@ It does not redefine the whole runtime architecture or generic extension model:
 
 Skill 在能力可见性上属于工具箱：默认只暴露 metadata 和简短描述，打开后展示 instructions/references/assets/scripts 索引，激活时才加载当前步骤需要的内容。该目标模型以 `docs/capability-warehouse.md` 为准；本文档继续负责 Skill 文件结构和箱内资产语义。
 
-This document outlines the architecture, data structures, and implementation plan for the **Skill System (P2)** in the `testcode` project, aligned with the goals specified in [docs/build-roadmap.md](build-roadmap.md).
+This document defines the Skill file format, discovery sources, toolbox contents, activation semantics, and current runtime boundary. Global priority and completion tracking remain in [docs/build-roadmap.md](build-roadmap.md).
 
 ---
 
 ## 1. Goal
 
-Introduce a Skill System to `testcode` that allows standard (built-in) and custom (project-scoped or user-global) skills to be discovered, loaded dynamically based on user prompts or commands, and injected into the model context to provide specialized workflows, instructions, or tools.
+Provide standard built-in and custom project/user Skills without loading every instruction body into every model request. The current application exposes Skill metadata through the capability warehouse; instructions enter model context only after explicit capability activation.
 
 Skill loading follows the same long-task context rule as the rest of the runtime: full skill files and referenced artifacts may exist on disk, but the prompt receives only active, task-relevant, budgeted guidance after context packaging. A skill is not a mechanism for bypassing context budgets.
 
@@ -70,17 +70,17 @@ Skills are discovered from three locations:
 
 ## 4. Architecture & Selection Flow
 
-The execution engine reads metadata during initialization and matches triggers dynamically. Active skill content then becomes candidate context; `ContextPackager` decides what budgeted skill guidance reaches the system prompt.
+Application composition scans lightweight metadata into `SkillRegistry`, then exposes each Skill through `SkillToolboxSource`. The model can inspect the capability catalog, open one Skill toolbox to see its instructions manifest, and activate that leaf. Activated Skill content is attached to `SessionContext` and rendered by `ModelPromptBuilder`; a separate budgeted `ContextPackager` remains planned.
 
 ```mermaid
 graph TD
     A[User Request] --> B[CLI / App Entry]
     B --> C[SkillRegistry: Scan Metadata]
-    C --> D[Identify Active Skills: Match prompt / explicit command]
-    D --> E[Load SKILL.md content for active skills]
-    E --> F[ContextPackager selects budgeted skill guidance]
-    F --> G[ModelPromptBuilder renders messages]
-    G --> H[Model request includes budgeted active skill instructions]
+    C --> D[Capability catalog exposes Skill metadata]
+    D --> E[Open Skill toolbox manifest]
+    E --> F[Activate instructions leaf]
+    F --> G[Load SKILL.md content]
+    G --> H[ModelPromptBuilder renders active guidance]
 ```
 
 ### Core Abstractions
@@ -128,26 +128,22 @@ class SkillRegistry:
 
 ---
 
-## 5. Runtime Modifications
+## 5. Runtime Integration
 
-To support dynamic skill injection, the following runtime components are modified:
+The active application path is:
 
 ### 1. Application Assembly (`src/testcode/app.py`)
 - Initialize the `SkillRegistry` with paths resolved dynamically.
-- Pass `SkillRegistry` to `ExecutionEngine` or `SkillContextLoader` (if utilizing the extensible [ContextLoader](runtime-extensibility.md) hook).
+- Wrap the registry in `SkillToolboxSource` and attach it to `CapabilityWarehouse`.
+- Keep `SkillContextLoader` available as a compatibility extension, but do not register it in the current `create_app()` context-loader list.
 
 ### 2. Execution Engine (`src/testcode/orchestration/engine.py`)
-- During `execute(request: UserRequest)`:
-  - Query `SkillRegistry.match_skills(request.prompt)` to locate matches.
-  - Merge matched skills with the existing `session.active_skills` to persist them throughout the multi-turn session. This prevents skills from being unloaded when later prompts do not contain trigger keywords.
-  - Store matched `Skill` objects in the `SessionContext` (e.g., as `session.active_skills`).
+- Restore persisted Skill capability ids and active Skill names at the start of a session run.
+- Apply activated Skill objects from `CapabilityWarehouse` to `SessionContext`.
+- Persist session-scoped active Skills into the execution summary for later turns.
 
-### 3. Context Packaging and Prompt Assembly
-- Before `ModelPromptBuilder.build_messages(session)`:
-  - `ContextPackager` reads `session.active_skills`.
-  - It converts active skill content into budgeted guidance with source references.
-- In `ModelPromptBuilder.build_messages(...)`:
-  - Render the packaged skill guidance into the system lines:
+### 3. Prompt Assembly
+- `ModelPromptBuilder.build_messages(session)` currently reads `session.active_skills` directly and renders active guidance into the system lines:
     ```markdown
     ### Active Skill Guidelines:
     
@@ -155,7 +151,7 @@ To support dynamic skill injection, the following runtime components are modifie
     When writing or running Python unit tests:
     - Prefer using `pytest` over standard `unittest` unless specified...
     ```
-  - If active skill content exceeds the prompt budget, `ContextPackager` keeps high-level workflow rules and source references, then omits or summarizes examples and long reference material.
+- A future `ContextPackager` will own Skill-specific budgets, source references, clipping, and summaries. This behavior is a target, not part of the current request path.
 
 ### 4. Skill References and Artifacts
 - `references/`, `assets/`, and `scripts/` must be indexed separately from prompt content.
@@ -165,12 +161,12 @@ To support dynamic skill injection, the following runtime components are modifie
 
 ---
 
-## 6. Logging & Observability Layer Adjustments
+## 6. Logging & Observability Contract
 
-To ensure that skill execution is transparent, the following additions are made to `InMemoryLogger`:
+Skill activation must remain observable through the following records:
 
-1. **New Event `skills.matched`**:
-   - Emitted during the initialization of the execution run.
+1. **Event `skills.matched`**:
+   - The compatibility trigger-matching path emits this event during run initialization.
    - Payload:
      ```json
      {
@@ -183,15 +179,15 @@ To ensure that skill execution is transparent, the following additions are made 
        ]
      }
      ```
-2. **Log Run Start Payload Modification**:
-   - Modify `run.start` payload to list all scanned/registered skills to debug trigger matching issues:
+2. **Run start payload**:
+   - `run.start` lists scanned/registered skills for discovery diagnostics:
      ```json
      {
        "registered_skills": ["python-unittest-helper", "git-helper"]
      }
      ```
-3. **Trace file (`details.log`) updates**:
-   - Update `_write_details_log` to list active skills in the overview section:
+3. **Trace file (`details.log`)**:
+   - The overview lists active skills:
      ```text
      Overview
      - run_id: 2026-06-23T14-53-32
@@ -201,29 +197,10 @@ To ensure that skill execution is transparent, the following additions are made 
 
 ---
 
-## 7. Implementation Status
+## 7. Current Boundary
 
-### Step 1: Create `src/testcode/skills/` module
-- [x] Create `src/testcode/skills/__init__.py`
-- [x] Create `src/testcode/skills/model.py` for representation.
-- [x] Create `src/testcode/skills/registry.py` for discovery, loading, and matching.
+The current runtime scans Skill metadata, exposes Skills through `SkillToolboxSource`, activates instructions through the capability warehouse, injects active instructions into model context, and restores session-scoped activations. Built-in `git-helper` and `pytest-helper` Skills exercise this path.
 
-### Step 2: Implement Metadata Parser
-- [x] A simple frontmatter parser extracts YAML blocks from `SKILL.md` using dependency-light parsing.
+`SkillContextLoader` trigger matching remains a compatibility path rather than the primary `create_app()` assembly. Standardized on-demand handling for `references/`, `assets/`, and `scripts`, plus budgeted source references and script approval semantics, is not yet complete.
 
-### Step 3: Integrate with App & CLI Loop
-- [x] Update `src/testcode/app.py` to initialize `SkillRegistry` and register `SkillContextLoader`.
-- [x] Scan for skills at engine startup and before runs.
-- [x] Before invoking the model, match the user request against the registry, merge with session-active skills, and store them.
-- [x] Update `src/testcode/model/prompt.py` to format and inject active skill instructions into the system prompt.
-
-### Step 4: Write Built-in Skills & Tests
-- [x] Create default built-in skills such as `git-helper` and `pytest-helper`.
-- [x] Add unit tests verifying:
-  - Skill metadata parsing.
-  - Skill auto-triggering on matching keyword/trigger.
-  - Explicit skill loading.
-  - Verified injection into system prompt.
-  - Persistence of matched skills across multiple conversation turns.
-- [ ] Add tests for budgeted injection and source references when skill content is too large.
-- [ ] Add tests for references/assets/scripts once those lifecycle rules are implemented.
+Implementation priority and completion status belong to [the build roadmap](build-roadmap.md); this document owns the Skill format and runtime contract.

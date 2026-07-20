@@ -14,6 +14,8 @@ MCP 服务器字段的 transport 语义仍以 [MCP 集成设计](mcp-integration
 1. `~/.testcode/config.toml`：用户全局默认值。
 2. `.testcode/config.toml`：当前项目覆盖同名配置。
 
+同名 MCP server 以项目条目整体替换全局条目，不做字段级合并。
+
 不要把密钥写入 TOML；MCP 的 URL、headers 和 env 字段可用 `${NAME}` 引用环境变量。
 
 ## 完整示例
@@ -76,3 +78,38 @@ TESTCODE_MODE=confirm
 ```
 
 `TESTCODE_MODE` 可选值为 `readonly`、`confirm`、`auto`。MCP 的敏感值应通过系统环境变量提供，例如 `AMAP_MCP_KEY`。
+
+## MCP server 字段
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `name` | 必填 | server 稳定名称，也是默认工具名前缀。 |
+| `description` | `""` | 外层工具箱用途描述；应说明何时打开该能力。 |
+| `capabilities` | `[]` | 外层目录标签，不等于已激活叶子能力。 |
+| `transport` | 必填 | `stdio`、`streamable_http` 或 `sse`。 |
+| `enabled` | `true` | 是否加入运行时配置。 |
+| `tool_name_prefix` | `name` | 模型侧稳定工具名前缀。 |
+| `risk_overrides` | `{}` | 按远端工具名覆盖风险等级。 |
+| `timeout` | `30` | 建连和普通请求超时秒数。 |
+| `read_timeout` | `300` | HTTP/SSE 长读取超时秒数。 |
+| `command` | `""` | `stdio` 必填命令。 |
+| `args` | `[]` | `stdio` 命令参数。 |
+| `env` | `{}` | `stdio` 子进程环境变量。 |
+| `url` | `""` | HTTP/SSE transport 必填 URL。 |
+| `headers` | `{}` | HTTP/SSE 请求头。 |
+
+`risk_overrides` 的值只能是 `read`、`write`、`execute`、`test`、`network`、`destructive` 或 `confirm`。transport 的协议行为、安全边界和生命周期仍以 [MCP 集成设计](mcp-integration.md) 为准。
+
+每个 server 还支持以下环境变量覆盖，其中 `<NAME>` 是 server name 转成大写并将非字母数字字符替换为下划线：
+
+```text
+TESTCODE_MCP_<NAME>_TRANSPORT
+TESTCODE_MCP_<NAME>_TOOL_NAME_PREFIX
+TESTCODE_MCP_<NAME>_COMMAND
+TESTCODE_MCP_<NAME>_URL
+TESTCODE_MCP_<NAME>_TIMEOUT
+TESTCODE_MCP_<NAME>_READ_TIMEOUT
+TESTCODE_MCP_<NAME>_ENABLED
+```
+
+headers、env、args 和 `risk_overrides` 不提供同名环境变量整体覆盖；其中的字符串值可以使用 `${VAR}` 展开敏感信息。

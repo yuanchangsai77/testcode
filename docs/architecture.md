@@ -22,7 +22,7 @@
 
 - receive user intent from the command line
 - collect execution context from the local environment
-- package only the task-relevant, budgeted context for an LLM
+- assemble task-relevant context for an LLM, with budgeted packaging as the target boundary
 - convert model output into executable actions
 - execute actions through controlled tools
 - expose progress, logs, and results back to the user
@@ -47,7 +47,7 @@ Current source layout:
 src/testcode/
   app.py             application composition and CLI argument dispatch
   config.py          .env loading and runtime configuration
-  context/           project rules, workspace summaries, explicit context loaders, and prompt packaging
+  context/           project rules, workspace summaries, and explicit context loaders
   interaction/       CLI input/output and presentation
   orchestration/     session context, progress protocol, and model/tool execution loop
   model/             provider client, prompt builder, reply parser, model types
@@ -143,20 +143,20 @@ Context structure:
 
 The orchestration layer treats these as ordinary `ContextLoader` implementations. It does not know how rules, summaries, or explicit files are discovered.
 
-Long-running tasks use a three-tier memory model:
+The target long-task design uses a three-tier memory model:
 
 - Hot context: the current goal, phase, next action, recent failures, relevant file state, and latest verification result.
 - Warm summary: compressed history of decisions, completed work, investigated paths, and resolved errors.
 - Cold archive: full events, tool outputs, patches, test logs, and read-state records stored on disk and referenced by id, path, hash, or run id.
 
-Prompt construction consumes hot context and warm summaries by default. Cold archive content is loaded only on demand.
+When that packaging layer is implemented, prompt construction should consume hot context and warm summaries by default, while cold archive content is loaded only on demand.
 
 Packaging boundaries:
 
-- `SessionStore` persists complete conversation metadata and references to checkpoint/archive facts. A future checkpoint/archive store should hold full tool history, artifacts, read-state hashes, and recovery summaries.
+- `SessionStore` currently persists conversation/session metadata. A future checkpoint/archive store should hold full tool history, artifacts, read-state hashes, recovery summaries, and stable references.
 - `ContextLoader` implementations discover candidate context and source metadata.
-- `ContextPackager` owns pre-injection pruning, prioritization, source references, and budget accounting.
-- `ModelPromptBuilder` renders the packaged context into provider messages.
+- A future `ContextPackager` will own pre-injection pruning, prioritization, source references, and budget accounting.
+- `ModelPromptBuilder` currently renders session context directly; after packaging is introduced it should render the packaged result.
 
 The first `ContextPackager` implementation can be deliberately simple: pass through existing context with stable grouping, source labels, and character counts. More aggressive pruning and summarization should be added behind the same interface.
 
@@ -207,7 +207,8 @@ Core files:
 
 - `src/testcode/tools/base.py`
 - `src/testcode/tools/registry.py`
-- `src/testcode/tools/builtin.py`
+- `src/testcode/tools/builtin_provider.py`
+- `src/testcode/tools/builtin.py` (legacy registry assembly helper)
 - `src/testcode/tools/shared.py`
 - `src/testcode/tools/builtins/`
 
@@ -216,7 +217,8 @@ Tool structure:
 - `base.py` defines the common tool protocol, `SimpleTool`, and `ToolContext`.
 - `registry.py` owns registration, default tool exposure, schema validation, and normalized result logging.
 - `shared.py` contains reusable helpers for JSON-style schemas, workspace path resolution, subprocess execution, output clipping, and result retargeting.
-- `builtin.py` assembles the default registry only.
+- `builtin_provider.py` supplies built-in tools to the application composition root.
+- `builtin.py` remains a compatibility helper that assembles a standalone registry.
 - `builtins/<tool>.py` contains one concrete tool per file. Each module exports a `tool()` factory and keeps the tool's `run()` implementation local.
 
 Built-in tools:
@@ -226,8 +228,9 @@ Built-in tools:
 - `shell_exec`, `run_tests`
 - `git_status`, `git_diff`, `git_show`
 - `patch`
+- `apply_change` (deprecated compatibility tool; prefer `patch`)
 
-`apply_change` remains available internally as a deprecated tool, but it is not exposed in the default tool list.
+`apply_change` remains registered by the current built-in provider for compatibility, but new workflows should use `patch`.
 
 This section describes where tool execution lives. Field-level placement rules for `ToolResult.output`, `metadata`, summarizers, and prompt visibility belong to `docs/tool-contract.md`.
 
@@ -285,7 +288,7 @@ Configuration structure:
 Persistence structure:
 
 - `SessionStore` writes JSON files under `.testcode/sessions/`.
-- Stored sessions currently include cwd, timestamps, status, messages, run ids, and active skill names.
+- Stored sessions currently include cwd, timestamps, status, messages, run ids, active Skill/capability ids, bounded trace records, and derived resume state.
 - Future checkpoint/archive records should store task state, summaries, archive references, full tool history, read-state hashes, and latest verification status.
 - Corrupt session files are skipped when listing sessions.
 
@@ -295,21 +298,20 @@ Persistence structure:
 2. `app.py` loads configuration, wires the runtime objects, and chooses the requested CLI mode.
 3. The interaction layer creates a `UserRequest`.
 4. The orchestration layer creates a `SessionContext` with available tool definitions and prior conversation metadata.
-5. Registered context loaders add candidate project rules, relevant workspace summaries, explicit context, active skill guidance, and source metadata to the session. Non-project external or general-knowledge requests skip the workspace tree, Git status, and test signals unless explicitly enabled.
-6. `ContextPackager` builds a budgeted `PromptContextPackage` from session state, checkpoint/archive references, and candidate context.
-7. `ModelPromptBuilder` renders the packaged context into provider messages.
-8. `OpenAICompatibleModelClient` invokes the provider, or `StubModelClient` is used when no model base URL is configured.
-9. `ModelReplyParser` normalizes the provider response into either:
+5. Registered context loaders add candidate project rules, relevant workspace summaries, explicit context, and source metadata to the session. The capability warehouse restores explicitly active Skill guidance and tool capabilities. Non-project external or general-knowledge requests skip the workspace tree, Git status, and test signals unless explicitly enabled.
+6. `ModelPromptBuilder` currently renders session context directly into provider messages. A separate budgeted `ContextPackager` remains a planned boundary, not an active runtime stage.
+7. `OpenAICompatibleModelClient` invokes the provider, or `StubModelClient` is used when no model base URL is configured.
+8. `ModelReplyParser` normalizes the provider response into either:
    - a final answer
    - one or more tool actions
-10. Each requested tool action is checked by the safety layer.
-11. If an action needs approval, the CLI asks the user before execution.
-12. Allowed or approved actions are executed by the tool layer.
-13. Tool results are logged by the observability layer and added back into session state.
-14. Successful duplicate tool actions in the same run are skipped to avoid repeated side effects.
-15. The orchestration loop continues until a final answer is produced or a stop condition is reached.
-16. The interaction layer renders the answer and execution summary.
-17. In chat mode, `SessionStore` persists the updated conversation and last run id.
+9. Each requested tool action is checked by the safety layer.
+10. If an action needs approval, the CLI asks the user before execution.
+11. Allowed or approved actions are executed by the tool layer.
+12. Tool results are logged by the observability layer and added back into session state.
+13. Successful duplicate tool actions in the same run are skipped to avoid repeated side effects.
+14. The orchestration loop continues until a final answer is produced or a stop condition is reached.
+15. The interaction layer renders the answer and execution summary.
+16. In chat mode, `SessionStore` persists the updated conversation and last run id.
 
 ## 5. Repository Scaffold Decision
 
@@ -325,11 +327,8 @@ The code is intentionally minimal. It establishes the system boundaries and the 
 
 - additional model providers behind `ModelClient`
 - more robust prompt budgeting, checkpoint recovery, and context assembly
-- reliable edit workflow with read-before-patch, hash checks, diff preview, and test feedback
-- approval workflows for destructive tools
 - richer terminal UI with streaming updates
-- additional context loaders behind the unified `ContextLoader` hook, including rules, workspace summaries, explicit user context, and skills (see [docs/runtime-extensibility.md](runtime-extensibility.md))
-- a unified capability warehouse with toolbox manifests, progressive disclosure, bounded activation sets, and release policies (see [docs/capability-warehouse.md](capability-warehouse.md))
-- MCP-backed external tool discovery (via the unified `ToolProvider` extensibility hook, see [docs/runtime-extensibility.md](runtime-extensibility.md))
-- layered MCP integration through provider/manager/client/transport boundaries, so external tools reuse the same registry, policy, approval, and observability path as built-ins (see [docs/mcp-integration.md](mcp-integration.md))
+- resource-aware context selection and budgeted packaging
+- additional capability warehouse sources, Skill assets, and automatic TTL/LRU release policies (see [docs/capability-warehouse.md](capability-warehouse.md))
+- broader MCP server compatibility and resource context integration (see [docs/mcp-integration.md](mcp-integration.md))
 - local subagents, team workflows, and remote A2A agents
