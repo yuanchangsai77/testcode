@@ -382,9 +382,13 @@ class TUIConsolePresenter(ConsolePresenter):
         self._cwd = request.cwd
         lines = self.prompt_box.wrap_prompt_value(request.prompt)
         prompt = f" {Ansi.CYAN}testcode>{Ansi.RESET}"
-        self._print(f"{prompt} {lines[0]}")
+        background = "\033[48;5;236m"
+        blank = f"{background}\033[K{Ansi.RESET}"
+        self._print(blank)
+        self._print(f"{background}{prompt}{background} {lines[0]}\033[K{Ansi.RESET}")
         for line in lines[1:]:
-            self._print(f"  {line}")
+            self._print(f"{background}  {line}\033[K{Ansi.RESET}")
+        self._print(blank)
         self._print()
 
     def prompt_input(self, engine=None) -> str:
@@ -743,6 +747,7 @@ class TUIConsolePresenter(ConsolePresenter):
 
     def _flush_tool_transcript(self) -> None:
         state = self.controller.snapshot()
+        flushed_any = False
         for tool in state.tools:
             if tool.tool_id in self._flushed_tool_ids:
                 continue
@@ -755,6 +760,9 @@ class TUIConsolePresenter(ConsolePresenter):
             }[tool.status]
             self._print(self.renderer.ansi_row(style, f" • {tool.name} → {tool.summary}"))
             self._flushed_tool_ids.add(tool.tool_id)
+            flushed_any = True
+        if flushed_any:
+            self._print()
 
     def _publish(self, event: TUIEvent) -> None:
         self.controller.publish(event)
