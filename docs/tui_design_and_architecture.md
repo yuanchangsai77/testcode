@@ -63,7 +63,7 @@
  ? for shortcuts                                      model
 ```
 
-输入区有上下留白和灰色背景。内容按 Unicode 显示宽度折行，最多显示三行；模型状态位于输入框下方。
+输入区有上下留白和灰色背景。内容按 Unicode 显示宽度折行，最多显示 6 行；模型状态位于输入框下方。系统最终输出通过 `rich.markdown` 进行漂亮的终端 Markdown 格式化渲染。
 
 ### 运行中
 
@@ -100,6 +100,7 @@ flowchart LR
     QUEUE --> REDUCER[TUI State Reducer]
     REDUCER --> RENDERER[Width-bounded Renderer]
     RENDERER --> SURFACE[Inline Terminal Surface]
+    RENDERER --> RICH[Rich Markdown Renderer]
     SURFACE --> TAIL[Transient Bottom Tail]
     ENGINE --> STABLE[Committed Output]
     STABLE --> SCROLLBACK[Native Scrollback]
@@ -112,7 +113,7 @@ flowchart LR
 - `ComposerState`：维护文本、光标和会话内输入历史。
 - `InlineTerminalSurface`：唯一负责瞬态尾部的清理、底部锚定和光标定位。
 - `TUIConsolePresenter`：把 engine 回调转换为事件，协调输入、渲染和稳定内容提交。
-- `ConsolePresenter`：非 TTY 和兼容路径。
+- `ConsolePresenter`：非 TTY 和兼容路径，负责最终 Markdown 格式化呈现。
 
 ## 4. 输入语义
 
@@ -125,7 +126,7 @@ flowchart LR
 - Alt+Enter 插入换行，Enter 提交；
 - 空输入时 Ctrl-D 结束会话；
 - 运行时 Esc/Ctrl-C 请求中断；
-- 审批时方向键选择，Enter 确认，`y`/`n` 直接决定。
+- 审批时 `Yes` 与 `No` 垂直排版，支持上下方向键或 `y`/`n` 选择，Enter 确认，Esc 拒绝（底部配有灰色 `↑/↓ to select · enter to confirm · esc to deny` 提示）。
 
 终端设置由输入上下文保存并在正常结束、异常、中断时恢复。运行期间只有一个输入线程读取 stdin，不会再出现 Spinner、审批器和输入框争抢输入的问题。
 

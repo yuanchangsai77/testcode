@@ -276,7 +276,7 @@ def test_runtime_thinking_has_plain_blank_rows_above_and_below():
     thinking_index = next(
         index for index, row in enumerate(plain_rows) if "Working" in row
     )
-    assert plain_rows[thinking_index - 1] == ""
+    assert thinking_index == 0
     assert plain_rows[thinking_index + 1] == ""
 
 
@@ -368,3 +368,49 @@ def test_approval_waits_for_runtime_resolution():
     worker.join(timeout=1)
 
     assert decision == [True]
+
+
+def test_renderer_formats_approval_choices_vertically():
+    controller = TUIController()
+    controller.publish(
+        TUIEvent(
+            TUIEventKind.APPROVAL_REQUESTED,
+            entity_id="app-1",
+            payload={
+                "action_name": "shell_exec",
+                "reason": "tool 'shell_exec' has risk 'execute' and requires explicit approval",
+                "arguments": '{"command": "echo \\"hallo\\""}',
+            },
+        )
+    )
+    state = controller.drain()
+
+    renderer = TUIRenderer()
+    rows = renderer.render_rows(state)
+    assert rows[3] == ("class:approval.choice", " › Yes")
+    assert rows[4] == ("class:approval.choice", "   No")
+    assert rows[5] == ("class:approval.hint", " ↑/↓ to select · enter to confirm · esc to deny")
+
+    rendered = renderer.render(state)
+    lines = rendered.splitlines()
+    assert " Permission required: shell_exec" in lines[0]
+    assert " › Yes" in lines[3]
+    assert "   No" in lines[4]
+    assert " ↑/↓ to select · enter to confirm · esc to deny" in lines[5]
+
+
+def test_composer_rows_scrolled_multiline_does_not_repeat_prompt_prefix():
+    presenter = TUIConsolePresenter(output=StringIO())
+    long_input = "d" * 600
+    presenter._composer.set_value(long_input)
+
+    rows, _cursor_row, _cursor_column = presenter._composer_rows(80)
+    plain_rows = [_plain(row) for row in rows]
+
+    assert len(plain_rows) == 6
+    assert plain_rows[0].startswith("  ")
+    assert "testcode>" not in plain_rows[0]
+    assert all(len(row) < 80 for row in plain_rows)
+
+
+

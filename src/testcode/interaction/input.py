@@ -363,7 +363,7 @@ class PromptBox:
         prompt = " \033[1;36mtestcode>\033[0m "
         sys.stdout.write(f"{prompt}{lines[0]}")
         for line in lines[1:]:
-            sys.stdout.write(f"\n{line}")
+            sys.stdout.write(f"\n  {line}")
         sys.stdout.write("\n")
         self.show_border()
         sys.stdout.write(self.status_bar.render_line(engine=engine, is_running=False))
@@ -371,6 +371,8 @@ class PromptBox:
         cursor_column = self._display_width(cursor_lines[-1])
         if cursor_row == 0:
             cursor_column += self._display_width(" testcode> ")
+        else:
+            cursor_column += 2
         rows_up = len(lines) + 1 - cursor_row
         sys.stdout.write("\r")
         if rows_up:
@@ -390,29 +392,32 @@ class PromptBox:
         self.show_border()
         sys.stdout.write(f"{prompt}{lines[0]}")
         for line in lines[1:]:
-            sys.stdout.write(f"\n{line}")
+            sys.stdout.write(f"\n  {line}")
         sys.stdout.write("\n")
         self.show_border()
         sys.stdout.flush()
 
     def _wrap_prompt_value(self, value: str, columns: int | None = None) -> list[str]:
         columns = max(columns if columns is not None else terminal_columns(), 1)
-        # Keep one column unused: many terminals defer wrapping until the next
-        # character after the final column, which would desynchronise a redraw.
         first_width = max(columns - self._display_width(" testcode> ") - 1, 1)
+        subsequent_width = max(columns - 3, 1)
         lines: list[str] = [""]
         remaining = first_width
 
         for char in value:
+            if char == "\n":
+                lines.append("")
+                remaining = subsequent_width
+                continue
             width = max(self._display_width(char), 1)
             if width > remaining and lines[-1]:
                 lines.append("")
-                remaining = max(columns - 1, 1)
+                remaining = subsequent_width
             lines[-1] += char
             remaining -= width
             if remaining <= 0:
                 lines.append("")
-                remaining = max(columns - 1, 1)
+                remaining = subsequent_width
 
         return lines[:-1] if len(lines) > 1 and not lines[-1] else lines
 

@@ -73,6 +73,7 @@ class TUIRenderer:
         "class:approval.title": f"{Ansi.YELLOW}{Ansi.BOLD}",
         "class:approval": "",
         "class:approval.choice": f"{Ansi.BOLD}",
+        "class:approval.hint": f"{Ansi.GRAY}",
     }
 
     def render(self, state: TUIState, *, now: float | None = None) -> str:
@@ -114,11 +115,15 @@ class TUIRenderer:
                 rows.append(("class:approval", self._fit(f" {approval.arguments}", width)))
             yes = "› Yes" if approval.selected == 0 else "  Yes"
             no = "› No" if approval.selected == 1 else "  No"
-            rows.append(
-                (
-                    "class:approval.choice",
-                    self._fit(f" {yes}    {no}    enter to confirm · esc to deny", width),
-                )
+            rows.extend(
+                [
+                    ("class:approval.choice", self._fit(f" {yes}", width)),
+                    ("class:approval.choice", self._fit(f" {no}", width)),
+                    (
+                        "class:approval.hint",
+                        self._fit(" ↑/↓ to select · enter to confirm · esc to deny", width),
+                    ),
+                ]
             )
             return rows
 
@@ -375,7 +380,12 @@ class TUIConsolePresenter(ConsolePresenter):
     def show_start(self, request) -> None:
         self._pending_prompt = request.prompt
         self._cwd = request.cwd
-        self._print(f" {Ansi.CYAN}testcode>{Ansi.RESET} {request.prompt}")
+        lines = self.prompt_box.wrap_prompt_value(request.prompt)
+        prompt = f" {Ansi.CYAN}testcode>{Ansi.RESET}"
+        self._print(f"{prompt} {lines[0]}")
+        for line in lines[1:]:
+            self._print(f"  {line}")
+        self._print()
 
     def prompt_input(self, engine=None) -> str:
         self._show_worked_separator()
@@ -659,30 +669,34 @@ class TUIConsolePresenter(ConsolePresenter):
         blank = f"\033[48;5;236m\033[K{Ansi.RESET}"
         runtime = self.renderer.runtime_row(state)
         metadata = "" if runtime is None else self.renderer.ansi_row(*runtime)
-        rows = ["", *activity, "", blank, *composer_rows, blank, metadata]
+        rows = [*activity, "", blank, *composer_rows, blank, metadata]
         return (
             rows,
-            len(activity) + 3 + cursor_row,
+            len(activity) + 2 + cursor_row,
             cursor_column,
         )
 
     def _composer_rows(self, columns: int) -> tuple[list[str], int, int]:
         prompt = " testcode> "
-        plain_lines, cursor_row, cursor_column = self._wrap_composer(columns)
+        plain_lines, cursor_row, cursor_column, start = self._wrap_composer(columns)
         rows: list[str] = []
         background = "\033[48;5;236m"
         for index, line in enumerate(plain_lines):
+            real_index = start + index
             prefix = (
                 f"{Ansi.CYAN}{prompt}{Ansi.RESET}{background}"
-                if index == 0
+                if real_index == 0
                 else "  "
             )
             rows.append(f"{background}{prefix}{line}\033[K{Ansi.RESET}")
-        if cursor_row == 0:
+        real_cursor_row = start + cursor_row
+        if real_cursor_row == 0:
             cursor_column += _display_width(prompt)
+        else:
+            cursor_column += 2
         return rows, cursor_row, cursor_column
 
-    def _wrap_composer(self, columns: int) -> tuple[list[str], int, int]:
+    def _wrap_composer(self, columns: int) -> tuple[list[str], int, int, int]:
         columns = max(columns, 2)
         prompt_width = _display_width(" testcode> ")
         lines = [""]
@@ -709,11 +723,13 @@ class TUIConsolePresenter(ConsolePresenter):
             positions.append((row, used))
         cursor_index = min(self._composer.cursor, len(positions) - 1)
         cursor_row, cursor_column = positions[cursor_index]
-        if len(lines) > 3:
-            start = max(min(cursor_row - 2, len(lines) - 3), 0)
-            lines = lines[start : start + 3]
+        start = 0
+        max_rows = 6
+        if len(lines) > max_rows:
+            start = max(min(cursor_row - (max_rows - 1), len(lines) - max_rows), 0)
+            lines = lines[start : start + max_rows]
             cursor_row -= start
-        return lines, cursor_row, cursor_column
+        return lines, cursor_row, cursor_column, start
 
     def _show_worked_separator(self) -> None:
         if self._pending_worked_seconds is None:

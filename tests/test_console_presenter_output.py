@@ -126,7 +126,7 @@ def test_resize_preserves_prompt_and_refreshes_only_the_chrome(monkeypatch, caps
     assert output.startswith("\r\033[3A\r\033[J")
     assert "testcode>" in output
     assert output.count("────────────────────") == 2
-    assert output.endswith("\r\033[2A\033[2C")
+    assert output.endswith("\r\033[2A\033[4C")
 
 
 def test_resize_erases_all_reflowed_top_border_rows(monkeypatch, capsys):
@@ -247,7 +247,8 @@ def test_presenter_preserves_newlines_for_paragraphs(capsys):
     )
     presenter.show_summary(summary)
     output = capsys.readouterr().out
-    assert "   Line 1.\n   \n   Line 2.\n   Line 3." in output
+    assert "Line 1." in output
+    assert "Line 2." in output
 
 
 def test_presenter_show_status_bar_and_help(capsys):

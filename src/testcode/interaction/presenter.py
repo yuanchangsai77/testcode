@@ -40,8 +40,17 @@ class ConsolePresenter:
             self._print(f"{GRAY}{indented_thinking}{RESET}")
             
         response_text = self._display_text(summary.final_message)
-        indented_response = "\n".join(f"   {line}" for line in response_text.splitlines())
-        self._print(f"\n{indented_response}\n")
+        try:
+            from rich.console import Console
+            from rich.markdown import Markdown
+
+            console = Console(file=getattr(self, "_output", sys.stdout))
+            self._print()
+            console.print(Markdown(response_text))
+            self._print()
+        except ImportError:
+            indented_response = "\n".join(f"   {line}" for line in response_text.splitlines())
+            self._print(f"\n{indented_response}\n")
 
     def _summarize_tool_result(self, result: ToolResult) -> str:
         if self.tool_result_summarizer is not None:
