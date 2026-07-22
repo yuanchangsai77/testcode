@@ -19,11 +19,13 @@ class ConsolePresenter:
         self.prompt_box = PromptBox(self.status_bar)
 
     def _print(self, value: str = "") -> None:
-        print(value)
+        print(value, file=getattr(self, "_output", sys.stdout))
 
     def _print_many(self, values: list[str]) -> None:
+        out = getattr(self, "_output", sys.stdout)
         for value in values:
-            print(value)
+            print(value, file=out)
+
 
     def show_start(self, request: UserRequest) -> None:
         pass
@@ -242,8 +244,37 @@ class ConsolePresenter:
             self._print(f"  cwd: {session.cwd}")
             self._print(f"  preview: {preview}")
 
-    def show_thinking_start(self) -> Spinner:
-        spinner = Spinner(message="Model is thinking...", interruptible=True)
+    def show_session_history(self, messages: list[dict[str, str]]) -> None:
+        if not messages:
+            return
+
+        GRAY = "\033[90m"
+        RESET = "\033[0m"
+        CYAN = "\033[1;36m"
+        BOLD = "\033[1m"
+
+        self._print(f"\n{GRAY}─── Historical Conversation History ───────────────────{RESET}")
+
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if not content:
+                continue
+
+            if role == "user":
+                self._print(f"\n {CYAN}testcode>{RESET} {content}")
+            elif role == "assistant":
+                self.show_summary(ExecutionSummary(final_message=content, tool_results=[]))
+            elif role == "system":
+                self._print(f"\n {GRAY}[System Context Summary]{RESET}")
+                indented = "\n".join(f"   {line}" for line in content.splitlines())
+                self._print(f"{GRAY}{indented}{RESET}\n")
+
+        self._print(f"{GRAY}───────────────────────────────────────────────────────{RESET}\n")
+
+
+    def show_thinking_start(self, message: str = "Model is thinking...") -> Spinner:
+        spinner = Spinner(message=message, interruptible=True)
         spinner.start()
         return spinner
 
@@ -251,8 +282,9 @@ class ConsolePresenter:
         spinner.stop()
         self.clear_running_status_bar(0)
 
-    def model_started(self) -> Spinner:
-        return self.show_thinking_start()
+    def model_started(self, message: str = "Model is thinking...") -> Spinner:
+        return self.show_thinking_start(message=message)
+
 
     def model_finished(self, handle: Spinner) -> None:
         self.show_thinking_end(handle)
@@ -341,18 +373,74 @@ class ConsolePresenter:
             left_override=left_override,
         )
 
-    def show_help(self) -> None:
+    def clear_screen(self) -> None:
+        sys.stdout.write("\033[H\033[2J\033[3J")
+        sys.stdout.flush()
+
+    def show_unknown_command(self, cmd: str) -> None:
+        RED = "\033[1;31m"
+        RESET = "\033[0m"
+        self._print(f"\n {RED}Unknown command: {cmd}{RESET}. Type /help for available commands.\n")
+
+    def show_context_reset(self) -> None:
+        GREEN = "\033[1;32m"
+        RESET = "\033[0m"
+        self._print(f"\n {GREEN}✓ Conversation context reset.{RESET} Starting a fresh conversation.\n")
+
+    def show_context_compacted(self, old_count: int, new_count: int) -> None:
+        GREEN = "\033[1;32m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+        self._print(f"\n {GREEN}✓ Conversation context compacted.{RESET} Reduced from {BOLD}{old_count}{RESET} to {BOLD}{new_count}{RESET} messages.\n")
+
+
+    def show_status(self, session=None, engine=None) -> None:
+        import os
+        CYAN = "\033[1;36m"
+        GREEN = "\033[1;32m"
+        YELLOW = "\033[1;33m"
+        GRAY = "\033[90m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+
+        session_id = getattr(session, "session_id", "active") if session else "N/A"
+        cwd = getattr(session, "cwd", None) or os.getcwd() if session else os.getcwd()
+        mode_val = "confirm"
+        if engine and hasattr(engine, "guardrails") and hasattr(engine.guardrails, "policy"):
+            mode_val = getattr(engine.guardrails.policy, "mode", "confirm")
+
+        model_name = getattr(getattr(engine, "model", None), "model", "StubModel")
+
+        self._print(f"\n{BOLD}Session Status & Environment:{RESET}")
+        self._print(f" {GRAY}›{RESET} {BOLD}Session ID:{RESET}  {YELLOW}{session_id}{RESET}")
+        self._print(f" {GRAY}›{RESET} {BOLD}Workspace:{RESET}   {cwd}")
+        self._print(f" {GRAY}›{RESET} {BOLD}Model:{RESET}       {CYAN}{model_name}{RESET}")
+        self._print(f" {GRAY}›{RESET} {BOLD}Safety Mode:{RESET} {GREEN}{mode_val}{RESET}\n")
+
+    def show_help(self, registry=None) -> None:
         CYAN = "\033[1;36m"
         BOLD = "\033[1m"
         RESET = "\033[0m"
         GRAY = "\033[90m"
-        
+
         self._print(f"\n{BOLD}testcode CLI Workbench Shortcuts & Commands:{RESET}")
-        self._print(f"  {CYAN}/help, ?{RESET}       Show this help message")
-        self._print(f"  {CYAN}/tasks{RESET}         List active background tasks")
-        self._print(f"  {CYAN}/skills{RESET}        List all scanned skills and metadata")
-        self._print(f"  {CYAN}/mode [mode]{RESET}  Show or change safety mode ({GRAY}readonly{RESET}/{GRAY}confirm{RESET}/{GRAY}auto{RESET})")
-        self._print(f"  {CYAN}exit, quit{RESET}     Exit the current workbench session\n")
+        if registry and hasattr(registry, "list_commands"):
+            cmds = registry.list_commands()
+            max_name_len = max(len(c.usage or c.name) for c in cmds)
+            for c in cmds:
+                label = c.usage if c.usage else c.name
+                self._print(f"  {CYAN}{label:<{max_name_len}}{RESET}  {c.description}")
+        else:
+            self._print(f"  {CYAN}/help, ?{RESET}       Show this help message")
+            self._print(f"  {CYAN}/clear{RESET}         Clear terminal screen")
+            self._print(f"  {CYAN}/status{RESET}        Show session and system status")
+            self._print(f"  {CYAN}/mode [mode]{RESET}  Show or change safety mode ({GRAY}readonly{RESET}/{GRAY}confirm{RESET}/{GRAY}auto{RESET})")
+            self._print(f"  {CYAN}/skills{RESET}        List all scanned skills and metadata")
+            self._print(f"  {CYAN}/tasks{RESET}         List active background tasks")
+            self._print(f"  {CYAN}/resume [id]{RESET}   List or resume saved sessions")
+            self._print(f"  {CYAN}exit, quit{RESET}     Exit the current workbench session")
+        self._print()
+
 
     def show_tasks(self) -> None:
         self._print("\nNo active background tasks running in this session.\n")

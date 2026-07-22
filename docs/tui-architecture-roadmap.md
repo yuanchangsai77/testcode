@@ -1,4 +1,4 @@
-# 完整 TUI 架构与演进方案
+# TUI 架构与演进路线图
 
 ## 状态
 
@@ -9,7 +9,8 @@
 - 统一 overlay 栈：待实施
 - 持久化输入历史与长任务 transcript 索引：待实施
 
-当前实现细节见 [TUI 设计与实现](tui_design_and_architecture.md)。
+当前实现细节与交互规范见 [TUI 交互设计规范](tui-design-spec.md)。
+
 
 ## 1. 架构决策
 

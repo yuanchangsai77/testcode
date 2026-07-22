@@ -91,10 +91,12 @@ Responsibilities:
 - render final answers and execution summaries
 - handle cancellations and user confirmations
 
-Core files:
+Core files & folders:
 
 - `src/testcode/interaction/cli.py`
 - `src/testcode/interaction/presenter.py`
+- `src/testcode/interaction/commands/` (decoupled slash command subsystem, including `base.py`, `session_cmds.py`, `sys_cmds.py`, and package factory)
+
 
 ### 3.2 Session Orchestration Layer
 

@@ -80,7 +80,9 @@ def reduce_tui_state(state: TUIState, event: TUIEvent) -> TUIState:
     elif event.kind in {TUIEventKind.RUN_FINISHED, TUIEventKind.RUN_FAILED}:
         next_state = replace(state, run_status=RunStatus.IDLE, model_status="", approval=None)
     elif event.kind == TUIEventKind.MODEL_STARTED:
-        next_state = replace(state, model_status="Model is thinking…")
+        msg = str(payload.get("message", "Model is thinking…"))
+        next_state = replace(state, model_status=msg)
+
     elif event.kind == TUIEventKind.MODEL_RETRYING:
         next_state = replace(state, model_status=str(payload.get("message", "Retrying…")))
     elif event.kind == TUIEventKind.MODEL_FINISHED:

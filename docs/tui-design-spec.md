@@ -1,4 +1,4 @@
-# testcode CLI TUI 设计与实现
+# testcode CLI TUI 交互设计规范
 
 ## 文档范围
 
@@ -64,6 +64,60 @@
 ```
 
 输入区有上下留白和灰色背景。内容按 Unicode 显示宽度折行，最多显示 6 行；模型状态位于输入框下方。系统最终输出通过 `rich.markdown` 进行漂亮的终端 Markdown 格式化渲染。
+
+### 斜杠命令自动补全 (Slash Command Autocomplete)
+
+当用户在输入框中输入 `/` 触发命令搜索前缀时，交互界面会在灰色输入框下方显示可选的命令列表与功能说明。为保证界面紧凑，自动补全面板最多同时显示 5 条候选命令，超出时支持窗口上下自动滚动：
+
+```text
+
+ testcode> /
+   Commands (12 total): (1-5 of 12)
+   › /clear    Clear terminal screen
+     /compact  Compact and summarize conversation context
+     /exit     Exit workbench session
+     /help     Show help message and shortcuts
+     /mode     Show or change safety mode
+   ▼ (7 more below)
+
+ ? for shortcuts                                      model
+```
+
+* **支持的常用指令**：
+  * `/help` (或 `?`)：查看帮助与指令列表
+  * `/clear`：清空终端屏幕历史（保持上下文记忆）
+  * `/reset` / `/new`：清空/重置大模型对话历史记忆，开启新对话
+  * `/compact`：主动压缩与总结历史对话上下文
+  * `/status`：查看当前 Session ID、工作区路径、安全模式与模型状态
+  * `/resume`：恢复或选择历史会话
+  * `/mode`, `/skills`, `/tasks`：查看/切换安全模式、Skill 技能列表、后台任务
+  * `/exit` / `/quit`：退出 Workbench 会话
+* **窗口滚动与导航**：使用 `↑` / `↓` 移动选中的项，选择超出当前可视区域（如从第 5 项移至第 6 项）时窗口自动滚动，并显示 `▲ (N more above)` / `▼ (N more below)` 提示。
+* **自动填充与提交**：按 `Tab` 填充当前选中的命令并加空格；再次按 `Enter`（或输入完整命令后回车）提交命令。
+* **取消/关闭**：按 `Esc` 键或删除 `/` 可关闭补全面板。
+
+
+### 历史会话选择 (Interactive Session Selector)
+
+当执行 `/resume` 且未指定具体会话 ID 时，交互界面会呈现一个双行的精品会话选择卡片窗口（固定可视窗口大小为 3）：
+
+```text
+Select a session to resume (use ↑/↓ keys, Enter to confirm, Esc to cancel):
+  ▲ (1 more sessions above)
+  › sess-f78a2d10 [active] (12 msgs) · 2026-07-22 09:30
+    Path: /home/changsai/project | Preview: "How to implement slash commands?"
+    sess-12a8b9c0 [closed] (2 msgs) · 2026-07-21 16:30
+    Path: /workspace | Preview: "(no messages yet)"
+  ▼ (2 more sessions below)
+```
+
+* **交互模式**：使用 `↑` / `↓` 键（或 `k` / `j` 键）垂直平滑切换，支持在超过 3 条记录时进行窗口滑动滚动，顶部 and 底部显示 `▲` / `▼` 滚动指示符。
+* **高亮展示**：当前选中的卡片会以高亮的 Cyan/Yellow 等配色凸显，其他非选中卡片显示为灰色以增加对比度。
+* **确认与退出**：按 `Enter` 键载入选中的历史会话；按 `Esc` 键或 `Ctrl+C` 取消选择，卡片界面会自动清除并保持终端干净。
+
+
+
+
 
 ### 运行中
 

@@ -184,25 +184,70 @@ class TUIRenderer:
         return "".join(kept) + "…"
 
 
+from .commands import SlashCommandRegistry, default_slash_command_registry
+
+
 @dataclass
 class ComposerState:
     value: str = ""
     cursor: int = 0
     history_index: int | None = None
     saved_value: str = ""
+    completion_index: int = 0
+    completion_dismissed: bool = False
+    command_registry: SlashCommandRegistry | None = None
 
     def set_value(self, value: str) -> None:
         self.value = value
         self.cursor = len(value)
         self.history_index = None
         self.saved_value = ""
+        self.completion_index = 0
+        self.completion_dismissed = False
 
     def insert(self, value: str) -> None:
         self.value = self.value[: self.cursor] + value + self.value[self.cursor :]
         self.cursor += len(value)
         self.history_index = None
+        self.completion_index = 0
+        self.completion_dismissed = False
+
+    def get_completion_matches(self) -> list[tuple[str, str]]:
+        if self.completion_dismissed or not self.value.startswith("/") or " " in self.value:
+            return []
+        registry = self.command_registry or default_slash_command_registry()
+        return registry.get_completions(self.value)
+
 
     def edit(self, key: str, history: list[str]) -> str | None:
+        matches = self.get_completion_matches()
+        if matches:
+            if self.completion_index >= len(matches):
+                self.completion_index = 0
+            if key in {"\x1b[A", "\x1bOA"}:
+                self.completion_index = (self.completion_index - 1) % len(matches)
+                return "changed"
+            if key in {"\x1b[B", "\x1bOB"}:
+                self.completion_index = (self.completion_index + 1) % len(matches)
+                return "changed"
+            if key == "\t":
+                selected_cmd = matches[self.completion_index][0]
+                self.value = selected_cmd + " "
+                self.cursor = len(self.value)
+                self.completion_index = 0
+                return "changed"
+            if key in {"\r", "\n"}:
+                selected_cmd = matches[self.completion_index][0]
+                if self.value != selected_cmd:
+                    self.value = selected_cmd
+                    self.cursor = len(self.value)
+                    self.completion_index = 0
+                    return "changed"
+                return "submit"
+            if key == "\x1b":
+                self.completion_dismissed = True
+                return "changed"
+
         if key in {"\r", "\n"}:
             return "submit"
         if key in {"\x1b\r", "\x1b\n"}:
@@ -213,6 +258,8 @@ class ComposerState:
                 self.value = self.value[: self.cursor - 1] + self.value[self.cursor :]
                 self.cursor -= 1
                 self.history_index = None
+                self.completion_index = 0
+                self.completion_dismissed = False
                 return "changed"
             return None
         if key == "\x04":
@@ -220,6 +267,8 @@ class ComposerState:
                 return "eof"
             if self.cursor < len(self.value):
                 self.value = self.value[: self.cursor] + self.value[self.cursor + 1 :]
+                self.completion_index = 0
+                self.completion_dismissed = False
                 return "changed"
             return None
         if key in {"\x1b[D", "\x1bOD"}:
@@ -267,6 +316,7 @@ class ComposerState:
         self.value = history[self.history_index]
         self.cursor = len(self.value)
         return "changed"
+
 
 
 class InlineTerminalSurface:
@@ -459,10 +509,11 @@ class TUIConsolePresenter(ConsolePresenter):
         self._stop_runtime(TUIEventKind.RUN_FAILED)
         super().show_interrupted()
 
-    def model_started(self) -> str:
+    def model_started(self, message: str = "Model is thinking…") -> str:
         handle = f"model-{uuid4().hex}"
-        self._publish(TUIEvent(TUIEventKind.MODEL_STARTED, entity_id=handle))
+        self._publish(TUIEvent(TUIEventKind.MODEL_STARTED, entity_id=handle, payload={"message": message}))
         return handle
+
 
     def model_finished(self, handle: str) -> None:
         self._publish(TUIEvent(TUIEventKind.MODEL_FINISHED, entity_id=handle))
@@ -641,7 +692,9 @@ class TUIConsolePresenter(ConsolePresenter):
         composer_rows, cursor_row, cursor_column = self._composer_rows(size.columns)
         blank = f"\033[48;5;236m\033[K{Ansi.RESET}"
         status = self.status_bar.text(engine=engine, is_running=False)
-        rows = [blank, *composer_rows, blank, f"{Ansi.GRAY}{status}{Ansi.RESET}"]
+        matches = self._composer.get_completion_matches()
+        completion_rows = self._completion_rows(matches)
+        rows = [blank, *composer_rows, blank, *completion_rows, f"{Ansi.GRAY}{status}{Ansi.RESET}"]
         self._surface.render(rows, cursor_row=1 + cursor_row, cursor_column=cursor_column)
 
     def _render_runtime(self) -> None:
@@ -673,7 +726,9 @@ class TUIConsolePresenter(ConsolePresenter):
         blank = f"\033[48;5;236m\033[K{Ansi.RESET}"
         runtime = self.renderer.runtime_row(state)
         metadata = "" if runtime is None else self.renderer.ansi_row(*runtime)
-        rows = [*activity, "", blank, *composer_rows, blank, metadata]
+        matches = self._composer.get_completion_matches()
+        completion_rows = self._completion_rows(matches)
+        rows = [*activity, "", blank, *composer_rows, blank, *completion_rows, metadata]
         return (
             rows,
             len(activity) + 2 + cursor_row,
@@ -699,6 +754,53 @@ class TUIConsolePresenter(ConsolePresenter):
         else:
             cursor_column += 2
         return rows, cursor_row, cursor_column
+
+    def _completion_rows(self, matches: list[tuple[str, str]], max_visible: int = 5) -> list[str]:
+        if not matches:
+            return []
+
+        total = len(matches)
+        selected_idx = min(self._composer.completion_index, total - 1)
+
+        window_start = 0
+        if total > max_visible:
+            if selected_idx >= max_visible:
+                window_start = min(selected_idx - max_visible + 1, total - max_visible)
+            window_start = max(0, window_start)
+
+        visible_matches = matches[window_start : window_start + max_visible]
+
+        header = f"  {Ansi.GRAY}Commands ({total} total):{Ansi.RESET}"
+        if total > max_visible:
+            header += f" {Ansi.GRAY}({window_start + 1}-{window_start + len(visible_matches)} of {total}){Ansi.RESET}"
+        rows: list[str] = [header]
+
+        if window_start > 0:
+            rows.append(f"   {Ansi.GRAY}▲ ({window_start} more above){Ansi.RESET}")
+
+        max_cmd_len = max(_display_width(cmd) for cmd, _ in matches)
+        for rel_idx, (cmd, desc) in enumerate(visible_matches):
+            actual_idx = window_start + rel_idx
+            is_selected = actual_idx == selected_idx
+            pointer = "›" if is_selected else " "
+            if is_selected:
+                cmd_str = f"{Ansi.CYAN}{Ansi.BOLD}{cmd:<{max_cmd_len}}{Ansi.RESET}"
+                desc_str = f"{Ansi.YELLOW}{desc}{Ansi.RESET}"
+                pointer_str = f"{Ansi.CYAN}{Ansi.BOLD}{pointer}{Ansi.RESET}"
+            else:
+                cmd_str = f"{Ansi.GRAY}{cmd:<{max_cmd_len}}{Ansi.RESET}"
+                desc_str = f"{Ansi.GRAY}{desc}{Ansi.RESET}"
+                pointer_str = f"{Ansi.GRAY}{pointer}{Ansi.RESET}"
+            rows.append(f"   {pointer_str} {cmd_str}  {desc_str}")
+
+        remaining_below = total - (window_start + len(visible_matches))
+        if remaining_below > 0:
+            rows.append(f"   {Ansi.GRAY}▼ ({remaining_below} more below){Ansi.RESET}")
+
+        return rows
+
+
+
 
     def _wrap_composer(self, columns: int) -> tuple[list[str], int, int, int]:
         columns = max(columns, 2)

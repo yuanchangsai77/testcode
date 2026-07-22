@@ -460,7 +460,7 @@
 - Ctrl+C 已支持中断当前输入、模型或工具并保留 session 流程。
 - 交互 TTY 已切换到项目内原生输入器，支持 UTF-8、多行编辑、会话内历史、bracketed paste 和 resize；`prompt_toolkit` 依赖已移除，持久化跨进程历史仍待实现。
 - 已支持 TTY 彩色输出、全宽边框和窄屏状态栏；非 TTY 保留纯流式输入回退。
-- 状态驱动完整 TUI 已完成 Phase 0 和 Phase 1/2 首版：有界事件队列、集中状态、单一运行时 renderer、Working 计时、工具生命周期、审批和 Esc 中断已经接入；目标架构与剩余阶段见 `docs/full-tui-architecture.md`。
+- 状态驱动完整 TUI 已完成 Phase 0 和 Phase 1/2 首版：有界事件队列、集中状态、单一运行时 renderer、Working 计时、工具生命周期、审批和 Esc 中断已经接入；目标架构与剩余阶段见 `docs/tui-architecture-roadmap.md`。
 - 原生 inline TUI 已接入：启动信息、消息和稳定结果只写入终端 scrollback 一次，程序只重绘底部瞬态区域；不进入 fullscreen、不捕获鼠标，因此滚轮、选择和复制保持终端原生行为。运行期间保留可编辑 composer，模型信息位于输入框下方，支持中断并排队下一条消息；每轮结束写入耗时分隔线和空白间隔。模型 streaming、overlay 命令栈、持久化输入历史和跨终端兼容快照仍待实施。
 
 ### P6.2 配置命令

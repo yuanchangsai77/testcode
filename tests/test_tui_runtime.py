@@ -413,4 +413,59 @@ def test_composer_rows_scrolled_multiline_does_not_repeat_prompt_prefix():
     assert all(len(row) < 80 for row in plain_rows)
 
 
+def test_composer_slash_command_autocomplete_navigation_and_tab_fill():
+    composer = ComposerState()
+    composer.edit("/", [])
+
+    matches = composer.get_completion_matches()
+    cmd_names = [cmd for cmd, _ in matches]
+    assert "/clear" in cmd_names and "/status" in cmd_names and "/resume" in cmd_names
+    assert composer.completion_index == 0
+
+    # Down arrow moves selection
+    composer.edit("\x1b[B", [])
+    assert composer.completion_index == 1
+
+    # Filtering by prefix /sk
+    composer.set_value("/sk")
+    matches_sk = composer.get_completion_matches()
+    assert [cmd for cmd, _ in matches_sk] == ["/skills"]
+
+    # Enter confirms selection /skills
+    result = composer.edit("\r", [])
+    assert result == "changed"
+    assert composer.value == "/skills"
+
+    # Subsequent enter submits
+    result_submit = composer.edit("\r", [])
+    assert result_submit == "submit"
+
+
+def test_composer_rows_renders_slash_command_completion_menu():
+    presenter = TUIConsolePresenter(output=StringIO())
+    presenter._composer.set_value("/")
+
+    matches = presenter._composer.get_completion_matches()
+    rows = presenter._completion_rows(matches)
+    plain_rows = [_plain(row) for row in rows]
+
+    assert any("Commands (" in row for row in plain_rows)
+    assert any("/clear" in row for row in plain_rows)
+    assert any("/compact" in row for row in plain_rows)
+    assert any("▼ (7 more below)" in row for row in plain_rows)
+
+    # Scroll selection down to /status
+    status_idx = next(i for i, (cmd, _) in enumerate(matches) if cmd == "/status")
+    presenter._composer.completion_index = status_idx
+    scrolled_rows = presenter._completion_rows(matches)
+    scrolled_plain = [_plain(row) for row in scrolled_rows]
+    assert any("▲ (" in row for row in scrolled_plain)
+    assert any("› /status" in row for row in scrolled_plain)
+
+
+
+
+
+
+
 

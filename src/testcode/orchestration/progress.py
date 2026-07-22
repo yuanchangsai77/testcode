@@ -12,8 +12,9 @@ class ProgressReporter(Protocol):
     Implementations can render a TUI, collect telemetry, or ignore events.
     """
 
-    def model_started(self) -> Any:
+    def model_started(self, message: str = "Model is thinking…") -> Any:
         ...
+
 
     def model_finished(self, handle: Any) -> None:
         ...
