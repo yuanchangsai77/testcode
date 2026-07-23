@@ -17,6 +17,9 @@ class ConsolePresenter:
         self.tool_result_summarizer = tool_result_summarizer
         self.status_bar = StatusBar()
         self.prompt_box = PromptBox(self.status_bar)
+        self._session = None
+        self._engine = None
+        self._resumed = False
 
     def _print(self, value: str = "") -> None:
         print(value, file=getattr(self, "_output", sys.stdout))
@@ -134,6 +137,9 @@ class ConsolePresenter:
         return "\n".join(parts)
 
     def show_session_state(self, session: StoredSession, resumed: bool, engine=None) -> None:
+        self._session = session
+        self._engine = engine
+        self._resumed = resumed
         # Standard ANSI colors
         CYAN = "\033[1;36m"
         GREEN = "\033[1;32m"
@@ -244,10 +250,12 @@ class ConsolePresenter:
             self._print(f"  cwd: {session.cwd}")
             self._print(f"  preview: {preview}")
 
-    def show_session_history(self, messages: list[dict[str, str]]) -> None:
-        if not messages:
-            return
+    def show_user_prompt(self, prompt: str) -> None:
+        CYAN = "\033[1;36m"
+        RESET = "\033[0m"
+        self._print(f"\n {CYAN}testcode>{RESET} {prompt}")
 
+    def show_session_history(self, session_or_messages) -> None:
         GRAY = "\033[90m"
         RESET = "\033[0m"
         CYAN = "\033[1;36m"
@@ -255,20 +263,73 @@ class ConsolePresenter:
 
         self._print(f"\n{GRAY}─── Historical Conversation History ───────────────────{RESET}")
 
-        for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content", "")
-            if not content:
-                continue
+        if hasattr(session_or_messages, "trace") and session_or_messages.trace:
+            for run in session_or_messages.trace:
+                # 1. User prompt (styled)
+                self.show_user_prompt(run.prompt)
 
-            if role == "user":
-                self._print(f"\n {CYAN}testcode>{RESET} {content}")
-            elif role == "assistant":
-                self.show_summary(ExecutionSummary(final_message=content, tool_results=[]))
-            elif role == "system":
-                self._print(f"\n {GRAY}[System Context Summary]{RESET}")
-                indented = "\n".join(f"   {line}" for line in content.splitlines())
-                self._print(f"{GRAY}{indented}{RESET}\n")
+                # 2. Tool calls in turns
+                for turn in run.turns:
+                    if turn.actions:
+                        for i in range(len(turn.actions)):
+                            action_name = turn.actions[i]
+                            action_detail = turn.action_details[i] if i < len(turn.action_details) else ""
+                            result_detail = turn.tool_result_details[i] if i < len(turn.tool_result_details) else ""
+
+                            args_display = ""
+                            if "args=" in action_detail:
+                                args_part = action_detail.split("args=", 1)[1]
+                                try:
+                                    args_dict = json.loads(args_part)
+                                    args_str = self._format_args(args_dict)
+                                    args_display = f"({args_str})" if args_str else ""
+                                except Exception:
+                                    args_display = f"({args_part})" if args_part else ""
+
+                            output_summary = ""
+                            success = True
+                            if result_detail:
+                                match = re.match(r"^[\w:-]+\s+\[([^\]]+)\]\s*(.*)$", result_detail, re.DOTALL)
+                                if match:
+                                    status = match.group(1)
+                                    output_summary = match.group(2)
+                                    success = (status == "ok")
+                                else:
+                                    output_summary = result_detail
+
+                            GREEN = "\033[1;32m"
+                            RED = "\033[1;31m"
+                            CYAN = "\033[1;36m"
+                            RESET = "\033[0m"
+
+                            if success:
+                                self._print(f" {GREEN}•{RESET} {CYAN}{action_name}{RESET}{args_display} -> {output_summary}")
+                            else:
+                                self._print(f" {RED}•{RESET} {CYAN}{action_name}{RESET}{args_display} -> {RED}{output_summary}{RESET}")
+
+                # 3. Final message (rendered)
+                if run.final_message:
+                    self.show_summary(ExecutionSummary(final_message=run.final_message, tool_results=[]))
+        else:
+            messages = session_or_messages
+            if not messages:
+                self._print(f"{GRAY}───────────────────────────────────────────────────────{RESET}\n")
+                return
+
+            for msg in messages:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if not content:
+                    continue
+
+                if role == "user":
+                    self.show_user_prompt(content)
+                elif role == "assistant":
+                    self.show_summary(ExecutionSummary(final_message=content, tool_results=[]))
+                elif role == "system":
+                    self._print(f"\n {GRAY}[System Context Summary]{RESET}")
+                    indented = "\n".join(f"   {line}" for line in content.splitlines())
+                    self._print(f"{GRAY}{indented}{RESET}\n")
 
         self._print(f"{GRAY}───────────────────────────────────────────────────────{RESET}\n")
 
@@ -297,9 +358,11 @@ class ConsolePresenter:
         status: str,
         delay_seconds: float,
     ) -> None:
-        handle.update_message(
-            f"{status} — retrying {retry}/{max_retries} in {delay_seconds:g}s..."
-        )
+        if delay_seconds > 0:
+            msg = f"{status} — retrying {retry}/{max_retries} in {delay_seconds:g}s..."
+        else:
+            msg = f"{status} — retrying {retry}/{max_retries}..."
+        handle.update_message(msg)
 
     def show_tool_start(self, action_name: str) -> Spinner:
         YELLOW = "\033[1;33m"
@@ -374,8 +437,11 @@ class ConsolePresenter:
         )
 
     def clear_screen(self) -> None:
-        sys.stdout.write("\033[H\033[2J\033[3J")
-        sys.stdout.flush()
+        out = getattr(self, "_output", sys.stdout)
+        out.write("\033[H\033[2J\033[3J")
+        out.flush()
+        if getattr(self, "_session", None) is not None:
+            self.show_session_state(self._session, resumed=getattr(self, "_resumed", False), engine=getattr(self, "_engine", None))
 
     def show_unknown_command(self, cmd: str) -> None:
         RED = "\033[1;31m"
@@ -411,7 +477,7 @@ class ConsolePresenter:
 
         model_name = getattr(getattr(engine, "model", None), "model", "StubModel")
 
-        self._print(f"\n{BOLD}Session Status & Environment:{RESET}")
+        self._print(f"{BOLD}Session Status & Environment:{RESET}")
         self._print(f" {GRAY}›{RESET} {BOLD}Session ID:{RESET}  {YELLOW}{session_id}{RESET}")
         self._print(f" {GRAY}›{RESET} {BOLD}Workspace:{RESET}   {cwd}")
         self._print(f" {GRAY}›{RESET} {BOLD}Model:{RESET}       {CYAN}{model_name}{RESET}")
@@ -423,7 +489,7 @@ class ConsolePresenter:
         RESET = "\033[0m"
         GRAY = "\033[90m"
 
-        self._print(f"\n{BOLD}testcode CLI Workbench Shortcuts & Commands:{RESET}")
+        self._print(f"{BOLD}testcode CLI Workbench Shortcuts & Commands:{RESET}")
         if registry and hasattr(registry, "list_commands"):
             cmds = registry.list_commands()
             max_name_len = max(len(c.usage or c.name) for c in cmds)
@@ -443,7 +509,7 @@ class ConsolePresenter:
 
 
     def show_tasks(self) -> None:
-        self._print("\nNo active background tasks running in this session.\n")
+        self._print("No active background tasks running in this session.\n")
 
     def show_skills(self, engine) -> None:
         CYAN = "\033[1;36m"
@@ -454,7 +520,7 @@ class ConsolePresenter:
         if engine and hasattr(engine, "skills_registry") and engine.skills_registry:
             skills = getattr(engine.skills_registry, "_skills", {})
             
-        self._print(f"\n{BOLD}Scanned Skill Registry:{RESET}")
+        self._print(f"{BOLD}Scanned Skill Registry:{RESET}")
         if not skills:
             self._print("  No skills found in registry.")
         else:
@@ -482,15 +548,15 @@ class ConsolePresenter:
         
         if not mode_arg:
             current_mode = getattr(policy, "mode", "confirm")
-            self._print(f"\nCurrent safety mode: {BOLD}{current_mode}{RESET}\n")
+            self._print(f"Current safety mode: {BOLD}{current_mode}{RESET}\n")
             return
             
         if mode_arg not in {"readonly", "confirm", "auto"}:
-            self._print(f"\n{RED}Error:{RESET} Invalid mode '{mode_arg}'. Use readonly, confirm, or auto.\n")
+            self._print(f"{RED}Error:{RESET} Invalid mode '{mode_arg}'. Use readonly, confirm, or auto.\n")
             return
             
         policy.mode = mode_arg
-        self._print(f"\nSafety mode successfully updated to: {BOLD}{mode_arg}{RESET}\n")
+        self._print(f"Safety mode successfully updated to: {BOLD}{mode_arg}{RESET}\n")
 
     def show_input_border(self) -> None:
         self.prompt_box.show_border()

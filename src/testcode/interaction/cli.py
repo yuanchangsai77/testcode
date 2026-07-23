@@ -63,7 +63,7 @@ class CLI:
                 self.session_store.save(session)
             self.presenter.show_session_state(session, resumed=resumed, engine=self.engine)
             if resumed and hasattr(self.presenter, "show_session_history"):
-                self.presenter.show_session_history(session.messages)
+                self.presenter.show_session_history(session)
         self.active_session = session
 
 
@@ -209,6 +209,8 @@ class CLI:
         self._attach_last_run_id(session)
         try:
             self.session_store.save(session)
+            if status == "closed":
+                self._print_exit_info(session)
         finally:
             if close_runtime:
                 tools = getattr(self.engine, "tools", None)
@@ -444,7 +446,7 @@ class CLI:
             if self.presenter:
                 self.presenter.show_session_state(selected_session, resumed=True, engine=self.engine)
                 if hasattr(self.presenter, "show_session_history"):
-                    self.presenter.show_session_history(selected_session.messages)
+                    self.presenter.show_session_history(selected_session)
         return selected_session
 
 
@@ -514,11 +516,83 @@ class CLI:
                 self._attach_last_run_id(session)
                 session.messages = list(conversation)
                 self.session_store.save(session)
+                self._print_exit_info(session)
+            else:
+                self._print_exit_info(None)
         finally:
             tools = getattr(self.engine, "tools", None)
             reset_state = getattr(tools, "reset_state", None)
             if callable(reset_state):
                 reset_state()
+
+    def _print_exit_info(self, session: StoredSession | None) -> None:
+        import json
+        from pathlib import Path
+
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        has_usage = False
+
+        if session is not None and self.logger is not None and getattr(self.logger, "base_dir", None) is not None:
+            run_ids = list(session.run_ids)
+            current_run_id = getattr(self.logger, "run_id", None)
+            if current_run_id and current_run_id not in run_ids:
+                run_ids.append(current_run_id)
+
+            for run_id in run_ids:
+                run_dir = Path(self.logger.base_dir) / run_id
+                events_file = run_dir / "events.jsonl"
+                if events_file.exists():
+                    try:
+                        with events_file.open("r", encoding="utf-8") as f:
+                            for line in f:
+                                if not line.strip():
+                                    continue
+                                event = json.loads(line)
+                                if event.get("name") == "model.response":
+                                    payload = event.get("payload", {})
+                                    usage = payload.get("usage")
+                                    if isinstance(usage, dict):
+                                        try:
+                                            prompt_tokens += int(usage.get("prompt_tokens", 0))
+                                            has_usage = True
+                                        except (ValueError, TypeError):
+                                            pass
+                                        try:
+                                            completion_tokens += int(usage.get("completion_tokens", 0))
+                                            has_usage = True
+                                        except (ValueError, TypeError):
+                                            pass
+                                        try:
+                                            total_tokens += int(usage.get("total_tokens", 0))
+                                            has_usage = True
+                                        except (ValueError, TypeError):
+                                            pass
+                    except Exception:
+                        pass
+
+        CYAN = "\033[1;36m"
+        GREEN = "\033[1;32m"
+        YELLOW = "\033[1;33m"
+        GRAY = "\033[90m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+
+        print(f"{BOLD}Session closed successfully.{RESET}")
+        
+        if has_usage:
+            print(f" {GRAY}›{RESET} {BOLD}Token Usage Summary:{RESET}")
+            print(f"   {GREEN}•{RESET} Prompt Tokens:     {YELLOW}{prompt_tokens}{RESET}")
+            print(f"   {GREEN}•{RESET} Completion Tokens: {YELLOW}{completion_tokens}{RESET}")
+            print(f"   {GREEN}•{RESET} Total Tokens:      {YELLOW}{total_tokens}{RESET}")
+        
+        if session is not None:
+            print(f" {GRAY}›{RESET} {BOLD}To resume this conversation, run:{RESET}")
+            print(f"   {CYAN}testcode --resume {session.session_id}{RESET}")
+        print(f" {GRAY}›{RESET} {BOLD}To resume the most recent conversation, run:{RESET}")
+        print(f"   {CYAN}testcode --last{RESET}")
+        print()
 
     def _attach_last_run_id(self, session: StoredSession) -> None:
         run_id = getattr(self.logger, "last_run_id", None)

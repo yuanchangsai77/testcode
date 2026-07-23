@@ -414,6 +414,17 @@ class TUIConsolePresenter(ConsolePresenter):
         self._approval_lock = threading.Lock()
         self._flushed_tool_ids: set[str] = set()
 
+    def clear_screen(self) -> None:
+        """Clear the terminal and redraw the TUI idle frame."""
+        self._surface.clear()
+        self._output.write("\033[H\033[2J\033[3J")
+        self._output.flush()
+        if getattr(self, "_session", None) is not None:
+            super().show_session_state(self._session, resumed=getattr(self, "_resumed", False), engine=getattr(self, "_engine", None))
+        engine = getattr(self, "_engine", None)
+        if self._can_use_native_input():
+            self._render_idle(engine=engine)
+
     def _print(self, value: str = "") -> None:
         self._surface.clear()
         print(value, file=self._output)
@@ -426,6 +437,18 @@ class TUIConsolePresenter(ConsolePresenter):
     def show_session_state(self, session, resumed: bool, engine=None) -> None:
         self._cwd = session.cwd
         super().show_session_state(session, resumed=resumed, engine=engine)
+
+    def show_user_prompt(self, prompt: str) -> None:
+        lines = self.prompt_box.wrap_prompt_value(prompt)
+        prompt_lbl = f" {Ansi.CYAN}testcode>{Ansi.RESET}"
+        background = "\033[48;5;236m"
+        blank = f"{background}\033[K{Ansi.RESET}"
+        self._print(blank)
+        self._print(f"{background}{prompt_lbl}{background} {lines[0]}\033[K{Ansi.RESET}")
+        for line in lines[1:]:
+            self._print(f"{background}  {line}\033[K{Ansi.RESET}")
+        self._print(blank)
+        self._print()
 
     def show_start(self, request) -> None:
         self._pending_prompt = request.prompt
@@ -519,12 +542,13 @@ class TUIConsolePresenter(ConsolePresenter):
         self._publish(TUIEvent(TUIEventKind.MODEL_FINISHED, entity_id=handle))
 
     def model_retrying(self, handle, retry, max_retries, status, delay_seconds) -> None:
+        msg = f"{status} — retrying {retry}/{max_retries} in {delay_seconds:g}s…" if delay_seconds > 0 else f"{status} — retrying {retry}/{max_retries}…"
         self._publish(
             TUIEvent(
                 TUIEventKind.MODEL_RETRYING,
                 entity_id=handle,
                 payload={
-                    "message": f"{status} — retrying {retry}/{max_retries} in {delay_seconds:g}s…"
+                    "message": msg
                 },
             )
         )
