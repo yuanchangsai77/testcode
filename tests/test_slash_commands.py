@@ -133,3 +133,87 @@ def test_choose_session_interactive_tty():
         assert selected == "sess-2"
 
 
+def test_clear_command_redraws_session_state():
+    output = StringIO()
+    presenter = ConsolePresenter()
+    presenter._output = output
+    cli = CLI(engine=None, presenter=presenter)
+
+    session_mock = SimpleNamespace(session_id="test-sess-123", cwd="/test/path", status="active", messages=[])
+    
+    # Simulate start of session
+    presenter.show_session_state(session_mock, resumed=False, engine=None)
+    initial_output = output.getvalue()
+    assert "test-sess-123" in initial_output
+    assert "/test/path" in initial_output
+
+    # Clear output buffer
+    output.seek(0)
+    output.truncate(0)
+
+    # Execute /clear
+    cli.command_registry.execute(cli, "/clear")
+    cleared_output = output.getvalue()
+    
+    # Assert screen was cleared (ANSI escape sequences)
+    assert "\033[H\033[2J\033[3J" in cleared_output
+    # Assert session state was redrawn
+    assert "test-sess-123" in cleared_output
+    assert "/test/path" in cleared_output
+
+
+def test_print_exit_info(tmp_path):
+    import json
+    import sys
+    from io import StringIO
+    
+    # Capture sys.stdout
+    captured = StringIO()
+    original_stdout = sys.stdout
+    try:
+        sys.stdout = captured
+        
+        # Setup mock logger base_dir
+        base_dir = tmp_path / "runs"
+        run_id = "test-run-999"
+        run_dir = base_dir / run_id
+        run_dir.mkdir(parents=True)
+        events_file = run_dir / "events.jsonl"
+        
+        # Write dummy event with usage statistics
+        with open(events_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "timestamp": "2026-07-22T00:00:00Z",
+                "name": "model.response",
+                "payload": {
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 200,
+                        "total_tokens": 300
+                    }
+                }
+            }) + "\n")
+        
+        logger_mock = SimpleNamespace(base_dir=str(base_dir), run_id=run_id)
+        cli = CLI(engine=None, presenter=ConsolePresenter(), logger=logger_mock)
+        
+        session_mock = SimpleNamespace(session_id="session-xyz", run_ids=[run_id])
+        cli._print_exit_info(session_mock)
+        
+        output_str = captured.getvalue()
+        assert "Session closed successfully" in output_str
+        assert "Prompt Tokens:" in output_str
+        assert "100" in output_str
+        assert "Completion Tokens:" in output_str
+        assert "200" in output_str
+        assert "Total Tokens:" in output_str
+        assert "300" in output_str
+        assert "testcode --resume session-xyz" in output_str
+        assert "testcode --last" in output_str
+        
+    finally:
+        sys.stdout = original_stdout
+
+
+
+

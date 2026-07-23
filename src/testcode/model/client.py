@@ -64,6 +64,11 @@ class OpenAICompatibleModelClient:
         self.logger = logger
         self.prompt_builder = prompt_builder or ModelPromptBuilder()
         self.parser = parser or ModelReplyParser(logger=logger)
+        import socket
+        try:
+            socket.setdefaulttimeout(self.timeout)
+        except Exception:
+            pass
 
     def respond(self, session: SessionContext) -> ModelReply:
         messages = self.prompt_builder.build_messages(session)

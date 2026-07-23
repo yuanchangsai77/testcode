@@ -521,3 +521,29 @@ def test_parse_reply_preserves_newlines_in_message():
     content = "Line 1.\n\nLine 2.\nLine 3."
     reply = parser.parse_reply(content)
     assert reply.message == "Line 1.\n\nLine 2.\nLine 3."
+
+
+def test_parse_reply_ignores_false_positive_json_in_text():
+    parser = ModelReplyParser()
+    content = "Here is some text containing a JSON object: {\"path\": \"/some/path.txt\"} but this is not the reply schema."
+    reply = parser.parse_reply(content)
+    assert reply.message == content
+    assert reply.done is True
+
+
+def test_parse_reply_ignores_strict_json_without_schema_keys():
+    parser = ModelReplyParser()
+    content = '{"random_key": "random_value"}'
+    reply = parser.parse_reply(content)
+    assert reply.message == content
+    assert reply.done is True
+
+
+def test_parse_reply_allows_tool_only_json_response():
+    parser = ModelReplyParser()
+    content = '{"actions": [{"name": "read_file", "arguments": {"path": "foo.txt"}}]}'
+    reply = parser.parse_reply(content, allowed_tool_names={"read_file"})
+    assert reply.message == "Model requested tool calls."
+    assert reply.done is False
+    assert len(reply.actions) == 1
+    assert reply.actions[0].name == "read_file"

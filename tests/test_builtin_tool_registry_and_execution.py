@@ -311,7 +311,7 @@ def test_patch_reports_syntax_error_for_corrupt_diff(tmp_path):
 +++ b/file.txt
 @@ -1,2 +1,3 @@
  before
-+after
+garbage line here
 """
 
     registry.execute(ToolAction(name="read_file", arguments={"path": "file.txt"}), cwd=str(tmp_path))

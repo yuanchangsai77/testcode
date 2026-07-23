@@ -74,17 +74,26 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
     diff = rebase_diff_paths(diff, resolved_files, root)
 
     check = run_command(["git", "apply", "--check", "-"], root, input_text=diff, shell=False)
+    use_recount = False
     if not check.success:
         error_code = classify_git_apply_failure(check.output)
-        return ToolResult(
-            name=action.name,
-            success=False,
-            output=format_patch_failure(check.output, error_code),
-            error_code=error_code,
-            metadata={"changed_files": changed_files, "preview": diff, "line_stats": line_stats(diff)},
-        )
+        if error_code == "patch_syntax_error":
+            recount_check = run_command(["git", "apply", "--check", "--recount", "-"], root, input_text=diff, shell=False)
+            if recount_check.success:
+                check = recount_check
+                use_recount = True
+        
+        if not use_recount:
+            return ToolResult(
+                name=action.name,
+                success=False,
+                output=format_patch_failure(check.output, error_code),
+                error_code=error_code,
+                metadata={"changed_files": changed_files, "preview": diff, "line_stats": line_stats(diff)},
+            )
 
-    applied = run_command(["git", "apply", "-"], root, input_text=diff, shell=False)
+    cmd = ["git", "apply", "--recount", "-"] if use_recount else ["git", "apply", "-"]
+    applied = run_command(cmd, root, input_text=diff, shell=False)
     if not applied.success:
         return retarget(applied, action.name)
 

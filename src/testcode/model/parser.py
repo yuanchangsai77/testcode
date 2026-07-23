@@ -91,6 +91,13 @@ class ModelReplyParser:
     def parse_reply(self, content: str, *, allowed_tool_names: set[str] | None = None) -> ModelReply:
         try:
             payload = json.loads(content)
+            if not isinstance(payload, dict) or ("message" not in payload and "actions" not in payload):
+                cleaned = self._clean_content(content)
+                return ModelReply(
+                    message=cleaned.message or content,
+                    done=True,
+                    metadata=self._cleaned_metadata(cleaned),
+                )
         except json.JSONDecodeError:
             content_actions = self._parse_content_tool_calls(content, allowed_tool_names=allowed_tool_names)
             if content_actions:
@@ -112,6 +119,13 @@ class ModelReplyParser:
                 )
             try:
                 payload = json.loads(candidate)
+                if not isinstance(payload, dict) or ("message" not in payload and "actions" not in payload):
+                    cleaned = self._clean_content(content)
+                    return ModelReply(
+                        message=cleaned.message or content,
+                        done=True,
+                        metadata=self._cleaned_metadata(cleaned),
+                    )
             except json.JSONDecodeError:
                 if self.logger is not None:
                     self.logger.record(
@@ -136,7 +150,10 @@ class ModelReplyParser:
 
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
-            raise RuntimeError(f"Model response missing message: {payload}")
+            if "actions" in payload:
+                message = "Model requested tool calls."
+            else:
+                raise RuntimeError(f"Model response missing message: {payload}")
 
         done = bool(payload.get("done", False))
         raw_actions = payload.get("actions", [])

@@ -48,7 +48,11 @@ def is_sensitive_path(path: Path) -> bool:
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: REDACTED if SENSITIVE_KEY_RE.search(str(key)) else redact(item)
+            key: REDACTED if SENSITIVE_KEY_RE.search(str(key)) and str(key) not in {
+                "prompt_tokens", "completion_tokens", "total_tokens",
+                "cached_tokens", "reasoning_tokens",
+                "completion_tokens_details", "prompt_tokens_details"
+            } else redact(item)
             for key, item in value.items()
         }
     if isinstance(value, list):

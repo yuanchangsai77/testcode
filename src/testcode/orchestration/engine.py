@@ -137,6 +137,16 @@ class ExecutionEngine:
             try:
                 retry_count = 0
                 while True:
+                    if retry_count > 0:
+                        retry_reporter = getattr(self.progress_reporter, "model_retrying", None)
+                        if retry_reporter is not None:
+                            retry_reporter(
+                                progress_handle,
+                                retry_count,
+                                self.max_model_retries,
+                                "Sending request",
+                                0.0,
+                            )
                     try:
                         reply = self.model.respond(session)
                         break

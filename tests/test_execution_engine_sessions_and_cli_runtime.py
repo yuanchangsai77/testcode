@@ -82,9 +82,13 @@ def test_engine_retries_model_timeout_seven_times_before_succeeding(tmp_path):
 
     assert summary.final_message == "recovered"
     assert model.calls == 8
-    assert progress.retries == [
-        (retry, 7, "Model request timed out", 0.0) for retry in range(1, 8)
-    ]
+    
+    expected_retries = []
+    for retry in range(1, 8):
+        expected_retries.append((retry, 7, "Model request timed out", 0.0))
+        expected_retries.append((retry, 7, "Sending request", 0.0))
+        
+    assert progress.retries == expected_retries
 
 
 def test_engine_reports_api_unavailable_after_seven_timeout_retries(tmp_path):
