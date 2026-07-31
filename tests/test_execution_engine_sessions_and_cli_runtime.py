@@ -1126,12 +1126,129 @@ def test_engine_recovers_read_duplicate_loop_for_file_change_request(tmp_path):
 
     summary = engine.execute(UserRequest(prompt="升级这个项目，生成标准项目文件夹", cwd=str(tmp_path)))
 
-    assert model.calls == 6
+    assert model.calls == 3
     assert summary.final_message == "created standard metadata"
     assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == '[project]\nname = "demo"\n'
     assert any(result.error_code == "progress_required" for result in summary.tool_results)
     assert summary.tool_results[-1].name == "patch"
     assert summary.tool_results[-1].success is True
+
+
+def test_blocked_write_does_not_reset_completed_read_context(tmp_path):
+    target = tmp_path / "config.py"
+    target.write_text("API_KEY = None\n", encoding="utf-8")
+
+    class ReadBlockedWriteReadModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls in {1, 3}:
+                return ModelReply(
+                    message="read config",
+                    actions=[
+                        ToolAction(
+                            name="read_file",
+                            arguments={"path": "config.py"},
+                        )
+                    ],
+                    done=self.calls == 3,
+                )
+            return ModelReply(
+                message="unsafe patch",
+                actions=[
+                    ToolAction(
+                        name="patch",
+                        arguments={
+                            "diff": (
+                                "--- a/config.py\n"
+                                "+++ b/config.py\n"
+                                "@@ -1 +1 @@\n"
+                                "-API_KEY = None\n"
+                                '+API_KEY = "1234567890abcdef1234567890abcdef"\n'
+                            )
+                        },
+                    )
+                ],
+                done=False,
+            )
+
+    logger = InMemoryLogger()
+    summary = ExecutionEngine(
+        model=ReadBlockedWriteReadModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(DefaultPolicy(mode="auto"), logger),
+        logger=logger,
+    ).execute(
+        UserRequest(prompt="modify config.py", cwd=str(tmp_path))
+    )
+
+    assert summary.tool_results[1].error_code == "blocked_by_security_policy"
+    assert summary.tool_results[2].metadata["duplicate"] is True
+    assert target.read_text(encoding="utf-8") == "API_KEY = None\n"
+
+
+def test_progress_guard_can_trigger_again_after_successful_write(tmp_path):
+    class TwoGenerationLoopModel:
+        calls = 0
+
+        def respond(self, session):
+            self.calls += 1
+            recovery_count = sum(
+                "progress_required" in item
+                for item in session.history
+            )
+            if recovery_count >= 2:
+                return ModelReply(message="done", done=True)
+            if recovery_count == 1 and not any(
+                result.name == "patch" and result.success
+                for result in session.tool_results
+            ):
+                return ModelReply(
+                    message="write marker",
+                    actions=[
+                        ToolAction(
+                            name="patch",
+                            arguments={
+                                "diff": (
+                                    "--- /dev/null\n"
+                                    "+++ b/marker.txt\n"
+                                    "@@ -0,0 +1 @@\n"
+                                    "+written\n"
+                                )
+                            },
+                        )
+                    ],
+                    done=False,
+                )
+            return ModelReply(
+                message="inspect",
+                actions=[
+                    ToolAction(
+                        name="list_dir",
+                        arguments={"path": "."},
+                    )
+                ],
+                done=False,
+            )
+
+    logger = InMemoryLogger()
+    summary = ExecutionEngine(
+        model=TwoGenerationLoopModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(DefaultPolicy(mode="auto"), logger),
+        logger=logger,
+    ).execute(
+        UserRequest(prompt="create project files", cwd=str(tmp_path))
+    )
+
+    recoveries = [
+        result
+        for result in summary.tool_results
+        if result.error_code == "progress_required"
+    ]
+    assert len(recoveries) == 2
+    assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == "written\n"
 
 
 def test_engine_skips_duplicate_non_retryable_failures(tmp_path):

@@ -30,7 +30,7 @@ def tool() -> SimpleTool:
             {
                 "command": {"type": "string"},
                 "cwd": {"type": "string"},
-                "timeout": {"type": "number"},
+                "timeout": {"type": "number", "minimum": 0.001, "maximum": 3600},
             },
             required=["command"],
         ),

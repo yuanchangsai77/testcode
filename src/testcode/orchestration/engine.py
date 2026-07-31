@@ -4,11 +4,18 @@ import json
 import time
 from pathlib import Path
 
+from ..intent import RequestIntentClassifier
 from ..model.types import ModelRetryableError
 from ..types import ExecutionSummary, ToolAction, ToolResult, UserRequest
 from .ext import ContextLoader
 from .permissions import PermissionContext
-from .progress import ProgressReporter
+from .progress import (
+    DefaultProgressPolicy,
+    ProgressContext,
+    ProgressPolicy,
+    ProgressReporter,
+    ProgressSignal,
+)
 from .session import SessionContext
 
 
@@ -21,11 +28,16 @@ class ExecutionEngine:
     non_retryable_error_codes = {
         "approval_denied",
         "approval_required",
+        "blocked_by_security_policy",
         "blocked_by_policy",
         "duplicate_tool_call",
+        "invalid_argument_type",
+        "invalid_argument_value",
         "missing_argument",
         "path_outside_workspace",
         "path_not_found",
+        "test_command_ambiguous",
+        "test_command_not_detected",
         "unknown_argument",
     }
 
@@ -44,6 +56,8 @@ class ExecutionEngine:
         model_retry_delays: tuple[float, ...] | None = None,
         max_turns: int = 100,
         mcp_server_count: int = 0,
+        intent_classifier: RequestIntentClassifier | None = None,
+        progress_policy: ProgressPolicy | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -57,6 +71,8 @@ class ExecutionEngine:
         self.model_retry_delays = tuple(model_retry_delays or self.model_retry_delays)
         self.max_turns = max(1, int(max_turns))
         self.mcp_server_count = max(0, int(mcp_server_count))
+        self.intent_classifier = intent_classifier or RequestIntentClassifier()
+        self.progress_policy = progress_policy or DefaultProgressPolicy()
         self.max_duplicate_skips = 3
         self._tool_state_session_key: str | None = None
         self._keep_tool_state = False
@@ -120,6 +136,7 @@ class ExecutionEngine:
         completed_actions: dict[str, ToolResult] = {}
         duplicate_counts: dict[str, int] = {}
         progress_recovery_sent = False
+        request_intent = self.intent_classifier.classify(request.prompt, request.metadata)
 
         for turn in range(1, self.max_turns + 1):
             session.available_tools = self.tools.definitions()
@@ -228,6 +245,24 @@ class ExecutionEngine:
                     turn_results.append(result)
                     continue
 
+                preflight = getattr(self.tools, "preflight", None)
+                if callable(preflight):
+                    result = preflight(
+                        action,
+                        cwd=request.cwd,
+                        allowed_roots=permissions.workspace_roots(scopes={"run"}),
+                    )
+                    if result is not None:
+                        self._attach_action_metadata(result, action)
+                        self._record_synthetic_tool_result(result)
+                        if self.progress_reporter:
+                            self.progress_reporter.tool_skipped(action, "blocked by preflight")
+                        session.add_tool_result(result)
+                        turn_results.append(result)
+                        if result.error_code in self.non_retryable_error_codes:
+                            completed_actions[action_key] = result
+                        continue
+
                 definition = self.tools.definition_for(action.name)
                 decision = self.guardrails.check(action, definition)
                 if decision.requires_confirmation:
@@ -240,13 +275,18 @@ class ExecutionEngine:
                     if approval is True:
                         if decision.risk_level != "destructive":
                             approved_risk_groups.add(approval_key)
-                        result = self._execute_action(action, request.cwd, permissions)
+                        result = self._execute_action(
+                            action,
+                            request.cwd,
+                            permissions,
+                        )
                         session.add_tool_result(result)
                         turn_results.append(result)
                         if result.success or result.error_code in self.non_retryable_error_codes:
-                            if decision.risk_level == "write":
+                            if result.success and decision.risk_level == "write":
                                 completed_actions.clear()
                                 duplicate_counts.clear()
+                                progress_recovery_sent = False
                             completed_actions[action_key] = result
                         continue
 
@@ -281,16 +321,25 @@ class ExecutionEngine:
                     turn_results.append(result)
                     continue
 
-                result = self._execute_action(action, request.cwd, permissions)
+                result = self._execute_action(
+                    action,
+                    request.cwd,
+                    permissions,
+                )
                 session.add_tool_result(result)
                 turn_results.append(result)
                 if result.success or result.error_code in self.non_retryable_error_codes:
-                    if decision.risk_level == "write":
+                    if result.success and decision.risk_level == "write":
                         completed_actions.clear()
                         duplicate_counts.clear()
+                        progress_recovery_sent = False
                     completed_actions[action_key] = result
 
-            if reply.done:
+            security_recovery_required = any(
+                result.error_code == "blocked_by_security_policy"
+                for result in turn_results
+            )
+            if reply.done and not security_recovery_required:
                 return self._finish(
                     ExecutionSummary(
                         final_message=reply.message,
@@ -318,11 +367,15 @@ class ExecutionEngine:
             elif turn_results:
                 consecutive_failed_test_turns = 0
 
-            if (
-                not progress_recovery_sent
-                and self._should_send_progress_recovery(request.prompt, turn_results)
-            ):
-                progress_result = self._progress_recovery_result(turn_results)
+            progress_signal = self.progress_policy.evaluate(
+                ProgressContext(
+                    intent=request_intent,
+                    results=turn_results,
+                    recovery_sent=progress_recovery_sent,
+                )
+            )
+            if progress_signal is not None:
+                progress_result = self._progress_recovery_result(progress_signal)
                 self._record_synthetic_tool_result(progress_result)
                 session.add_tool_result(progress_result)
                 progress_recovery_sent = True
@@ -389,52 +442,6 @@ class ExecutionEngine:
     def _has_failed_test_result(self, results: list[ToolResult]) -> bool:
         return any(result.name == "run_tests" and not result.success for result in results)
 
-    def _should_send_progress_recovery(self, prompt: str, results: list[ToolResult]) -> bool:
-        if not self._request_implies_file_changes(prompt):
-            return False
-        return any(
-            result.error_code == "duplicate_tool_call" and result.name in self._read_context_tools()
-            for result in results
-        )
-
-    def _request_implies_file_changes(self, prompt: str) -> bool:
-        lowered = prompt.lower()
-        change_words = (
-            "add",
-            "build",
-            "change",
-            "create",
-            "edit",
-            "fix",
-            "generate",
-            "implement",
-            "modify",
-            "patch",
-            "scaffold",
-            "update",
-            "write",
-            "修改",
-            "创建",
-            "生成",
-            "实现",
-            "新增",
-            "修复",
-            "升级",
-        )
-        return any(word in lowered for word in change_words)
-
-    def _read_context_tools(self) -> set[str]:
-        return {
-            "file_info",
-            "find_files",
-            "git_diff",
-            "git_show",
-            "git_status",
-            "list_dir",
-            "read_file",
-            "search_text",
-        }
-
     def _approval_remembered(self, approval_key: tuple[str, str], approved_risk_groups: set[tuple[str, str]]) -> bool:
         return approval_key[1] != "destructive" and approval_key in approved_risk_groups
 
@@ -448,13 +455,22 @@ class ExecutionEngine:
         )
         return bool(approved)
 
-    def _execute_action(self, action, cwd: str, permissions: PermissionContext) -> ToolResult:
+    def _execute_action(
+        self,
+        action,
+        cwd: str,
+        permissions: PermissionContext,
+    ) -> ToolResult:
         progress_handle = None
         result = None
         if self.progress_reporter:
             progress_handle = self.progress_reporter.tool_started(action.name)
         try:
-            result = self.tools.execute(action, cwd=cwd, allowed_roots=permissions.workspace_roots(scopes={"run"}))
+            result = self.tools.execute(
+                action,
+                cwd=cwd,
+                allowed_roots=permissions.workspace_roots(scopes={"run"}),
+            )
             self._attach_action_metadata(result, action)
             if result.error_code == "path_outside_workspace":
                 if progress_handle is not None:
@@ -539,6 +555,8 @@ class ExecutionEngine:
         )
 
     def _attach_action_metadata(self, result: ToolResult, action) -> None:
+        if result.error_code == "blocked_by_security_policy":
+            return
         result.metadata.setdefault("action_arguments", dict(action.arguments))
 
     def _record_synthetic_tool_result(self, result: ToolResult) -> None:
@@ -573,12 +591,7 @@ class ExecutionEngine:
             },
         )
 
-    def _progress_recovery_result(self, results: list[ToolResult]) -> ToolResult:
-        repeated = [
-            result.metadata.get("action_arguments", {"tool": result.name})
-            for result in results
-            if result.error_code == "duplicate_tool_call"
-        ]
+    def _progress_recovery_result(self, signal: ProgressSignal) -> ToolResult:
         return ToolResult(
             name="progress_guard",
             success=False,
@@ -588,7 +601,7 @@ class ExecutionEngine:
                 "stop inspecting and make the next action a patch or a final answer explaining why no change is needed."
             ),
             error_code="progress_required",
-            metadata={"repeated_actions": repeated},
+            metadata={"repeated_actions": signal.repeated_actions},
         )
 
     def _non_retryable_failure_message(self, results: list[ToolResult]) -> str:

@@ -28,6 +28,37 @@ def test_registry_rejects_unknown_tool_and_arguments(tmp_path):
     assert missing.error_code == "missing_argument"
 
 
+def test_registry_validates_argument_types_and_number_bounds(tmp_path):
+    registry = make_registry()
+
+    wrong_type = registry.execute(
+        ToolAction(
+            name="run_tests",
+            arguments={"command": "printf ok", "timeout": "invalid"},
+        ),
+        cwd=str(tmp_path),
+    )
+    not_finite = registry.execute(
+        ToolAction(
+            name="run_tests",
+            arguments={"command": "printf ok", "timeout": float("nan")},
+        ),
+        cwd=str(tmp_path),
+    )
+    too_large = registry.execute(
+        ToolAction(
+            name="run_tests",
+            arguments={"command": "printf ok", "timeout": 3601},
+        ),
+        cwd=str(tmp_path),
+    )
+
+    assert wrong_type.error_code == "invalid_argument_type"
+    assert not_finite.error_code == "invalid_argument_value"
+    assert too_large.error_code == "invalid_argument_value"
+    assert not registry.state_for("shell_session")
+
+
 def test_default_definitions_hide_apply_change():
     definitions = make_registry().definitions()
 

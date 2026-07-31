@@ -4,17 +4,19 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .secret_patterns import TOKEN_VALUE_RE, is_sensitive_field
+
 REDACTED = "[REDACTED]"
 
-SENSITIVE_KEY_RE = re.compile(
-    r"(api[_-]?key|auth|credential|password|secret|token|^key$)",
-    re.IGNORECASE,
-)
-TOKEN_VALUE_RE = re.compile(
-    r"(?i)\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_a-z0-9]{12,}\b"
-)
 ASSIGNMENT_RE = re.compile(
-    r"(?i)\b((?:[a-z0-9_.-]*(?:api[_-]?key|credential|password|secret|token)[a-z0-9_.-]*|key))\s*([=:])\s*([^\s,;&]+)"
+    r"""(?ix)
+    (?<![a-z0-9_.-])
+    (?P<field_quote>["']?)
+    (?P<field>[a-z_][a-z0-9_.-]{0,127})
+    (?P=field_quote)
+    (?P<separator>\s*(?:=|:(?!//))\s*)
+    (?P<value>[^\s,;&]+)
+    """
 )
 BEARER_RE = re.compile(
     r"(?i)\b(bearer)\s+[-._~+/=a-z0-9]{12,}\b"
@@ -48,7 +50,7 @@ def is_sensitive_path(path: Path) -> bool:
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: REDACTED if SENSITIVE_KEY_RE.search(str(key)) and str(key) not in {
+            key: REDACTED if is_sensitive_field(str(key)) and str(key) not in {
                 "prompt_tokens", "completion_tokens", "total_tokens",
                 "cached_tokens", "reasoning_tokens",
                 "completion_tokens_details", "prompt_tokens_details"
@@ -65,6 +67,17 @@ def redact(value: Any) -> Any:
 
 
 def redact_text(value: str) -> str:
-    redacted = ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", value)
+    redacted = ASSIGNMENT_RE.sub(_redact_assignment, value)
     redacted = BEARER_RE.sub(lambda match: f"{match.group(1)} {REDACTED}", redacted)
     return TOKEN_VALUE_RE.sub(REDACTED, redacted)
+
+
+def _redact_assignment(match: re.Match) -> str:
+    field = match.group("field")
+    if not is_sensitive_field(field):
+        return match.group(0)
+    if "auth" in field.casefold() and match.group("value").casefold() == "bearer":
+        return match.group(0)
+    separator = ":" if ":" in match.group("separator") else "="
+    quote = match.group("field_quote")
+    return f"{quote}{field}{quote}{separator}{REDACTED}"

@@ -12,6 +12,7 @@ from .context import ExplicitContextLoader, ProjectRulesLoader, WorkspaceSummary
 from .interaction.cli import CLI
 from .interaction.presenter import ConsolePresenter
 from .interaction.tui import TUIConsolePresenter, should_use_tui
+from .intent import RequestIntentClassifier
 from .mcp.client import TransportBackedMCPClient, UnsupportedMCPClient
 from .mcp.discovery import MCPDiscoveryService
 from .mcp.manager import MCPManager
@@ -21,8 +22,10 @@ from .model.client import OpenAICompatibleModelClient, StubModelClient
 from .model.types import ModelClientConfig
 from .observability.logger import InMemoryLogger
 from .orchestration.engine import ExecutionEngine
+from .project import ProjectDetector
 from .safety.guardrails import Guardrails
 from .safety.policy import DefaultPolicy
+from .safety.content import build_content_safety_interceptors
 from .sessions import SessionStore
 from .tools.builtin_provider import BuiltinToolProvider
 from .tools.registry import ToolRegistry
@@ -82,12 +85,24 @@ def create_app(
     skills_registry.scan_metadata()
 
     project_rules_loader = ProjectRulesLoader(logger=logger)
-    workspace_summary_loader = WorkspaceSummaryLoader(logger=logger)
+    intent_classifier = RequestIntentClassifier()
+    project_detector = ProjectDetector()
+    workspace_summary_loader = WorkspaceSummaryLoader(
+        logger=logger,
+        intent_classifier=intent_classifier,
+        project_detector=project_detector,
+    )
     explicit_context_loader = ExplicitContextLoader(logger=logger)
 
     # Only builtin and warehouse-navigation tools are initially visible. External
     # MCP/Skill capabilities remain in the warehouse until explicitly activated.
-    providers = [BuiltinToolProvider(logger, limits=config.limits)]
+    providers = [
+        BuiltinToolProvider(
+            logger,
+            limits=config.limits,
+            project_detector=project_detector,
+        )
+    ]
     mcp_manager = None
     mcp_discovery = None
     capability_sources = [SkillToolboxSource(skills_registry, logger=logger)]
@@ -117,7 +132,11 @@ def create_app(
                 logger=logger,
             )
         )
-    tools = ToolRegistry(logger=logger, max_output_bytes=config.limits.tool_output_bytes)
+    tools = ToolRegistry(
+        logger=logger,
+        max_output_bytes=config.limits.tool_output_bytes,
+        interceptors=build_content_safety_interceptors(logger),
+    )
     for provider in providers:
         for tool in provider.get_tools():
             tools.register(tool)
@@ -149,6 +168,7 @@ def create_app(
         model_retry_delays=config.model_retry.delays,
         max_turns=config.orchestration.max_turns,
         mcp_server_count=sum(server.enabled for server in config.mcp_servers),
+        intent_classifier=intent_classifier,
     )
     engine.resource_providers = []
     if mcp_manager is not None and mcp_discovery is not None:

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import math
+
 from ..types import ToolAction, ToolDefinition, ToolResult
 from .base import ToolContext
 
 
 class ToolRegistry:
-    def __init__(self, logger, max_output_bytes: int = 32_000) -> None:
+    def __init__(
+        self,
+        logger,
+        max_output_bytes: int = 32_000,
+        interceptors: list | None = None,
+    ) -> None:
         self._tools = {}
         self._logger = logger
         self._state = {}
@@ -13,6 +20,10 @@ class ToolRegistry:
         self._providers = []
         self._provider_tool_owners: dict[str, int] = {}
         self._max_output_bytes = max(1, int(max_output_bytes))
+        self._interceptors = list(interceptors or [])
+
+    def register_interceptor(self, interceptor) -> None:
+        self._interceptors.append(interceptor)
 
     def register(self, tool) -> bool:
         if tool.name in self._tools:
@@ -101,26 +112,56 @@ class ToolRegistry:
         return tool.definition()
 
     def execute(self, action: ToolAction, *, cwd: str = ".", allowed_roots: list[str] | None = None) -> ToolResult:
+        blocked = self.preflight(action, cwd=cwd, allowed_roots=allowed_roots)
+        if blocked is not None:
+            self._record_result(blocked)
+            return blocked
+        tool = self._tools[action.name]
+        context = self._context(cwd, allowed_roots)
+        self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
+        result = tool.run(action, context)
+        self._record_result(result)
+        return result
+
+    def preflight(
+        self,
+        action: ToolAction,
+        *,
+        cwd: str = ".",
+        allowed_roots: list[str] | None = None,
+    ) -> ToolResult | None:
         tool = self._tools.get(action.name)
         if tool is None:
-            result = ToolResult(
+            return ToolResult(
                 name=action.name,
                 success=False,
                 output=f"unknown tool: {action.name}",
                 error_code="unknown_tool",
             )
-            self._record_result(result)
-            return result
 
         validation_error = self._validate(action, getattr(tool, "input_schema", {}))
         if validation_error is not None:
-            self._record_result(validation_error)
             return validation_error
 
-        self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
-        result = tool.run(action, ToolContext(cwd=cwd, state=self._state, allowed_roots=list(allowed_roots or []), max_output_bytes=self._max_output_bytes))
-        self._record_result(result)
-        return result
+        context = self._context(cwd, allowed_roots)
+        definition = tool.definition()
+        for interceptor in self._interceptors:
+            blocked = interceptor.before_execute(action, definition, context)
+            if blocked is not None:
+                return blocked
+        return None
+
+    def _context(
+        self,
+        cwd: str,
+        allowed_roots: list[str] | None,
+    ) -> ToolContext:
+        return ToolContext(
+            cwd=cwd,
+            state=self._state,
+            allowed_roots=list(allowed_roots or []),
+            max_output_bytes=self._max_output_bytes,
+        )
 
     def summarize_result(self, result: ToolResult) -> str:
         tool = self._tools.get(result.name)
@@ -154,7 +195,73 @@ class ToolRegistry:
                     metadata={"unknown": unknown},
                 )
 
+        property_schemas = schema.get("properties", {})
+        if isinstance(property_schemas, dict):
+            for name, value in action.arguments.items():
+                field_schema = property_schemas.get(name)
+                if not isinstance(field_schema, dict):
+                    continue
+                expected = field_schema.get("type")
+                if isinstance(expected, str) and not self._matches_type(value, expected):
+                    return ToolResult(
+                        name=action.name,
+                        success=False,
+                        output=(
+                            f"argument '{name}' must have type {expected}; "
+                            f"received {type(value).__name__}"
+                        ),
+                        error_code="invalid_argument_type",
+                        metadata={
+                            "argument": name,
+                            "expected": expected,
+                            "actual": type(value).__name__,
+                        },
+                    )
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if not math.isfinite(float(value)):
+                        return self._invalid_number(action, name, "must be finite")
+                    minimum = field_schema.get("minimum")
+                    maximum = field_schema.get("maximum")
+                    if isinstance(minimum, (int, float)) and value < minimum:
+                        return self._invalid_number(
+                            action,
+                            name,
+                            f"must be at least {minimum}",
+                        )
+                    if isinstance(maximum, (int, float)) and value > maximum:
+                        return self._invalid_number(
+                            action,
+                            name,
+                            f"must be at most {maximum}",
+                        )
+
         return None
+
+    def _matches_type(self, value, expected: str) -> bool:
+        checks = {
+            "array": lambda item: isinstance(item, list),
+            "boolean": lambda item: isinstance(item, bool),
+            "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+            "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
+            "object": lambda item: isinstance(item, dict),
+            "string": lambda item: isinstance(item, str),
+        }
+        check = checks.get(expected)
+        return True if check is None else check(value)
+
+    def _invalid_number(
+        self,
+        action: ToolAction,
+        name: str,
+        reason: str,
+    ) -> ToolResult:
+        return ToolResult(
+            name=action.name,
+            success=False,
+            output=f"argument '{name}' {reason}",
+            error_code="invalid_argument_value",
+            metadata={"argument": name, "reason": reason},
+        )
 
     def _record_result(self, result: ToolResult) -> None:
         self._logger.record(

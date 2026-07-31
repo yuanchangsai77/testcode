@@ -86,3 +86,32 @@ def test_logger_redacts_sensitive_keys_and_token_like_values(tmp_path):
     assert "sk-test123456789abcdef" not in combined
     assert "ghp_1234567890abcdef" not in combined
     assert "[REDACTED]" in combined
+
+
+def test_logger_redacts_service_key_names(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(
+        prompt="configure service",
+        cwd=str(tmp_path),
+        metadata={
+            "AMAP_WEB_SERVICE_KEY": "1234567890abcdef1234567890abcdef",
+        },
+    )
+    logger.finalize(
+        request,
+        ExecutionSummary(
+            final_message=(
+                "AMAP_WEB_SERVICE_KEY="
+                "1234567890abcdef1234567890abcdef"
+            ),
+            tool_results=[],
+        ),
+    )
+
+    run_dir = tmp_path / "runs" / logger.last_run_id
+    combined = (
+        (run_dir / "events.jsonl").read_text(encoding="utf-8")
+        + (run_dir / "details.log").read_text(encoding="utf-8")
+    )
+    assert "1234567890abcdef" not in combined
+    assert "[REDACTED]" in combined

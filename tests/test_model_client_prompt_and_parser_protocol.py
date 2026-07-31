@@ -219,6 +219,23 @@ def test_build_messages_explains_staged_warehouse_without_exposing_contents():
     assert "Never infer that credentials, transports, or integrations are missing" in system
 
 
+def test_build_messages_includes_non_overridable_security_baseline():
+    session = SessionContext(request=UserRequest(prompt="create an app", cwd="/repo"))
+
+    system = str(ModelPromptBuilder().build_messages(session)[0]["content"])
+
+    assert "[SEC-CREDENTIAL-001]" in system
+    assert "environment variables or a protected secret store" in system
+    assert "[SEC-CREDENTIAL-002]" in system
+    assert ".env.example" in system
+    assert "[SEC-CLIENT-001]" in system
+    assert "browser-delivered" in system
+    assert "[PY-PACKAGE-001]" in system
+    assert "distribution project name may contain hyphens" in system
+    assert "mandatory baseline" in system
+    assert "Do not encode, split, rename" in system
+
+
 def test_build_messages_includes_recent_session_trace_summary():
     builder = ModelPromptBuilder()
     session = SessionContext(

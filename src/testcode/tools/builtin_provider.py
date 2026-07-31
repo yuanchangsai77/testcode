@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..project import ProjectDetector
 from .base import Tool
 from .builtins import (
     apply_change_tool,
@@ -18,9 +19,15 @@ from .builtins import (
 
 
 class BuiltinToolProvider:
-    def __init__(self, logger, limits=None) -> None:
+    def __init__(
+        self,
+        logger,
+        limits=None,
+        project_detector: ProjectDetector | None = None,
+    ) -> None:
         self.logger = logger
         self.limits = limits
+        self.project_detector = project_detector or ProjectDetector()
 
     def get_tools(self) -> list[Tool]:
         return [
@@ -30,7 +37,7 @@ class BuiltinToolProvider:
             find_files_tool(getattr(self.limits, "search_results", 200)),
             search_text_tool(getattr(self.limits, "search_results", 200)),
             shell_exec_tool(),
-            run_tests_tool(),
+            run_tests_tool(self.project_detector),
             git_status_tool(),
             git_diff_tool(),
             git_show_tool(),
