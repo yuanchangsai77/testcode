@@ -199,14 +199,11 @@ codes, and workspace-bounded path handling:
 - `find_files`, `search_text`: bounded file and text search
 - `shell_exec`: execute a command in the workspace
 - `patch`: apply a validated unified diff in the workspace
-- `apply_change`: deprecated compatibility editing tool; new workflows should prefer `patch`
 - `run_tests`: execute a test command with captured output and duration
 - `git_status`, `git_diff`, `git_show`: read-only git inspection
 - `warehouse_list`, `toolbox_open`, `capability_activate`,
   `capability_release`, `capability_status`: inspect and manage on-demand
   Skill/MCP capabilities
-
-Application composition currently registers `apply_change` for compatibility. It is deprecated and should not be used for new workflows.
 
 ### Shell 会话与中断
 

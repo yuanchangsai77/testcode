@@ -34,7 +34,13 @@ class ModelPromptBuilder:
             "- If a tool result has error_code approval_denied, state that the user declined the action. Do not describe it as waiting for approval, ask the user to approve it, or retry it.",
             "- If a tool result has error_code duplicate_tool_call, use the previous result in session history or stop with a concise explanation.",
             "- If a tool result has error_code progress_required, do not call another read-only inspection tool. Use patch for requested file changes or finish with the reason no change is needed.",
-            "- If the user asked for file changes and you already know the target project root and relevant files, stop inspecting and use patch.",
+            "- Before patching an existing file, inspect every affected hunk with read_file or search_text. You do not need to read unrelated parts of the file.",
+            "- search_text returns nearby context and counts only the returned lines as inspected.",
+            "- If patch returns file_not_read, follow its read hint, inspect only the missing range, and retry the patch without asking the user.",
+            "- If patch returns file_changed_since_read, use search_text to re-locate the intended content, inspect its current surrounding lines, and regenerate the hunk without asking the user.",
+            "- If a successful patch reports automatic relocation, accept the resolved location, do not repeat the patch, and account for the new line positions in later work.",
+            "- Do not call read_file, search_text, or another tool solely to verify a successful automatic relocation. If the requested change is complete, finish using the reported location.",
+            "- If the user asked for file changes and you already inspected the affected lines, stop inspecting and use patch.",
             "- For requests to create, generate, scaffold, or upgrade a standard project structure, after locating the target root, create or update the standard files directly instead of repeatedly listing directories.",
             "- Do not require a complete directory tree before making a reasonable scoped change.",
             "- [SEC-CREDENTIAL-001] Never hardcode real credentials, private keys, access tokens, or passwords in source code, tests, examples, or configuration templates. Load them at runtime from environment variables or a protected secret store.",
@@ -46,6 +52,7 @@ class ModelPromptBuilder:
             "- shell_exec keeps shell state within the current run, including cd and exported environment variables.",
             "- Use shell_exec cwd when you need to start or reset the persistent shell working directory explicitly.",
             "- Prefer structured tools such as list_dir, find_files, read_file, search_text, and patch over shell_exec when they can do the job.",
+            "- Do not use shell_exec to create or edit files when patch is available.",
             "- Do not retry a failed tool call with the same arguments unless the user gives new information.",
         ]
 

@@ -335,11 +335,16 @@ class ExecutionEngine:
                         progress_recovery_sent = False
                     completed_actions[action_key] = result
 
-            security_recovery_required = any(
-                result.error_code == "blocked_by_security_policy"
+            recovery_required = any(
+                result.error_code
+                in {
+                    "blocked_by_security_policy",
+                    "file_changed_since_read",
+                    "file_not_read",
+                }
                 for result in turn_results
             )
-            if reply.done and not security_recovery_required:
+            if reply.done and not recovery_required:
                 return self._finish(
                     ExecutionSummary(
                         final_message=reply.message,

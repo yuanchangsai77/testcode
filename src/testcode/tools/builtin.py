@@ -3,7 +3,6 @@ from __future__ import annotations
 from ..project import ProjectDetector
 from ..safety.content import build_content_safety_interceptors
 from .builtins import (
-    apply_change_tool,
     file_info_tool,
     find_files_tool,
     git_diff_tool,
@@ -38,7 +37,6 @@ def build_builtin_registry(logger, *, max_output_bytes: int = 32_000) -> ToolReg
         git_diff_tool(),
         git_show_tool(),
         patch_tool(),
-        apply_change_tool(),
     ):
         registry.register(builtin_tool)
     return registry

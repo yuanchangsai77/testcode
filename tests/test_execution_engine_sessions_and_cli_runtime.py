@@ -876,6 +876,113 @@ def test_engine_keeps_read_state_within_single_execute(tmp_path):
     assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "after\n"
 
 
+def test_engine_recovers_unread_patch_without_interrupting_the_user(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+    diff = "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-before\n+after\n"
+
+    class PatchThenReadModel:
+        calls = 0
+
+        def respond(self, session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="apply change",
+                    actions=[ToolAction(name="patch", arguments={"diff": diff})],
+                    done=True,
+                )
+            if any(result.error_code == "file_not_read" for result in session.tool_results):
+                if not any(result.name == "read_file" for result in session.tool_results):
+                    return ModelReply(
+                        message="inspect affected line",
+                        actions=[
+                            ToolAction(
+                                name="read_file",
+                                arguments={
+                                    "path": "target.txt",
+                                    "start_line": 1,
+                                    "end_line": 1,
+                                },
+                            )
+                        ],
+                        done=False,
+                    )
+                return ModelReply(
+                    message="changed",
+                    actions=[ToolAction(name="patch", arguments={"diff": diff})],
+                    done=True,
+                )
+            raise AssertionError("unexpected model state")
+
+    logger = InMemoryLogger()
+    model = PatchThenReadModel()
+    summary = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    ).execute(UserRequest(prompt="update target", cwd=str(tmp_path)))
+
+    assert model.calls == 3
+    assert [result.name for result in summary.tool_results] == [
+        "patch",
+        "read_file",
+        "patch",
+    ]
+    assert summary.tool_results[0].error_code == "file_not_read"
+    assert summary.tool_results[-1].success is True
+    assert target.read_text(encoding="utf-8") == "after\n"
+
+
+def test_engine_does_not_force_model_turn_after_automatic_patch_relocation(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("before\ntarget\nafter\n", encoding="utf-8")
+    diff = (
+        "--- a/target.txt\n"
+        "+++ b/target.txt\n"
+        "@@ -1,3 +1,3 @@\n"
+        " before\n"
+        "-target\n"
+        "+changed\n"
+        " after\n"
+    )
+
+    class RelocationAwareModel:
+        calls = 0
+
+        def respond(self, session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="inspect target",
+                    actions=[ToolAction(name="read_file", arguments={"path": "target.txt"})],
+                    done=False,
+                )
+            if self.calls == 2:
+                target.write_text("inserted\nbefore\ntarget\nafter\n", encoding="utf-8")
+                return ModelReply(
+                    message="apply change",
+                    actions=[ToolAction(name="patch", arguments={"diff": diff})],
+                    done=True,
+                )
+            raise AssertionError("automatic relocation must not force another model turn")
+
+    logger = InMemoryLogger()
+    model = RelocationAwareModel()
+    summary = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    ).execute(UserRequest(prompt="update target", cwd=str(tmp_path)))
+
+    assert model.calls == 2
+    assert summary.final_message == "apply change"
+    assert summary.tool_results[-1].metadata["relocations"][0]["offset"] == 1
+    assert target.read_text(encoding="utf-8") == "inserted\nbefore\nchanged\nafter\n"
+
+
 def test_engine_resets_read_state_between_executes(tmp_path):
     target = tmp_path / "target.txt"
     target.write_text("before\n", encoding="utf-8")
@@ -895,6 +1002,7 @@ def test_engine_resets_read_state_between_executes(tmp_path):
         tools=tools,
         guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
         logger=logger,
+        max_turns=2,
     )
     first = engine.execute(UserRequest(prompt="read target", cwd=str(tmp_path)))
 

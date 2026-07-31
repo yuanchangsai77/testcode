@@ -3,7 +3,6 @@ from __future__ import annotations
 from ..project import ProjectDetector
 from .base import Tool
 from .builtins import (
-    apply_change_tool,
     file_info_tool,
     find_files_tool,
     git_diff_tool,
@@ -42,5 +41,4 @@ class BuiltinToolProvider:
             git_diff_tool(),
             git_show_tool(),
             patch_tool(),
-            apply_change_tool(),
         ]

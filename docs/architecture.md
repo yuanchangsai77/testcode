@@ -238,9 +238,6 @@ Built-in tools:
 - `shell_exec`, `run_tests`
 - `git_status`, `git_diff`, `git_show`
 - `patch`
-- `apply_change` (deprecated compatibility tool; prefer `patch`)
-
-`apply_change` remains registered by the current built-in provider for compatibility, but new workflows should use `patch`.
 
 This section describes where tool execution lives. Field-level placement rules for `ToolResult.output`, `metadata`, summarizers, and prompt visibility belong to `docs/reference/tool-contract.md`.
 

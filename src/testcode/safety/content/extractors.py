@@ -80,25 +80,6 @@ class PatchMutationExtractor:
         return path[2:] if path.startswith("b/") else path
 
 
-class FullContentMutationExtractor:
-    def supports(self, action: ToolAction, definition: ToolDefinition) -> bool:
-        return action.name == "apply_change" and definition.risk_level == "write"
-
-    def extract(self, action: ToolAction) -> list[ContentMutation]:
-        content = action.arguments.get("content")
-        path = action.arguments.get("path")
-        if not isinstance(content, str) or not isinstance(path, str):
-            return []
-        return [
-            ContentMutation(
-                path=path,
-                added_text=content,
-                source=action.name,
-                line=1,
-            )
-        ]
-
-
 class ShellCommandMutationExtractor:
     """Scan literal shell command text as a best-effort supplemental guard."""
 

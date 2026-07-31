@@ -1,8 +1,4 @@
-from .extractors import (
-    FullContentMutationExtractor,
-    PatchMutationExtractor,
-    ShellCommandMutationExtractor,
-)
+from .extractors import PatchMutationExtractor, ShellCommandMutationExtractor
 from .interceptor import SecretWriteGuard
 from .models import ContentMutation, SafetyFinding
 from .scanner import SecretScanner
@@ -13,7 +9,6 @@ def build_content_safety_interceptors(logger=None):
         SecretWriteGuard(
             extractors=[
                 PatchMutationExtractor(),
-                FullContentMutationExtractor(),
                 ShellCommandMutationExtractor(),
             ],
             scanners=[SecretScanner()],
@@ -24,7 +19,6 @@ def build_content_safety_interceptors(logger=None):
 
 __all__ = [
     "ContentMutation",
-    "FullContentMutationExtractor",
     "PatchMutationExtractor",
     "SafetyFinding",
     "ShellCommandMutationExtractor",

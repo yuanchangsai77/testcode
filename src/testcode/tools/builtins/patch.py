@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
+import re
 
 from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import ResolvedPath, resolve_workspace_path, retarget, run_command, schema
 from ..summary import patch_summary
+from .read_state import (
+    observed_empty_file,
+    observed_line,
+    observed_line_matches,
+    snapshot,
+    snapshot_changed,
+    text_lines,
+)
 
 MAX_PATCH_FILES = 20
 MAX_PATCH_LINES = 2_000
@@ -15,7 +23,11 @@ MAX_PATCH_LINES = 2_000
 def tool() -> SimpleTool:
     return SimpleTool(
         name="patch",
-        description="Apply a unified diff inside the workspace after validating paths and context.",
+        description=(
+            "Apply a unified diff inside the workspace after validating paths and "
+            "observed context. Unchanged hunks that moved to one unique location "
+            "may be safely relocated and reported."
+        ),
         arguments={"diff": "Unified diff text to apply."},
         input_schema=schema({"diff": {"type": "string"}}, required=["diff"]),
         risk_level="write",
@@ -35,6 +47,8 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
             error_code="patch_too_large",
             metadata={"line_count": len(lines), "max_lines": MAX_PATCH_LINES},
         )
+    if diff and not diff.endswith("\n"):
+        diff += "\n"
 
     changed_files = changed_files_from_diff(diff)
     if not changed_files:
@@ -48,6 +62,8 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
             metadata={"changed_files": changed_files, "max_files": MAX_PATCH_FILES},
         )
 
+    hunks_by_file = parse_hunks(diff)
+    relocations: list[dict[str, object]] = []
     resolved_files = {}
     for path in changed_files:
         resolved = resolve_workspace_path(context, path)
@@ -55,10 +71,17 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
             return retarget(resolved, action.name)
         resolved_files[path] = resolved
         if resolved.path.exists():
-            read_error = validate_file_was_read(action.name, resolved.path, context.state)
+            read_error, file_relocations = validate_hunks_were_read(
+                action.name,
+                path,
+                resolved.path,
+                hunks_by_file.get(path, []),
+                context.state,
+            )
             if read_error is not None:
                 read_error.metadata.setdefault("changed_files", changed_files)
                 return read_error
+            relocations.extend(file_relocations)
 
     roots = {resolved.root for resolved in resolved_files.values()}
     if len(roots) != 1:
@@ -71,6 +94,7 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
         )
 
     root = roots.pop()
+    diff = relocate_diff_hunks(diff, hunks_by_file)
     diff = rebase_diff_paths(diff, resolved_files, root)
 
     check = run_command(["git", "apply", "--check", "-"], root, input_text=diff, shell=False)
@@ -84,6 +108,22 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
                 use_recount = True
         
         if not use_recount:
+            if error_code == "patch_context_mismatch":
+                stale = stale_read_error(
+                    action.name,
+                    resolved_files,
+                    hunks_by_file,
+                    context.state,
+                )
+                if stale is not None:
+                    stale.metadata.update(
+                        {
+                            "changed_files": changed_files,
+                            "preview": diff,
+                            "line_stats": line_stats(diff),
+                        }
+                    )
+                    return stale
             return ToolResult(
                 name=action.name,
                 success=False,
@@ -97,11 +137,27 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
     if not applied.success:
         return retarget(applied, action.name)
 
+    output = "applied patch:\n" + "\n".join(changed_files)
+    if relocations:
+        notices = "\n".join(
+            (
+                f"{item['path']}: lines {item['old_start']}-{item['old_end']} "
+                f"moved to {item['new_start']}-{item['new_end']} "
+                f"(offset {int(item['offset']):+d})"
+            )
+            for item in relocations
+        )
+        output += "\nautomatically relocated unchanged patch context:\n" + notices
     return ToolResult(
         name=action.name,
         success=True,
-        output="applied patch:\n" + "\n".join(changed_files),
-        metadata={"changed_files": changed_files, "preview": diff, "line_stats": line_stats(diff)},
+        output=output,
+        metadata={
+            "changed_files": changed_files,
+            "preview": diff,
+            "line_stats": line_stats(diff),
+            "relocations": relocations,
+        },
     )
 
 
@@ -151,37 +207,302 @@ def _diff_path(raw_path: str) -> str:
     return raw_path
 
 
-def validate_file_was_read(tool_name: str, path: Path, state: dict) -> ToolResult | None:
-    read_files = state.get("read_files", {})
-    previous = read_files.get(str(path))
-    if not previous:
-        return ToolResult(
-            name=tool_name,
-            success=False,
-            output=f"patch target must be read before modification: {path}",
-            error_code="file_not_read",
-            metadata={"path": str(path)},
-        )
+def parse_hunks(diff: str) -> dict[str, list[dict[str, object]]]:
+    hunks: dict[str, list[dict[str, object]]] = {}
+    lines = diff.splitlines()
+    current_path: str | None = None
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("--- "):
+            old_path = _diff_path(line[4:].strip())
+            new_path = ""
+            if index + 1 < len(lines) and lines[index + 1].startswith("+++ "):
+                new_path = _diff_path(lines[index + 1][4:].strip())
+            current_path = new_path if old_path == "/dev/null" else old_path
+            index += 1
+        elif line.startswith("@@ ") and current_path and current_path != "/dev/null":
+            match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", line)
+            if match is None:
+                index += 1
+                continue
+            old_start = int(match.group(1))
+            old_line = old_start
+            required: list[tuple[int, str]] = []
+            index += 1
+            while index < len(lines) and not lines[index].startswith(("@@ ", "--- ")):
+                body_line = lines[index]
+                if body_line.startswith((" ", "-")):
+                    required.append((old_line, body_line[1:]))
+                    old_line += 1
+                elif not body_line.startswith(("+", "\\")):
+                    break
+                index += 1
+            hunks.setdefault(current_path, []).append(
+                {"old_start": old_start, "required": required}
+            )
+            continue
+        index += 1
+    return hunks
 
-    data = path.read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
-    stat = path.stat()
-    if digest != previous.get("sha256") or stat.st_mtime_ns != previous.get("mtime_ns"):
+
+def validate_hunks_were_read(
+    tool_name: str,
+    diff_path: str,
+    path: Path,
+    hunks: list[dict[str, object]],
+    state: dict,
+) -> tuple[ToolResult | None, list[dict[str, object]]]:
+    read_files = state.get("read_files", {})
+    entry = read_files.get(str(path))
+    if not entry:
+        affected_lines = hunk_affected_lines(hunks)
+        start_line = min(affected_lines) if affected_lines else 1
+        end_line = max(affected_lines) if affected_lines else start_line
         return ToolResult(
             name=tool_name,
             success=False,
-            output=f"patch target changed after last read: {path}",
-            error_code="file_changed_since_read",
+            output=(
+                f"patch target has not been inspected: {diff_path}. "
+                f"Read lines {start_line}-{end_line} with read_file and retry."
+            ),
+            error_code="file_not_read",
             metadata={
                 "path": str(path),
-                "previous_sha256": previous.get("sha256"),
-                "current_sha256": digest,
-                "previous_mtime_ns": previous.get("mtime_ns"),
-                "current_mtime_ns": stat.st_mtime_ns,
+                "read_hint": {
+                    "path": diff_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                },
             },
-        )
+        ), []
 
+    missing: list[int] = []
+    for hunk in hunks:
+        required = hunk.get("required", [])
+        if required:
+            missing.extend(
+                line_no
+                for line_no, content in required
+                if not observed_line_matches(entry, line_no, content)
+            )
+            continue
+
+        old_start = int(hunk.get("old_start", 0))
+        anchor = max(1, old_start)
+        if not observed_line(entry, anchor) and not observed_empty_file(entry):
+            missing.append(anchor)
+
+    if missing:
+        start_line = min(missing)
+        end_line = max(missing)
+        return ToolResult(
+            name=tool_name,
+            success=False,
+            output=(
+                f"patch includes lines not yet inspected in {diff_path}: "
+                f"{format_line_ranges(missing)}. "
+                f"Read that range with read_file and retry."
+            ),
+            error_code="file_not_read",
+            metadata={
+                "path": str(path),
+                "missing_lines": sorted(set(missing)),
+                "read_hint": {
+                    "path": diff_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                },
+            },
+        ), []
+
+    current_data, current_sha256, current_mtime_ns = snapshot(path)
+    current_lines = text_lines(current_data)
+    stale_lines: list[int] = []
+    relocations: list[dict[str, object]] = []
+    for hunk in hunks:
+        required = hunk.get("required", [])
+        if required:
+            old_start = required[0][0]
+            contents = [content for _line_no, content in required]
+            old_index = old_start - 1
+            if current_lines[old_index : old_index + len(contents)] == contents:
+                continue
+            matches = find_line_sequence(current_lines, contents)
+            if len(matches) != 1:
+                stale_lines.extend(line_no for line_no, _content in required)
+                continue
+            new_start = matches[0]
+            if new_start != old_start:
+                hunk["relocation_delta"] = new_start - old_start
+                relocations.append(
+                    {
+                        "path": diff_path,
+                        "old_start": old_start,
+                        "old_end": old_start + len(contents) - 1,
+                        "new_start": new_start,
+                        "new_end": new_start + len(contents) - 1,
+                        "offset": new_start - old_start,
+                    }
+                )
+            continue
+
+        anchor = max(1, int(hunk.get("old_start", 0)))
+        if observed_empty_file(entry):
+            if current_lines:
+                stale_lines.append(anchor)
+        elif (
+            anchor > len(current_lines)
+            or not observed_line_matches(entry, anchor, current_lines[anchor - 1])
+        ):
+            stale_lines.append(anchor)
+
+    if stale_lines:
+        return changed_region_error(
+            tool_name,
+            diff_path,
+            path,
+            stale_lines,
+            current_sha256,
+            current_mtime_ns,
+        ), []
+
+    return None, relocations
+
+
+def stale_read_error(
+    tool_name: str,
+    resolved_files: dict[str, ResolvedPath],
+    hunks_by_file: dict[str, list[dict[str, object]]],
+    state: dict,
+) -> ToolResult | None:
+    read_files = state.get("read_files", {})
+    for diff_path, resolved in resolved_files.items():
+        if not resolved.path.exists() or not hunks_by_file.get(diff_path):
+            continue
+        entry = read_files.get(str(resolved.path))
+        if not entry:
+            continue
+        _data, current_sha256, current_mtime_ns = snapshot(resolved.path)
+        if not snapshot_changed(entry, current_sha256):
+            continue
+        affected_lines = hunk_affected_lines(hunks_by_file[diff_path])
+        start_line = min(affected_lines) if affected_lines else 1
+        end_line = max(affected_lines) if affected_lines else start_line
+        return changed_region_error(
+            tool_name,
+            diff_path,
+            resolved.path,
+            affected_lines,
+            current_sha256,
+            current_mtime_ns,
+        )
     return None
+
+
+def changed_region_error(
+    tool_name: str,
+    diff_path: str,
+    path: Path,
+    affected_lines: list[int],
+    current_sha256: str,
+    current_mtime_ns: int,
+) -> ToolResult:
+    start_line = min(affected_lines) if affected_lines else 1
+    end_line = max(affected_lines) if affected_lines else start_line
+    return ToolResult(
+        name=tool_name,
+        success=False,
+        output=(
+            f"the inspected patch region moved or changed in {diff_path}. "
+            "Re-locate the intended content with search_text, read its current "
+            "surrounding lines, and retry."
+        ),
+        error_code="file_changed_since_read",
+        metadata={
+            "path": str(path),
+            "current_sha256": current_sha256,
+            "current_mtime_ns": current_mtime_ns,
+            "relocate_required": True,
+            "read_hint": {
+                "path": diff_path,
+                "start_line": start_line,
+                "end_line": end_line,
+            },
+        },
+    )
+
+
+def hunk_affected_lines(hunks: list[dict[str, object]]) -> list[int]:
+    affected: list[int] = []
+    for hunk in hunks:
+        required = hunk.get("required", [])
+        if required:
+            affected.extend(line_no for line_no, _content in required)
+        else:
+            affected.append(max(1, int(hunk.get("old_start", 0))))
+    return affected
+
+
+def find_line_sequence(lines: list[str], sequence: list[str]) -> list[int]:
+    if not sequence or len(sequence) > len(lines):
+        return []
+    width = len(sequence)
+    return [
+        index + 1
+        for index in range(len(lines) - width + 1)
+        if lines[index : index + width] == sequence
+    ]
+
+
+def relocate_diff_hunks(
+    diff: str,
+    hunks_by_file: dict[str, list[dict[str, object]]],
+) -> str:
+    rewritten: list[str] = []
+    current_path: str | None = None
+    hunk_indexes: dict[str, int] = {}
+    header_pattern = re.compile(
+        r"^(@@ -)(\d+)((?:,\d+)? \+)(\d+)((?:,\d+)? @@.*)$"
+    )
+    for line in diff.splitlines():
+        if line.startswith("--- "):
+            old_path = _diff_path(line[4:].strip())
+            current_path = old_path
+        elif line.startswith("+++ ") and current_path == "/dev/null":
+            current_path = _diff_path(line[4:].strip())
+        elif line.startswith("@@ ") and current_path:
+            hunk_index = hunk_indexes.get(current_path, 0)
+            file_hunks = hunks_by_file.get(current_path, [])
+            if hunk_index < len(file_hunks):
+                delta = int(file_hunks[hunk_index].get("relocation_delta", 0))
+                match = header_pattern.match(line)
+                if delta and match is not None:
+                    old_start = int(match.group(2)) + delta
+                    new_start = int(match.group(4)) + delta
+                    line = (
+                        f"{match.group(1)}{old_start}{match.group(3)}"
+                        f"{new_start}{match.group(5)}"
+                    )
+            hunk_indexes[current_path] = hunk_index + 1
+        rewritten.append(line)
+    return "\n".join(rewritten) + ("\n" if diff.endswith("\n") else "")
+
+
+def format_line_ranges(lines: list[int]) -> str:
+    unique = sorted(set(lines))
+    if not unique:
+        return ""
+    ranges: list[str] = []
+    start = previous = unique[0]
+    for line in unique[1:]:
+        if line == previous + 1:
+            previous = line
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = line
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(ranges)
 
 
 def classify_git_apply_failure(output: str) -> str:

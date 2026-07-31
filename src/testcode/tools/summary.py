@@ -118,7 +118,20 @@ def git_show_summary(result: ToolResult) -> str:
 
 
 def patch_summary(result: ToolResult) -> str:
-    return f"changed {file_list_summary(result.metadata.get('changed_files', []))}"
+    summary = f"changed {file_list_summary(result.metadata.get('changed_files', []))}"
+    relocations = result.metadata.get("relocations", [])
+    if not isinstance(relocations, list) or not relocations:
+        return summary
+    offsets = sorted(
+        {
+            int(item.get("offset", 0))
+            for item in relocations
+            if isinstance(item, dict)
+        }
+    )
+    offset_text = ", ".join(f"{offset:+d}" for offset in offsets)
+    noun = "hunk" if len(relocations) == 1 else "hunks"
+    return f"{summary}; relocated {len(relocations)} {noun} (offset {offset_text})"
 
 
 def _line_count(value: object) -> int:

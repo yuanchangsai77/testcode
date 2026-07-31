@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from .apply_change import tool as apply_change_tool
 from .file_info import tool as file_info_tool
 from .find_files import tool as find_files_tool
 from .git_diff import tool as git_diff_tool
@@ -14,7 +13,6 @@ from .search_text import tool as search_text_tool
 from .shell_exec import tool as shell_exec_tool
 
 __all__ = [
-    "apply_change_tool",
     "file_info_tool",
     "find_files_tool",
     "git_diff_tool",

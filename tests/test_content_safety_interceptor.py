@@ -98,24 +98,6 @@ def test_patch_allows_removing_an_existing_credential(tmp_path):
     assert "1234567890abcdef" not in target.read_text(encoding="utf-8")
 
 
-def test_apply_change_uses_the_same_content_safety_guard(tmp_path):
-    registry = build_builtin_registry(InMemoryLogger())
-
-    result = registry.execute(
-        ToolAction(
-            name="apply_change",
-            arguments={
-                "path": "config.py",
-                "content": 'PASSWORD = "abcdefghijklmnop"',
-            },
-        ),
-        cwd=str(tmp_path),
-    )
-
-    assert result.error_code == "blocked_by_security_policy"
-    assert not (tmp_path / "config.py").exists()
-
-
 def test_security_preflight_blocks_before_requesting_write_approval(tmp_path):
     secret = "1234567890abcdef1234567890abcdef"
 
