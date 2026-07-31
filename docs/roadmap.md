@@ -101,7 +101,7 @@ MCP 最小主链路已经完成，不再规划第二套 transport 或全量工�
 
 ### 分发与质量
 
-- `--version`、zsh/fish completion 和 release checklist。
+- zsh/fish completion 和 release checklist。
 - CI 执行测试、lint 和必要的类型检查。
 - 增加 ruff；是否引入 mypy/pyright 由实际复杂度决定。
 - 对 SSH、tmux、Windows Terminal、窄屏和组合字符补充兼容性验证。

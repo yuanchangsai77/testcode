@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 
+from . import __version__
 from .capabilities.mcp_source import MCPToolboxSource
 from .capabilities.skill_source import SkillToolboxSource
 from .capabilities.tools import build_warehouse_tools
@@ -191,6 +192,11 @@ def create_app(
 def main() -> None:
     try:
         parser = argparse.ArgumentParser(description="testcode: LLM-driven CLI workbench scaffold")
+        parser.add_argument(
+            "--version",
+            action="version",
+            version=f"testcode {__version__}",
+        )
         parser.add_argument("prompt", nargs="*", help="Task to send into the CLI workbench")
         parser.add_argument(
             "--once",

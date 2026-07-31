@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from .. import __version__
 from .config import MCPServerConfig
 from .transport import MCPHTTPError, MCPTransport, MCPTransportError, UnsupportedMCPTransport
 from .types import (
@@ -16,7 +17,7 @@ from .types import (
 
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 SUPPORTED_PROTOCOL_VERSIONS = {DEFAULT_PROTOCOL_VERSION}
-CLIENT_INFO = {"name": "testcode", "version": "0.1"}
+CLIENT_INFO = {"name": "testcode", "version": __version__}
 
 
 class MCPClient(Protocol):

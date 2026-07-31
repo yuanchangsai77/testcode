@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 import testcode.app as app_module
+from testcode import __version__
 
 
 class FakePresenter:
@@ -39,6 +40,16 @@ class FakeApp:
 
     def latest_session(self):
         return None
+
+
+def test_main_version_reports_package_version(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["testcode", "--version"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        app_module.main()
+
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"testcode {__version__}"
 
 
 def test_main_once_dispatches_prompt_to_app_run(monkeypatch, tmp_path):

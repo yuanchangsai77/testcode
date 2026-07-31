@@ -38,7 +38,7 @@ Detailed design is in [docs/architecture.md](docs/architecture.md).
 | 交互路线图 | [TUI 路线图](docs/interaction/tui-roadmap.md) | TUI 未完成阶段和验收标准 | 当前交互细节和产品优先级 |
 | 当前功能 | [Shell 生命周期](docs/core/shell-session-lifecycle.md) | 串行 Bash 的保留、中断、清理和安全边界 | OS 级隔离 |
 | 总路线图 | [演进路线图](docs/roadmap.md) | 当前基线、未完成事项、优先级和验收标准 | 已完成施工历史和专项契约 |
-| 版本快照 | [v0.1](docs/versions/v0.1.md) | 发布时点的不可变能力记录 | 当前状态 |
+| 版本快照 | [v0.2](docs/versions/v0.2.md)、[v0.1](docs/versions/v0.1.md) | 发布时点的不可变能力记录 | 当前状态 |
 
 建议阅读顺序：本文档 → 配置参考 → 总体架构 → 路线图；需要开发某个子系统时，再进入对应专题文档。
 
