@@ -35,6 +35,9 @@ coverage.xml
 .env.*
 !.env.example
 
+# Runtime demo workspaces
+/workspaces/
+
 # Runtime logs
 *.log
 
