@@ -1,4 +1,4 @@
-# Capability Warehouse and Progressive Disclosure
+# 扩展：能力仓库与渐进式披露
 
 ## 文档职责
 
@@ -16,16 +16,16 @@
 相关文档：
 
 - 总体 runtime 分层见 `docs/architecture.md`
-- 通用扩展边界见 `docs/runtime-extensibility.md`
-- MCP 协议与生命周期见 `docs/mcp-integration.md`
-- Skill 内容结构见 `docs/skill-system.md`
-- tool 字段契约见 `docs/tool-contract.md`
+- 通用扩展边界见 `docs/extensions/runtime-interfaces.md`
+- MCP 协议与生命周期见 `docs/extensions/mcp-integration.md`
+- Skill 内容结构见 `docs/extensions/skill-system.md`
+- tool 字段契约见 `docs/reference/tool-contract.md`
 
 本文档是能力可见性和激活策略的主设计。其他专项文档若仍描述“启动或每次请求时注册全部外部工具”，应以本文档为准逐步修订。
 
 ## 当前实现状态
 
-截至 2026-07-15，第一版运行链路已经落地：
+截至 2026-07-31，第一版运行链路已经落地：
 
 - 核心工具与仓库操作常驻工作台，MCP 和 Skill 叶子能力默认不注册。
 - MCP 配置只形成带用途描述的外层工具箱条目；模型自行判断并打开所需工具箱，打开时才按需 discovery。
@@ -500,7 +500,7 @@ Skill script 的激活不代表允许执行；执行仍需走 policy 和 approva
 
 尚未完成的设计边界包括 Skill `references/`、`assets/`、`scripts/` 的独立索引和生命周期，以及 TTL/LRU 和基于健康度、风险、成本的候选排序。这些能力仍应遵守本文定义的渐进披露、预算、安全与原子激活契约。
 
-具体优先级和完成状态统一由 [演进路线图](build-roadmap.md) 维护，本文不再保留阶段式实施清单。
+具体优先级和完成状态统一由 [演进路线图](../roadmap.md) 维护，本文不再保留阶段式实施清单。
 
 ## 18. 验收标准
 

@@ -1,6 +1,6 @@
-# testcode Core Architecture
+# testcode 核心架构
 
-## Document Scope
+## 文档职责
 
 本文档只回答三个问题：
 
@@ -10,13 +10,16 @@
 
 本文档不负责展开专项实现细节。相关内容请分别查看：
 
-- 演进顺序与阶段目标：`docs/build-roadmap.md`
-- 扩展点抽象：`docs/runtime-extensibility.md`
-- MCP 接入专项：`docs/mcp-integration.md`
-- Skill 专项：`docs/skill-system.md`
-- tool 字段契约：`docs/tool-contract.md`
+- 演进顺序与阶段目标：`docs/roadmap.md`
+- Agent 循环与停止条件：`docs/core/agent-loop.md`
+- 执行授权与内容安全：`docs/core/execution-safety.md`
+- 项目规则、探测与测试解析：`docs/core/project-awareness.md`
+- 扩展点抽象：`docs/extensions/runtime-interfaces.md`
+- MCP 接入专项：`docs/extensions/mcp-integration.md`
+- Skill 专项：`docs/extensions/skill-system.md`
+- tool 字段契约：`docs/reference/tool-contract.md`
 
-## 1. Product Positioning
+## 1. 产品定位
 
 `testcode` is a large-model-driven CLI workbench. It is not an autonomous decision engine. Its responsibility is to:
 
@@ -29,7 +32,7 @@
 
 The system's intelligence comes from the model. The CLI is the runtime shell that makes that intelligence operable, safe, and observable.
 
-## 2. Design Principles
+## 2. 设计原则
 
 - Thin control plane: keep the CLI framework focused on coordination, not reasoning.
 - Clear boundary of responsibility: model decides, runtime executes.
@@ -39,7 +42,7 @@ The system's intelligence comes from the model. The CLI is the runtime shell tha
 - Replaceable components: model providers, tools, and policies are pluggable.
 - Bounded context: persist complete facts for audit and recovery, but send only the smallest useful working set to the model.
 
-## 3. Layered Architecture
+## 3. 分层架构
 
 Current source layout:
 
@@ -64,7 +67,7 @@ src/testcode/
 
 Responsibilities:
 
-- load `.env` before runtime objects are assembled
+- load the source checkout's `.env` before runtime objects are assembled
 - create the logger, policy, guardrails, tool registry, model client, presenter, engine, and session store
 - parse CLI flags and choose single-turn, chat, list, resume, or latest-session mode
 - collect explicit context arguments such as `--context`
@@ -120,6 +123,9 @@ Orchestration structure:
 - `progress.py` defines optional progress events so terminal rendering stays outside the execution engine.
 - Long-lived conversation persistence is not part of this layer; it is handled by `sessions/store.py`.
 
+循环推进、重复动作纠正和停止条件的当前行为见
+[Agent 执行循环](core/agent-loop.md)。
+
 ### 3.2.1 Context Assembly Layer
 
 Responsibilities:
@@ -162,7 +168,9 @@ Packaging boundaries:
 
 The first `ContextPackager` implementation can be deliberately simple: pass through existing context with stable grouping, source labels, and character counts. More aggressive pruning and summarization should be added behind the same interface.
 
-Context assembly and packaging are described here only as architecture boundaries. The reusable extension hooks themselves belong to `docs/runtime-extensibility.md`.
+Context assembly and packaging are described here only as architecture boundaries. The reusable extension hooks themselves belong to `docs/extensions/runtime-interfaces.md`.
+项目相关性判断、规则加载、项目探测和测试命令解析的当前行为见
+[项目感知](core/project-awareness.md)。
 
 ### 3.3 Model Integration Layer
 
@@ -234,7 +242,7 @@ Built-in tools:
 
 `apply_change` remains registered by the current built-in provider for compatibility, but new workflows should use `patch`.
 
-This section describes where tool execution lives. Field-level placement rules for `ToolResult.output`, `metadata`, summarizers, and prompt visibility belong to `docs/tool-contract.md`.
+This section describes where tool execution lives. Field-level placement rules for `ToolResult.output`, `metadata`, summarizers, and prompt visibility belong to `docs/reference/tool-contract.md`.
 
 ### 3.5 Safety Layer
 
@@ -249,6 +257,12 @@ Core files:
 
 - `src/testcode/safety/policy.py`
 - `src/testcode/safety/guardrails.py`
+- `src/testcode/safety/content/`
+- `src/testcode/safety/secret_patterns.py`
+- `src/testcode/safety/redaction.py`
+
+安全模式、审批、危险命令识别和凭据写入阻断的当前行为见
+[执行安全](core/execution-safety.md)。
 
 ### 3.6 Observability Layer
 
@@ -267,12 +281,14 @@ Core files:
 
 Responsibilities:
 
-- load model connection settings from `.env` and environment variables
+- load model connection settings from the source checkout's `.env` and process
+  environment variables
 - load runtime policy and MCP settings from global/project `config.toml`
 - keep application assembly separate from configuration parsing
 - persist resumable CLI conversations independently from the interaction loop
 - list, load, resume, and close stored conversations
-- persist enough checkpoint state for long tasks to resume without replaying or reinjecting the full history
+- persist conversation state and a bounded derived resume summary without
+  reinjecting the full trace
 
 Core files:
 
@@ -282,14 +298,17 @@ Core files:
 
 Configuration structure:
 
-- `.env` loading only fills missing environment variables.
+- `.env` loading only fills missing environment variables. It resolves relative
+  to the installed/source package checkout, not to an arbitrary target workspace.
 - `RuntimeConfig` normalizes model connection settings, retry policy, runtime limits, safety mode, and MCP servers.
 - `~/.testcode/config.toml` supplies user defaults; `.testcode/config.toml` overrides them for the current project.
-- Configurable limits have internal hard caps. Exceeding a cap is a startup error rather than a silent fallback; see `docs/configuration.md`.
+- Configurable limits have internal hard caps. Exceeding a cap is a startup error rather than a silent fallback; see `docs/reference/configuration.md`.
 
 Persistence structure:
 
-- `SessionStore` writes JSON files under `.testcode/sessions/`.
+- `SessionStore` derives its storage root from the package/source checkout and
+  writes JSON files under that root's `.testcode/sessions/`; it does not derive
+  this path from the active target workspace.
 - Stored sessions currently include cwd, timestamps, status, messages, run ids, active Skill/capability ids, bounded trace records, and derived resume state.
 - Future checkpoint/archive records should store task state, summaries, archive references, full tool history, read-state hashes, and latest verification status.
 - Corrupt session files are skipped when listing sessions.
@@ -315,7 +334,7 @@ Persistence structure:
 15. The interaction layer renders the answer and execution summary.
 16. In chat mode, `SessionStore` persists the updated conversation and last run id.
 
-## 5. Repository Scaffold Decision
+## 5. 仓库脚手架选择
 
 This repository uses Python for the initial scaffold because:
 
@@ -325,12 +344,12 @@ This repository uses Python for the initial scaffold because:
 
 The code is intentionally minimal. It establishes the system boundaries and the request loop, leaving room for future provider integrations and richer tool implementations.
 
-## 6. Future Extension Points
+## 6. 后续扩展点
 
 - additional model providers behind `ModelClient`
 - more robust prompt budgeting, checkpoint recovery, and context assembly
 - richer terminal UI with streaming updates
 - resource-aware context selection and budgeted packaging
-- additional capability warehouse sources, Skill assets, and automatic TTL/LRU release policies (see [docs/capability-warehouse.md](capability-warehouse.md))
-- broader MCP server compatibility and resource context integration (see [docs/mcp-integration.md](mcp-integration.md))
+- additional capability warehouse sources, Skill assets, and automatic TTL/LRU release policies (see [能力仓库](extensions/capability-warehouse.md))
+- broader MCP server compatibility and resource context integration (see [MCP 集成](extensions/mcp-integration.md))
 - local subagents, team workflows, and remote A2A agents

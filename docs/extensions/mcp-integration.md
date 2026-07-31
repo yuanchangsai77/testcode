@@ -1,4 +1,4 @@
-# MCP Integration Design
+# 扩展：MCP 集成
 
 ## 文档职责
 
@@ -11,13 +11,15 @@
 本文档不重复解释整个 runtime 分层，也不替代通用扩展点定义：
 
 - 总体架构看 `docs/architecture.md`
-- 通用扩展点看 `docs/runtime-extensibility.md`
-- roadmap 优先级与阶段目标看 `docs/build-roadmap.md`
-- tool 字段放置规则看 `docs/tool-contract.md`
+- 通用扩展点看 `docs/extensions/runtime-interfaces.md`
+- roadmap 优先级与阶段目标看 `docs/roadmap.md`
+- tool 字段放置规则看 `docs/reference/tool-contract.md`
 
-本文档定义 `testcode` 中 MCP 接入的目标边界、模块拆分、运行时职责和实施顺序。重点不是“把外部 tool 接进来能跑”，而是让 MCP 能稳定复用现有 runtime 的 tool、policy、logger、session 和 prompt 约束，同时为后续 `stdio`、`streamable_http`、`sse` 和 URL 型服务预留稳定演进空间。
+本文档定义 `testcode` 中 MCP 接入的当前契约、模块拆分和运行时职责。重点不是“把外部
+tool 接进来能跑”，而是让 MCP 稳定复用现有 runtime 的 tool、policy、logger、
+session 和 prompt 约束。未完成事项只在“当前实现边界”中列出，优先级由总路线图维护。
 
-MCP server 在能力可见性上应被视为工具箱：默认只在能力仓库中暴露外层描述，按需打开 manifest，再激活少量叶子工具。该目标模型见 `docs/capability-warehouse.md`；本文档继续负责 MCP 协议、transport、client、manager、discovery、adapter 与安全边界。
+MCP server 在能力可见性上应被视为工具箱：默认只在能力仓库中暴露外层描述，按需打开 manifest，再激活少量叶子工具。该目标模型见 `docs/extensions/capability-warehouse.md`；本文档继续负责 MCP 协议、transport、client、manager、discovery、adapter 与安全边界。
 
 当前仓库实现状态：
 
@@ -129,7 +131,7 @@ MCP 协议交互负责：
 
 ## 5. 模块拆分
 
-建议新增如下模块层次：
+当前模块层次如下：
 
 ```text
 src/testcode/mcp/
@@ -535,7 +537,7 @@ MCP 的 input schema 原则上应直接映射到 `ToolDefinition.input_schema`�
 
 ### 11.4 输出
 
-MCP tool 返回内容后，适配器应按 `docs/tool-contract.md` 的约定决定：
+MCP tool 返回内容后，适配器应按 `docs/reference/tool-contract.md` 的约定决定：
 
 - 模型继续推理需要的短结果，进入 `ToolResult.output`
 - 结构化、审计或调试字段，进入 `ToolResult.metadata`
@@ -758,7 +760,7 @@ URL 型 transport 还应对以下字段默认脱敏：
 
 `MCPToolProvider` 仅作为兼容性直接注册接口保留，不是 `create_app()` 的主要 MCP tool 装配路径。公网 server 兼容性、进一步的 capability traits，以及 resource context packaging 尚未完成，但必须继续遵守本文的 transport、协议、安全和生命周期契约。
 
-具体优先级和完成状态统一由 [演进路线图](build-roadmap.md) 维护，本文不再维护重复的落地步骤。
+具体优先级和完成状态统一由 [演进路线图](../roadmap.md) 维护，本文不再维护重复的落地步骤。
 
 ## 19. 结论
 

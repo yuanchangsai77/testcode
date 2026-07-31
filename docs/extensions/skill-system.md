@@ -1,6 +1,6 @@
-# testcode Skill System Design
+# 扩展：Skill 系统
 
-## Document Scope
+## 文档职责
 
 This document focuses on the Skill system only:
 
@@ -12,17 +12,17 @@ This document focuses on the Skill system only:
 It does not redefine the whole runtime architecture or generic extension model:
 
 - overall runtime layering: `docs/architecture.md`
-- generic extension hooks: `docs/runtime-extensibility.md`
-- capability warehouse, toolbox manifests, progressive disclosure, and activation: `docs/capability-warehouse.md`
-- roadmap priority and rollout stages: `docs/build-roadmap.md`
+- generic extension hooks: `docs/extensions/runtime-interfaces.md`
+- capability warehouse, toolbox manifests, progressive disclosure, and activation: `docs/extensions/capability-warehouse.md`
+- roadmap priority and rollout stages: `docs/roadmap.md`
 
-Skill 在能力可见性上属于工具箱：默认只暴露 metadata 和简短描述，打开后展示 instructions/references/assets/scripts 索引，激活时才加载当前步骤需要的内容。该目标模型以 `docs/capability-warehouse.md` 为准；本文档继续负责 Skill 文件结构和箱内资产语义。
+Skill 在能力可见性上属于工具箱：默认只暴露 metadata 和简短描述，打开后展示 instructions/references/assets/scripts 索引，激活时才加载当前步骤需要的内容。该目标模型以 `docs/extensions/capability-warehouse.md` 为准；本文档继续负责 Skill 文件结构和箱内资产语义。
 
-This document defines the Skill file format, discovery sources, toolbox contents, activation semantics, and current runtime boundary. Global priority and completion tracking remain in [docs/build-roadmap.md](build-roadmap.md).
+This document defines the Skill file format, discovery sources, toolbox contents, activation semantics, and current runtime boundary. Global priority and completion tracking remain in [the roadmap](../roadmap.md).
 
 ---
 
-## 1. Goal
+## 1. 目标
 
 Provide standard built-in and custom project/user Skills without loading every instruction body into every model request. The current application exposes Skill metadata through the capability warehouse; instructions enter model context only after explicit capability activation.
 
@@ -30,7 +30,7 @@ Skill loading follows the same long-task context rule as the rest of the runtime
 
 ---
 
-## 2. Skill Directory & Metadata Structure
+## 2. Skill 目录与元数据
 
 Each skill is represented by a directory containing:
 1. `SKILL.md`: The markdown instructions that define the behavior, prompts, and context for the skill.
@@ -58,17 +58,24 @@ When writing or running Python unit tests:
 
 ---
 
-## 3. Directory Layouts & Path Resolution
+## 3. 目录位置与覆盖顺序
 
 Skills are discovered from three locations:
 
-1. **Built-in Skills**: Shipped with the `testcode` package. To ensure correct path resolution when installed as a package, paths must be resolved dynamically using `importlib.resources` or relative to the package directory (`Path(__file__).parent.parent / 'skills/builtins'`), rather than hardcoding static paths.
-2. **Project-scoped Skills**: Stored inside the workspace at `.testcode/skills/`.
-3. **User Global Skills**: Stored in the user's home directory at `~/.testcode/skills/`.
+1. **Built-in Skills**: Shipped under `src/testcode/skills/builtins/`; the
+   application resolves this directory relative to the installed package.
+2. **User Global Skills**: Stored in `~/.testcode/skills/`.
+3. **Project-scoped Skills**: Stored inside the workspace at
+   `.testcode/skills/`.
+
+The registry scans in that order and stores Skills by name, so a later
+project-scoped Skill replaces a same-named global or built-in Skill; a global
+Skill replaces a same-named built-in Skill. The current CLI does not yet emit a
+dedicated override diagnostic.
 
 ---
 
-## 4. Architecture & Selection Flow
+## 4. 架构与选择流程
 
 Application composition scans lightweight metadata into `SkillRegistry`, then exposes each Skill through `SkillToolboxSource`. The model can inspect the capability catalog, open one Skill toolbox to see its instructions manifest, and activate that leaf. Activated Skill content is attached to `SessionContext` and rendered by `ModelPromptBuilder`; a separate budgeted `ContextPackager` remains planned.
 
@@ -128,7 +135,7 @@ class SkillRegistry:
 
 ---
 
-## 5. Runtime Integration
+## 5. 运行时集成
 
 The active application path is:
 
@@ -161,7 +168,7 @@ The active application path is:
 
 ---
 
-## 6. Logging & Observability Contract
+## 6. 日志与可观测性契约
 
 Skill activation must remain observable through the following records:
 
@@ -197,10 +204,10 @@ Skill activation must remain observable through the following records:
 
 ---
 
-## 7. Current Boundary
+## 7. 当前边界
 
 The current runtime scans Skill metadata, exposes Skills through `SkillToolboxSource`, activates instructions through the capability warehouse, injects active instructions into model context, and restores session-scoped activations. Built-in `git-helper` and `pytest-helper` Skills exercise this path.
 
 `SkillContextLoader` trigger matching remains a compatibility path rather than the primary `create_app()` assembly. Standardized on-demand handling for `references/`, `assets/`, and `scripts`, plus budgeted source references and script approval semantics, is not yet complete.
 
-Implementation priority and completion status belong to [the build roadmap](build-roadmap.md); this document owns the Skill format and runtime contract.
+Implementation priority and completion status belong to [the roadmap](../roadmap.md); this document owns the Skill format and runtime contract.

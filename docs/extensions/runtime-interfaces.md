@@ -1,6 +1,6 @@
-# testcode Runtime Extensibility Design Document
+# 扩展：运行时接口
 
-## Document Scope
+## 文档职责
 
 本文档只定义通用扩展点及其边界：
 
@@ -12,12 +12,13 @@
 
 本文档不负责展开某一个具体扩展系统的全部实现细节：
 
-- MCP 的 transport、discovery、risk、lifecycle 见 `docs/mcp-integration.md`
-- Skill 的目录结构、匹配和注入流程见 `docs/skill-system.md`
-- 能力仓库、工具箱分层、渐进暴露和按需激活见 `docs/capability-warehouse.md`
+- MCP 的 transport、discovery、risk、lifecycle 见 `docs/extensions/mcp-integration.md`
+- Skill 的目录结构、匹配和注入流程见 `docs/extensions/skill-system.md`
+- 能力仓库、工具箱分层、渐进暴露和按需激活见 `docs/extensions/capability-warehouse.md`
+- 项目相关性、规则加载、探测和测试命令解析见 `docs/core/project-awareness.md`
 - 总体 runtime 分层见 `docs/architecture.md`
 
-`ToolProvider` 的现有接口描述反映当前直接注册模型。目标架构中，外部来源先进入能力仓库，只有被选中的叶子能力才通过 provider/adapter 进入当前激活集；该演进以 `docs/capability-warehouse.md` 为准。
+`ToolProvider` 的现有接口描述反映当前直接注册模型。目标架构中，外部来源先进入能力仓库，只有被选中的叶子能力才通过 provider/adapter 进入当前激活集；该演进以 `docs/extensions/capability-warehouse.md` 为准。
 
 To support features like the **Skill System (P2)**, **Project Rules (P1.2)**, **Explicit Context (P1.4)**, and **MCP Integration (P3)** without bloating the core execution loop, we introduce three generic extension interfaces into the `testcode` runtime:
 1. **`ContextLoader`**: Hook interface for loading dynamic context, rules, summaries, explicit user context, and skills at the start of a run. Loaders provide candidate context and archive references; they should not treat the prompt as long-term storage or own final pruning policy.
@@ -26,7 +27,7 @@ To support features like the **Skill System (P2)**, **Project Rules (P1.2)**, **
 
 ---
 
-## 1. Context Extension: `ContextLoader` Interface
+## 1. 上下文扩展：`ContextLoader`
 
 ### Interface Definition
 We define the interface using Python protocols or abstract base classes:
@@ -99,7 +100,7 @@ class ExecutionEngine:
 
 ---
 
-## 2. Tool Extension: `ToolProvider` Interface
+## 2. 工具扩展：`ToolProvider`
 
 Built-in tools are supplied through `BuiltinToolProvider`. `build_builtin_registry()` remains as a compatibility assembly helper. The narrow `ToolProvider` interface is still useful for registration-ready local tools, while large external catalogs use the capability warehouse instead of registering every leaf eagerly.
 
@@ -165,7 +166,7 @@ This split matters because process lifecycle, lazy discovery policy, schema adap
 
 ---
 
-## 3. Resource Extension: `ResourceProvider` Interface
+## 3. 资源扩展：`ResourceProvider`
 
 MCP resources and future external artifacts should not be smuggled through `ToolProvider` or ad hoc `ContextLoader` branches. They are a distinct extension surface: indexed, queryable, and loaded on demand.
 
@@ -193,12 +194,12 @@ Expected boundary:
 
 ---
 
-## 4. Advantages of This Design
+## 4. 设计收益
 
-* **Decoupled Execution Loop**: [ExecutionEngine](../src/testcode/orchestration/engine.py) does not need to know about files, markdown frontmatter, git branches, or MCP transport protocols. It only orchestrates prompt, tool execution, safety, and loop termination.
+* **Decoupled Execution Loop**: [ExecutionEngine](../../src/testcode/orchestration/engine.py) does not need to know about files, markdown frontmatter, git branches, or MCP transport protocols. It only orchestrates prompt, tool execution, safety, and loop termination.
 * **Easy Testing**: Each `ContextLoader`, `ToolProvider`, `ResourceProvider`, MCP client, and adapter can be tested in isolation without running a full LLM session.
 * **Observe and Log**: We can log context loading events and MCP runtime events to keep trace logs structured and searchable.
 * **Prompt Discipline**: Extension hooks can add candidate context, but the context packaging layer applies the runtime budget and provides source references for omitted or summarized content.
 * **Composable Growth Path**: The same extension boundary supports built-in tools today, MCP tools next, future external resources, and later skill-derived or subagent-exposed capabilities without changing the engine contract.
 
-See [docs/mcp-integration.md](mcp-integration.md) for the concrete MCP module split, lifecycle rules, risk mapping, and test plan.
+See [MCP 集成](mcp-integration.md) for the concrete MCP module split, lifecycle rules, risk mapping, and test plan.

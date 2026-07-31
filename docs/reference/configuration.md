@@ -1,13 +1,18 @@
-# testcode 配置参考
+# 参考：配置
 
 ## 文档职责
 
 本文档是运行配置的唯一参考：说明配置文件位置、覆盖顺序、各参数的中文含义、默认值和内部硬上限。
-MCP 服务器字段的 transport 语义仍以 [MCP 集成设计](mcp-integration.md) 为准。
+MCP 服务器字段的 transport 语义仍以 [MCP 集成](../extensions/mcp-integration.md) 为准。
 
 ## 配置来源与优先级
 
-模型地址、模型名、模型超时和运行模式从项目根目录的 `.env` 或同名环境变量读取；已有环境变量不会被 `.env` 覆盖。
+模型地址、模型名、模型超时和运行模式从 `testcode` 源码根目录的 `.env`
+或同名环境变量读取；已有环境变量不会被 `.env` 覆盖。当前实现不会自动加载任意目标
+工作区中的 `.env`。以已安装包运行时，优先使用进程环境变量，避免依赖安装目录中的
+`.env`。
+
+命令行 `--mode` 会覆盖 `TESTCODE_MODE`。其余模型连接项目前没有命令行覆盖。
 
 运行策略与 MCP 服务从以下 TOML 文件读取：
 
@@ -68,7 +73,7 @@ read_timeout = 300
 
 ## 环境变量
 
-`.env` 只需要保留一组当前使用的模型连接配置：
+源码 checkout 中的 `.env` 只需要保留一组当前使用的模型连接配置：
 
 ```env
 TESTCODE_MODEL_BASE_URL=http://127.0.0.1:3000
@@ -98,7 +103,7 @@ TESTCODE_MODE=confirm
 | `url` | `""` | HTTP/SSE transport 必填 URL。 |
 | `headers` | `{}` | HTTP/SSE 请求头。 |
 
-`risk_overrides` 的值只能是 `read`、`write`、`execute`、`test`、`network`、`destructive` 或 `confirm`。transport 的协议行为、安全边界和生命周期仍以 [MCP 集成设计](mcp-integration.md) 为准。
+`risk_overrides` 的值只能是 `read`、`write`、`execute`、`test`、`network`、`destructive` 或 `confirm`。transport 的协议行为、安全边界和生命周期仍以 [MCP 集成](../extensions/mcp-integration.md) 为准。
 
 每个 server 还支持以下环境变量覆盖，其中 `<NAME>` 是 server name 转成大写并将非字母数字字符替换为下划线：
 
