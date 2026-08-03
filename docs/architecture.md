@@ -11,7 +11,7 @@
 本文档不负责展开专项实现细节。相关内容请分别查看：
 
 - 演进顺序与阶段目标：`docs/roadmap.md`
-- 跨项目目标状态与多设备方向：`docs/platform-architecture-blueprint.md`
+- 跨项目目标状态与多设备方向：`docs/future/README.md`
 - Agent 循环与停止条件：`docs/core/agent-loop.md`
 - 执行授权与内容安全：`docs/core/execution-safety.md`
 - 项目规则、探测与测试解析：`docs/core/project-awareness.md`
