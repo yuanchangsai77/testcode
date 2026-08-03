@@ -109,6 +109,8 @@ MCP 最小主链路已经完成，不再规划第二套 transport 或全量工�
 ## P4：Subagent、Team 与 A2A
 
 只有在 P0 的 checkpoint、任务状态和上下文预算稳定后，才进入多 Agent 编排。
+跨项目的 Model Plane、Device Plane 与设备能力目标边界见
+[多模型、多设备平台蓝图](platform-architecture-blueprint.md)；该蓝图不改变本路线图的当前优先级。
 
 - 本地 subagent 使用独立 session、tool history、run id、权限和 context budget。
 - parent 只接收结构化摘要、关键发现、修改文件和验证结果。

@@ -32,6 +32,7 @@ Detailed design is in [docs/architecture.md](docs/architecture.md).
 | 字段参考 | [工具契约](docs/reference/tool-contract.md) | Tool 定义、结果、metadata 和摘要的字段流向 | 工具实现教程 |
 | 扩展设计 | [运行时扩展](docs/extensions/runtime-interfaces.md) | ContextLoader、ToolProvider、ResourceProvider 通用边界 | MCP、Skill 的内部设计 |
 | 扩展设计 | [能力仓库](docs/extensions/capability-warehouse.md) | 工具箱、渐进披露、激活和回收策略 | transport 或 Skill 文件格式 |
+| 目标架构 | [多模型、多设备平台蓝图](docs/platform-architecture-blueprint.md) | `testcode`、模型网关与未来 Device Fabric 的跨项目边界和演进方案 | 当前已实现行为和近期优先级 |
 | 专项设计 | [MCP 集成](docs/extensions/mcp-integration.md) | MCP transport、discovery、协议、安全和生命周期 | 全局 roadmap |
 | 专项设计 | [Skill 系统](docs/extensions/skill-system.md) | Skill 格式、来源、箱内资产及激活语义 | 通用仓库策略 |
 | 当前交互 | [TUI 当前行为](docs/interaction/tui-current.md) | 终端交互、输入编辑、重绘和兼容性边界 | runtime orchestration |
