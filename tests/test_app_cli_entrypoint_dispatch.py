@@ -24,7 +24,7 @@ class FakeApp:
 
     def run(self, request):
         self.runs.append(request)
-        return SimpleNamespace(final_message="done", tool_results=[], active_skills=[])
+        return SimpleNamespace(final_message="done", tool_results=[])
 
     def persist_run(self, session, prompt, summary, **options):
         self.persisted_runs.append((session, prompt, summary, options))
@@ -90,7 +90,6 @@ def test_main_once_creates_persisted_session_for_subagent_runtime(monkeypatch, t
                 session_id="session-once",
                 cwd=cwd,
                 messages=[],
-                active_skills=[],
                 active_capability_ids=[],
                 trace=[],
                 resume_state=None,
@@ -117,7 +116,7 @@ def test_main_once_resume_persists_completed_run(monkeypatch, tmp_path):
         session_id="session-1",
         cwd=str(tmp_path),
         messages=[{"role": "user", "content": "before"}],
-        active_skills=[],
+        active_capability_ids=[],
         trace=list(range(8)),
         resume_state=None,
     )
@@ -147,7 +146,7 @@ def test_main_once_resume_persists_interrupted_run(monkeypatch, tmp_path):
         session_id="session-1",
         cwd=str(tmp_path),
         messages=[],
-        active_skills=[],
+        active_capability_ids=[],
         trace=[],
         resume_state=None,
     )

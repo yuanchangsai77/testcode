@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 from .model import Skill, SkillMetadata
@@ -88,36 +87,3 @@ class SkillRegistry:
 
     def metadata_items(self) -> tuple[SkillMetadata, ...]:
         return tuple(self._skills.values())
-
-    def match_skills(self, prompt: str) -> list[Skill]:
-        """Matches a user prompt against triggers and returns populated Skill instances.
-
-        Triggers must be matched case-insensitively and respect word boundaries (e.g. using
-        regex pattern r"\b" + re.escape(trigger) + r"\b") to prevent substring false positives
-        (e.g., prompt containing 'greatest' triggering the skill for 'test').
-        """
-        matched_skills = []
-
-        # 1. Check for explicit command: /skill <name>
-        if prompt.strip().startswith("/skill "):
-            parts = prompt.strip().split(None, 1)
-            if len(parts) > 1:
-                skill_name = parts[1].strip()
-                skill = self.get_skill(skill_name)
-                if skill:
-                    skill.matched_trigger = "/skill"
-                    matched_skills.append(skill)
-                    return matched_skills
-
-        # 2. Match triggers
-        for metadata in self._skills.values():
-            for trigger in metadata.triggers:
-                pattern = r"\b" + re.escape(trigger) + r"\b"
-                if re.search(pattern, prompt, re.IGNORECASE):
-                    skill = self.get_skill(metadata.name)
-                    if skill:
-                        skill.matched_trigger = trigger
-                        matched_skills.append(skill)
-                    break
-
-        return matched_skills

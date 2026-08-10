@@ -179,7 +179,6 @@ class SubagentRunner:
             metadata={
                 "conversation": [*child.messages, *self._public_context(cluster, session_id)],
                 "session_id": child.session_id,
-                "active_skills": list(child.active_skills),
                 "active_capability_ids": list(child.active_capability_ids),
                 "session_trace": list(child.trace[-6:]),
                 "resume_state": child.resume_state,

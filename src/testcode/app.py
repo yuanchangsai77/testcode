@@ -5,7 +5,7 @@ import os
 
 from . import __version__
 from .capabilities.mcp_source import MCPToolboxSource
-from .capabilities.skill_source import SkillToolboxSource
+from .capabilities.local_source import LocalToolboxSource, skill_toolbox_specs, subagent_toolbox_spec
 from .capabilities.tools import build_warehouse_tools
 from .capabilities.warehouse import CapabilityWarehouse
 from .config import load_dotenv, load_runtime_config
@@ -32,7 +32,6 @@ from .safety.content import build_content_safety_interceptors
 from .sessions import SessionClusterStore, SessionImageStore, SessionStore
 from .tools.builtin_provider import BuiltinToolProvider
 from .tools.registry import ToolRegistry
-from .tools.subagents import build_subagent_tools
 from .skills.registry import SkillRegistry
 from .types import ExecutionSummary, UserRequest
 from pathlib import Path
@@ -124,16 +123,24 @@ def create_app(
 
     # Only builtin and warehouse-navigation tools are initially visible. External
     # MCP/Skill capabilities remain in the warehouse until explicitly activated.
-    providers = [
-        BuiltinToolProvider(
-            logger,
-            limits=config.limits,
-            project_detector=project_detector,
-        )
-    ]
+    builtin_provider = BuiltinToolProvider(
+        logger,
+        limits=config.limits,
+        project_detector=project_detector,
+        include_specialized=False,
+    )
+    providers = [builtin_provider]
     mcp_manager = None
     mcp_discovery = None
-    capability_sources = [SkillToolboxSource(skills_registry, logger=logger)]
+    local_specs = list(
+        skill_toolbox_specs(
+            skills_registry,
+            tools_by_skill=builtin_provider.get_skill_tools(),
+        )
+    )
+    if not background:
+        local_specs.append(subagent_toolbox_spec())
+    capability_sources = [LocalToolboxSource(tuple(local_specs))]
     if config.mcp_servers:
         def create_configured_mcp_client(server):
             client = create_mcp_client(server)
@@ -167,9 +174,6 @@ def create_app(
     )
     for provider in providers:
         for tool in provider.get_tools():
-            tools.register(tool)
-    if not background:
-        for tool in build_subagent_tools():
             tools.register(tool)
     capability_warehouse = CapabilityWarehouse(
         sources=capability_sources,
@@ -340,7 +344,6 @@ def main() -> None:
             if resumed_session is not None:
                 metadata["conversation"] = list(resumed_session.messages)
                 metadata["session_id"] = resumed_session.session_id
-                metadata["active_skills"] = list(getattr(resumed_session, "active_skills", []))
                 metadata["active_capability_ids"] = list(
                     getattr(resumed_session, "active_capability_ids", [])
                 )

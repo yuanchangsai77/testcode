@@ -6,7 +6,7 @@ from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import path_error, positive_int, resolve_workspace_path, retarget, run_command, schema
 from ..summary import match_count_summary
-from .read_state import record_observation, snapshot, text_lines
+from ..observation_state import record_observation, snapshot, text_lines
 
 MAX_SEARCH_RESULTS = 2_000
 DEFAULT_SEARCH_RESULTS = 200

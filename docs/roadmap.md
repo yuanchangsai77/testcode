@@ -23,7 +23,7 @@
 
 ## 当前基线
 
-状态核对日期：2026-07-31。
+状态核对日期：2026-08-10。
 
 当前 runtime 已具备：
 
@@ -32,13 +32,15 @@
 - 文件、搜索、Shell、测试、patch 和只读 Git 工具。
 - `readonly`、`confirm`、`auto` 模式，审批、危险命令识别和凭据写入阻断。
 - 项目规则、相关 workspace 摘要、显式 context、项目探测和默认测试命令解析。
-- Skill metadata 扫描、工具箱展示、instructions 激活和跨轮保留。
+- Skill metadata 扫描、工具箱展示、instructions 显式激活和跨轮保留；不再维护独立的
+  trigger 自动注入路径。
 - MCP 三种 transport、懒 discovery、缓存、重连、tool/resource 协议入口和按需激活。
-- 能力仓库目录、manifest、激活/释放、scope、预算和冲突预检。
+- 能力仓库目录、manifest、激活/释放、scope、预算和冲突预检，以及按需激活的本地
+  Subagent 工具箱和用户 `/capabilities`、`/skill` 入口。
 - 原生 inline TUI、会话内编辑历史、审批、中断和运行时输入。
 - run 事件与详情日志。
 
-当前完整测试为 368 个用例，覆盖 engine、model、policy、tools、context、Skill、MCP、
+当前完整测试为 422 个用例，覆盖 engine、model、policy、tools、context、Skill、MCP、
 能力仓库、CLI 和 TUI 的关键路径。
 
 ## P0：长任务连续性与上下文预算
@@ -70,8 +72,8 @@ prompt 随历史无限增长。
 
 ## P1：Skill 完整能力
 
-当前 Skill instructions 主链路已可用，剩余工作是把 Skill 从“指令文件”扩展为受控的
-资源包。
+当前 workflow instructions 与本地工具已统一进入 `LocalToolboxSource`；Skill 只负责磁盘
+发现、版本和覆盖。剩余工作是把磁盘 Skill 从“指令文件”扩展为受控资源包。
 
 - 为 `references/`、`assets/`、`scripts/` 建立独立索引和按需加载。
 - 为 Skill 内容设置独立预算、来源引用、裁剪和摘要。

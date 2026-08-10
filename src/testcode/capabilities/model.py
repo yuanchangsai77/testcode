@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..skills.model import Skill
     from ..tools.base import Tool
 
 
@@ -53,7 +52,17 @@ class ActivatedCapability:
     toolbox_id: str
     kind: str
     tool: Tool | None = None
-    skill: Skill | None = None
+    instruction: InstructionContent | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionContent:
+    id: str
+    name: str
+    content: str
+    version: str = ""
+    source: str = "local"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -67,7 +76,7 @@ class ActivationRecord:
     last_used_at: float
     schema_chars: int = 0
     tool_name: str = ""
-    skill_name: str = ""
+    instruction_name: str = ""
     state: str = "activated"
     use_count: int = 0
     last_success: bool | None = None

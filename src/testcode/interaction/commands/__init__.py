@@ -4,10 +4,12 @@ from .base import SlashCommand, SlashCommandRegistry
 from .session_cmds import handle_compact, handle_reset, handle_resume
 from .sys_cmds import (
     handle_clear,
+    handle_capabilities,
     handle_exit,
     handle_help,
     handle_mode,
     handle_skills,
+    handle_skill,
     handle_status,
     handle_tasks,
 )
@@ -26,6 +28,8 @@ def default_slash_command_registry() -> SlashCommandRegistry:
     registry.register(SlashCommand(name="/status", description="Show session and system status", handler=handle_status))
     registry.register(SlashCommand(name="/mode", description="Show or change safety mode", usage="/mode [mode]", handler=handle_mode))
     registry.register(SlashCommand(name="/skills", description="List scanned skills and metadata", handler=handle_skills))
+    registry.register(SlashCommand(name="/skill", description="Activate one Skill through the capability warehouse", usage="/skill <name>", handler=handle_skill))
+    registry.register(SlashCommand(name="/capabilities", description="List or manage capability warehouse entries", usage="/capabilities [operation]", handler=handle_capabilities))
     registry.register(SlashCommand(name="/tasks", description="List active background tasks", handler=handle_tasks))
     registry.register(SlashCommand(name="/resume", description="List or resume saved sessions", usage="/resume [session_id]", handler=handle_resume))
     registry.register(SlashCommand(name="/reset", description="Reset conversation context memory", handler=handle_reset))

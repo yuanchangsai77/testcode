@@ -90,6 +90,9 @@ The current implementation supports a structured local tool loop for file
 inspection, search, shell execution, patching, test commands, read-only Git
 inspection, Skill activation, and on-demand MCP tool activation.
 
+Interactive users can inspect the same warehouse with `/capabilities`, or activate one Skill through
+the same path with `/skill <name>`; these commands do not maintain a separate capability state.
+
 Long conversation mode:
 
 ```bash
@@ -203,13 +206,18 @@ codes, and workspace-bounded path handling:
 
 - `list_dir`, `read_file`, `file_info`: read-only workspace file inspection
 - `find_files`, `search_text`: bounded file and text search
+- `git_status`, `git_diff`: high-frequency read-only Git inspection
 - `shell_exec`: execute a command in the workspace
 - `patch`: apply a validated unified diff in the workspace
-- `run_tests`: execute a test command with captured output and duration
-- `git_status`, `git_diff`, `git_show`: read-only git inspection
 - `warehouse_list`, `toolbox_open`, `capability_activate`,
   `capability_release`, `capability_status`: inspect and manage on-demand
   Skill/MCP capabilities
+
+Specialized workflow tools are progressively disclosed: `pytest-helper` supplies `run_tests`, while
+`git-helper` adds Git workflow instructions and the lower-frequency `git_show` tool. Open and activate
+those Skill toolbox leaves when the task needs them; `/skill <name>` activates the complete workflow for
+interactive use. Tool providers remain the implementation owners; Skills group and recommend reusable
+capabilities rather than defining whether a core tool exists.
 
 ### Shell 会话与中断
 
@@ -229,7 +237,8 @@ Concrete tool implementations live under `src/testcode/tools/builtins/`.
 Each built-in tool is described in its own module and exported through a
 `tool()` factory. Shared helpers for schema creation, workspace path resolution,
 process execution, and output clipping live in `src/testcode/tools/shared.py`.
-`src/testcode/tools/builtin_provider.py` supplies built-ins to application composition. `src/testcode/tools/builtin.py` remains a legacy registry assembly helper.
+`src/testcode/tools/builtin_provider.py` supplies built-ins to application composition and owns the
+standalone registry factory used by tests; there is no parallel legacy assembly path.
 
 Risky tools such as `shell_exec` and `patch` require interactive approval in
 the default `confirm` mode before execution. In `readonly` mode only read tools

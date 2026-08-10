@@ -27,10 +27,11 @@
 
 截至 2026-07-31，第一版运行链路已经落地：
 
-- 核心工具与仓库操作常驻工作台，MCP 和 Skill 叶子能力默认不注册。
+- 核心工具与仓库操作常驻工作台，MCP、Skill 和本地 Subagent 工具箱叶子能力默认不注册。
 - MCP 配置只形成带用途描述的外层工具箱条目；模型自行判断并打开所需工具箱，打开时才按需 discovery。
 - 打开只返回有界 manifest；选中的叶子工具在激活后的下一模型回合才进入完整 tool schema。
 - Skill metadata 只进入外层目录，正文只在激活 `instructions` 叶子后进入 prompt。
+- 与 Skill 工作流强关联的本地工具作为同箱叶子按需激活，不再常驻核心工作台。
 - activation set 已支持数量和字符预算、名称冲突预检、turn/run/session 范围、显式释放和 session 隔离。
 - 状态查询区分生命周期、健康度、目录来源和连接状态，并记录使用与释放结果。
 
@@ -151,7 +152,9 @@
 
 单体工具没有必须展开的内层目录，例如一个独立天气查询工具。它仍先作为仓库条目存在，选中后才激活完整 schema。
 
-少数高频且低上下文成本的单体工具可标记为核心工具，常驻工作台。
+少数高频、低风险且低上下文成本的单体工具可标记为核心工具，常驻工作台。当前
+`git_status`、`git_diff` 属于核心观察能力；更低频的历史查询、测试执行以及会改变仓库状态的
+Git 操作适合按需激活。隐藏 schema 只控制上下文成本，不构成安全边界。
 
 ### 4.3 工具箱
 
@@ -160,7 +163,7 @@
 | 工具箱类型 | 箱内资产 |
 | --- | --- |
 | MCP | tools、resources、prompts 及 server 状态 |
-| Skill | instructions、references、assets、scripts、optional tools |
+| 本地工具箱 | 零到多个 workflow instructions、tools，以及未来的 references/assets/scripts |
 | Plugin | plugin 提供的 tools、skills、resources 或 commands |
 | 自定义工具包 | 一组有关联的本地或远端工具 |
 
@@ -350,7 +353,14 @@ MCP resources 和 prompts 仍是箱内资产，但不应自动转化为 function
 
 ## 9. Skill 工具箱语义
 
-Skill 也应作为工具箱，而不是扫描后把完整正文直接注入每个匹配请求。
+Skill 不再是特殊运行时容器。它负责从磁盘发现、版本化和覆盖工作流内容，再被适配为普通
+`LocalToolboxSpec`。Subagent 等内置能力使用同一种本地工具箱结构，只是可以不带说明书。
+
+本地工具箱统一允许：
+
+- 零到多个 workflow instruction 叶子；
+- 零到多个本地工具叶子；
+- 独立的目录描述、标签和可用性策略。
 
 外层条目只包含：
 
@@ -410,6 +420,10 @@ Skill script 的激活不代表允许执行；执行仍需走 policy 和 approva
 - turn：只服务下一次模型决策。
 - run：服务当前用户请求，结束后释放。
 - session：跨多轮保留，适合连续使用同一工具箱。
+
+CLI 进入或切换会话时必须先以 session id 切换运行时能力状态：清理上一会话的激活集，再恢复
+目标会话持久化的 session 能力。交互命令预激活的 turn/run 能力属于目标会话的待执行状态，
+下一次执行不得因重复初始化而提前回收；切换到其他会话时则必须清理，避免跨会话泄漏。
 
 默认建议：
 
@@ -496,7 +510,10 @@ Skill script 的激活不代表允许执行；执行仍需走 policy 和 approva
 
 ## 17. 当前实现边界
 
-当前主链路已经完成仓库与注册表分离，并支持 MCP 工具箱、Skill instructions、目录列举、manifest 打开、显式激活、释放、状态查询和 turn/run/session 范围回收。`ToolRegistry` 只承载核心工具与当前激活集。
+当前主链路已经完成仓库与注册表分离，并支持 MCP 工具箱、Skill instructions、本地
+Subagent 工具箱、目录列举、manifest 打开、显式激活、释放、状态查询和
+turn/run/session 范围回收。`ToolRegistry` 只承载核心工具与当前激活集。Subagent 工具箱只在
+前台父会话目录中出现，后台子会话不提供该目录，从源头避免递归委派。
 
 尚未完成的设计边界包括 Skill `references/`、`assets/`、`scripts/` 的独立索引和生命周期，以及 TTL/LRU 和基于健康度、风险、成本的候选排序。这些能力仍应遵守本文定义的渐进披露、预算、安全与原子激活契约。
 

@@ -146,7 +146,7 @@ def _capability_activate_tool(warehouse: CapabilityWarehouse) -> SimpleTool:
         name="capability_activate",
         description=(
             "Activate selected items from an already opened toolbox. "
-            "Activated tool schemas or Skill instructions become visible on the next model turn."
+            "Activated tool schemas or workflow instructions become visible on the next model turn."
         ),
         arguments={
             "capability_ids": "Array of leaf capability ids returned by toolbox_open.",

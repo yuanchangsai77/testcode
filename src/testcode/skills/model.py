@@ -16,4 +16,3 @@ class SkillMetadata:
 class Skill:
     metadata: SkillMetadata
     content: str  # Markdown text instructions under the frontmatter
-    matched_trigger: str | None = None

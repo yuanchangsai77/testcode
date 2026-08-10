@@ -73,14 +73,14 @@ class ModelPromptBuilder:
                 ]
             )
 
-        active_skills = getattr(session, "active_skills", [])
-        if active_skills:
+        active_instructions = getattr(session, "active_instructions", [])
+        if active_instructions:
             system_lines.append("")
-            system_lines.append("### Active Skill Guidelines:")
-            for skill in active_skills:
+            system_lines.append("### Active Workflow Instructions:")
+            for instruction in active_instructions:
                 system_lines.append("")
-                system_lines.append(f"[Skill: {skill.metadata.name}]")
-                system_lines.append(skill.content)
+                system_lines.append(f"[Workflow: {instruction.name}]")
+                system_lines.append(instruction.content)
 
         system_lines.extend(self._format_project_rules(session))
         system_lines.extend(self._format_workspace_summary(session))

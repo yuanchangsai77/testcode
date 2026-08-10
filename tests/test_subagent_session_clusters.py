@@ -27,7 +27,6 @@ def test_parent_can_launch_multiple_independent_inherited_subagent_sessions(tmp_
         cwd=str(tmp_path),
         messages=[{"role": "user", "content": "build the runtime"}],
     )
-    parent.active_skills = ["planner"]
     parent.active_capability_ids = ["toolbox:local"]
     sessions.save(parent)
 
@@ -37,7 +36,7 @@ def test_parent_can_launch_multiple_independent_inherited_subagent_sessions(tmp_
     assert first.session_id != second.session_id
     assert first.messages == parent.messages
     assert first.messages is not parent.messages
-    assert first.active_skills == ["planner"]
+    assert first.active_capability_ids == ["toolbox:local"]
     assert first.parent_session_id == parent.session_id
     assert first.cluster_id == second.cluster_id == parent.cluster_id
     assert first.session_role == "subagent"
@@ -61,13 +60,13 @@ def test_fresh_subagent_uses_explicit_config_without_parent_conversation(tmp_pat
             source="fresh",
             cwd=str(tmp_path / "child"),
             messages=[{"role": "system", "content": "review only"}],
-            active_skills=["reviewer"],
+            active_capability_ids=["skill:reviewer:instructions"],
         ),
     )
 
     assert child.cwd == str(tmp_path / "child")
     assert child.messages == [{"role": "system", "content": "review only"}]
-    assert child.active_skills == ["reviewer"]
+    assert child.active_capability_ids == ["skill:reviewer:instructions"]
     assert "private parent context" not in json.dumps(child.messages)
 
 
@@ -77,7 +76,7 @@ def test_session_image_is_immutable_launch_material_not_a_live_session(tmp_path)
         cwd=str(tmp_path / "template"),
         messages=[{"role": "system", "content": "specialist template"}],
     )
-    template.active_skills = ["specialist"]
+    template.active_capability_ids = ["skill:specialist:instructions"]
     sessions.save(template)
     image = coordinator.save_image(template, name="specialist", description="Reusable specialist")
     parent = sessions.create(cwd=str(tmp_path))
@@ -549,13 +548,19 @@ def test_runner_publishes_structured_handoff_evidence(tmp_path):
     assert entry.metadata["verifications"] == result.verifications
 
 
-def test_application_exposes_subagent_lifecycle_tools(tmp_path, monkeypatch):
+def test_application_exposes_subagent_lifecycle_tools_on_demand(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
 
     app = create_app(workspace_root=tmp_path)
+    warehouse = app.engine.capability_warehouse
     names = {definition.name for definition in app.engine.tools.definitions()}
 
+    assert not {"subagent_spawn", "subagent_resume", "subagent_run_ready", "subagent_status"} & names
+    assert any(entry.id == "local:subagents" for entry in warehouse.catalog_entries())
+    manifest = warehouse.open_toolbox("local:subagents")
+    warehouse.activate([item.id for item in manifest.items], scope="run", reason="delegate work")
+    names = {definition.name for definition in app.engine.tools.definitions()}
     assert {"subagent_spawn", "subagent_resume", "subagent_run_ready", "subagent_status"} <= names
     assert app.subagent_runner is not None
 
@@ -572,6 +577,7 @@ def test_background_mode_alone_does_not_grant_patch_and_hides_recursive_tools(tm
     assert "subagent_spawn" not in names
     assert "subagent_resume" not in names
     assert "subagent_run_ready" not in names
+    assert not any(entry.id == "local:subagents" for entry in app.engine.capability_warehouse.catalog_entries())
 
 
 def test_background_subagent_runtime_uses_bounded_model_retry_and_timeout(tmp_path, monkeypatch):

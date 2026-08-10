@@ -61,9 +61,8 @@ Using this single abstraction, we can cleanly isolate and implement different ro
    - Expands file globs/directories requested via `--context`.
    - Reads workspace-contained text files and bounded directory listings as candidate context.
    - Refuses out-of-workspace paths and binary files.
-4. **`SkillContextLoader`** (compatibility implementation)
-   - Supports trigger-based prompt matching in isolation and legacy tests.
-   - It is not registered by the current `create_app()` composition; the main Skill path uses `SkillToolboxSource` and capability activation.
+Skill instructions are not a `ContextLoader`: they enter runtime context only through the capability
+warehouse activation set, so discovery, budgets, persistence and release have one owner.
 
 Context loaders should return or record enough source metadata for recovery and audit: path, run id, hash, truncation state, or artifact id. Complete raw content belongs in logs or cold archives and should be loaded into prompt only on demand.
 

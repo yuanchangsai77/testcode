@@ -133,7 +133,7 @@ Responsibilities:
 
 - load project rules before model invocation and load workspace summaries only for project-relevant requests
 - keep context gathering independent from packaging and prompt rendering
-- collect user-selected context paths, workspace summaries, active skills, checkpoints, and archive references as candidate context
+- collect user-selected context paths, workspace summaries, active workflow instructions, checkpoints, and archive references as candidate context
 - bound context size and keep paths inside the active workspace
 - keep complete raw artifacts in logs or archives for later inspection instead of treating prompt context as storage
 
@@ -219,7 +219,7 @@ Core files:
 - `src/testcode/tools/base.py`
 - `src/testcode/tools/registry.py`
 - `src/testcode/tools/builtin_provider.py`
-- `src/testcode/tools/builtin.py` (legacy registry assembly helper)
+- `src/testcode/tools/builtin_provider.py` (built-in provider and standalone registry factory)
 - `src/testcode/tools/shared.py`
 - `src/testcode/tools/builtins/`
 
@@ -229,16 +229,23 @@ Tool structure:
 - `registry.py` owns registration, default tool exposure, schema validation, and normalized result logging.
 - `shared.py` contains reusable helpers for JSON-style schemas, workspace path resolution, subprocess execution, output clipping, and result retargeting.
 - `builtin_provider.py` supplies built-in tools to the application composition root.
-- `builtin.py` remains a compatibility helper that assembles a standalone registry.
+- Built-in composition has one owner in `builtin_provider.py`; tests reuse its standalone registry factory.
 - `builtins/<tool>.py` contains one concrete tool per file. Each module exports a `tool()` factory and keeps the tool's `run()` implementation local.
 
-Built-in tools:
+Core built-in tools:
 
 - `list_dir`, `read_file`, `file_info`
 - `find_files`, `search_text`
-- `shell_exec`, `run_tests`
-- `git_status`, `git_diff`, `git_show`
+- `git_status`, `git_diff`
+- `shell_exec`
 - `patch`
+
+High-frequency, low-cost read-only inspection remains in the core workbench. Specialized built-in tools
+remain implemented under `builtins/`, while application composition groups them into progressively
+disclosed Skill toolboxes: `pytest-helper` supplies `run_tests`; `git-helper` supplies `git_show` and
+workflow instructions. Tool providers own implementations, and Skills only reference reusable
+capabilities. The standalone registry factory includes both core and specialized tools for direct
+execution tests.
 
 This section describes where tool execution lives. Field-level placement rules for `ToolResult.output`, `metadata`, summarizers, and prompt visibility belong to `docs/reference/tool-contract.md`.
 

@@ -90,7 +90,7 @@ def test_prompt_includes_project_rules_before_tools(tmp_path):
     assert system.index("### Project Rules:") < system.index("Available tools:")
 
 
-def test_create_app_registers_project_rules_loader(tmp_path, monkeypatch):
+def test_create_app_registers_context_loaders(tmp_path, monkeypatch):
     monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
     monkeypatch.chdir(tmp_path)
 

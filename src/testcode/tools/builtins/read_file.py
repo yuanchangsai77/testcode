@@ -5,7 +5,7 @@ from ...safety.redaction import is_sensitive_path
 from ..base import SimpleTool, ToolContext
 from ..shared import looks_binary, path_error, positive_int, resolve_workspace_path, retarget, schema
 from ..summary import read_file_summary
-from .read_state import record_observation, snapshot
+from ..observation_state import record_observation, snapshot
 
 MAX_READ_BYTES = 1_048_576
 DEFAULT_READ_BYTES = 64_000

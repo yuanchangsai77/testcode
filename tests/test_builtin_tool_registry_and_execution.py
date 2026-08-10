@@ -5,7 +5,7 @@ import time
 import subprocess
 
 from testcode.observability.logger import InMemoryLogger
-from testcode.tools.builtin import build_builtin_registry
+from testcode.tools.builtin_provider import build_builtin_registry
 from testcode.types import ToolAction
 
 
@@ -57,6 +57,46 @@ def test_registry_validates_argument_types_and_number_bounds(tmp_path):
     assert not_finite.error_code == "invalid_argument_value"
     assert too_large.error_code == "invalid_argument_value"
     assert not registry.state_for("shell_session")
+
+
+def test_registry_validates_enum_array_items_and_nested_objects(tmp_path):
+    from testcode.tools.base import SimpleTool
+    from testcode.types import ToolResult
+
+    registry = make_registry()
+    registry.register(
+        SimpleTool(
+            name="schema_demo",
+            description="Schema demo.",
+            arguments={},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["run", "session"]},
+                    "ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                    "options": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "minLength": 2}},
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["scope", "ids", "options"],
+                "additionalProperties": False,
+            },
+            handler=lambda action, _context: ToolResult(action.name, True, "ok"),
+        )
+    )
+
+    bad_enum = registry.execute(ToolAction("schema_demo", {"scope": "forever", "ids": ["x"], "options": {"name": "ok"}}), cwd=str(tmp_path))
+    empty = registry.execute(ToolAction("schema_demo", {"scope": "run", "ids": [], "options": {"name": "ok"}}), cwd=str(tmp_path))
+    bad_item = registry.execute(ToolAction("schema_demo", {"scope": "run", "ids": [1], "options": {"name": "ok"}}), cwd=str(tmp_path))
+    nested = registry.execute(ToolAction("schema_demo", {"scope": "run", "ids": ["x"], "options": {"extra": True}}), cwd=str(tmp_path))
+
+    assert bad_enum.error_code == "invalid_argument_value"
+    assert empty.metadata["constraint"] == "minItems"
+    assert bad_item.error_code == "invalid_argument_type"
+    assert nested.error_code in {"missing_argument", "unknown_argument"}
 
 
 def test_default_definitions_have_structured_schema_and_risk():
@@ -165,6 +205,61 @@ def test_find_files_supports_authorized_external_path(tmp_path):
     assert denied.error_code == "path_outside_workspace"
     assert allowed.success is True
     assert allowed.output == "target.py"
+
+
+def test_find_files_respects_ignore_and_hidden_controls(tmp_path):
+    (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("", encoding="utf-8")
+    (tmp_path / "ignored.py").write_text("", encoding="utf-8")
+    hidden = tmp_path / ".hidden"
+    hidden.mkdir()
+    (hidden / "secret.py").write_text("", encoding="utf-8")
+    registry = make_registry()
+
+    default = registry.execute(ToolAction("find_files", {"pattern": "*.py"}), cwd=str(tmp_path))
+    ignored = registry.execute(ToolAction("find_files", {"pattern": "*.py", "include_ignored": True}), cwd=str(tmp_path))
+    all_files = registry.execute(
+        ToolAction("find_files", {"pattern": "*.py", "include_ignored": True, "include_hidden": True}),
+        cwd=str(tmp_path),
+    )
+
+    assert default.output == "visible.py"
+    assert ignored.output == "ignored.py\nvisible.py"
+    assert all_files.output == ".hidden/secret.py\nignored.py\nvisible.py"
+
+
+def test_find_files_filters_before_applying_output_budget(tmp_path):
+    for index in range(20):
+        (tmp_path / f"a{index:02}.txt").write_text("", encoding="utf-8")
+    (tmp_path / "z_target.py").write_text("", encoding="utf-8")
+    registry = make_registry(max_output_bytes=50)
+
+    result = registry.execute(
+        ToolAction("find_files", {"pattern": "*.py"}),
+        cwd=str(tmp_path),
+    )
+
+    assert result.success is True
+    assert result.output == "z_target.py"
+    assert result.metadata["truncated"] is False
+
+
+def test_find_files_stops_after_bounded_matching_results(tmp_path):
+    for index in range(20):
+        (tmp_path / f"match{index:02}.py").write_text("", encoding="utf-8")
+    registry = make_registry()
+
+    result = registry.execute(
+        ToolAction("find_files", {"pattern": "*.py", "max_results": 3}),
+        cwd=str(tmp_path),
+    )
+
+    visible = result.output.splitlines()
+    assert len(visible) == 3
+    assert visible == sorted(visible)
+    assert all(name.startswith("match") and name.endswith(".py") for name in visible)
+    assert result.metadata["count"] == 3
+    assert result.metadata["truncated"] is True
 
 
 def test_shell_exec_reports_success_failure_and_timeout(tmp_path):

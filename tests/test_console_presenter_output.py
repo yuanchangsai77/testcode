@@ -181,7 +181,6 @@ def test_show_session_state(capsys):
         status="active",
         messages=[],
         run_ids=[],
-        active_skills=[],
         trace=[],
         resume_state=SessionResumeState(),
     )

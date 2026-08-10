@@ -5,6 +5,12 @@ from dataclasses import dataclass
 import pytest
 
 from testcode.app import create_app
+from testcode.capabilities import (
+    InstructionContent,
+    LocalInstructionCapability,
+    LocalToolboxSource,
+    LocalToolboxSpec,
+)
 from testcode.capabilities.model import (
     ActivatedCapability,
     CapabilityEntry,
@@ -30,6 +36,38 @@ def _tool(name: str) -> SimpleTool:
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         handler=lambda action, _context: ToolResult(name=action.name, success=True, output="ok"),
     )
+
+
+def test_generic_local_toolbox_supports_multiple_or_no_workflow_instructions():
+    first = InstructionContent("local:review:plan", "plan", "PLAN FLOW")
+    second = InstructionContent("local:review:verify", "verify", "VERIFY FLOW")
+    source = LocalToolboxSource(
+        (
+            LocalToolboxSpec(
+                id="local:review",
+                name="review",
+                source="local",
+                description="Review workflows",
+                instructions=(
+                    LocalInstructionCapability(first.id, first.name, "Plan review", lambda: first),
+                    LocalInstructionCapability(second.id, second.name, "Verify review", lambda: second),
+                ),
+            ),
+            LocalToolboxSpec(
+                id="local:tools-only",
+                name="tools-only",
+                source="local",
+                description="No workflow instructions",
+            ),
+        )
+    )
+
+    review = source.open_toolbox("local:review")
+    tools_only = source.open_toolbox("local:tools-only")
+
+    assert [item.kind for item in review.items] == ["workflow_instructions", "workflow_instructions"]
+    assert source.activate(second.id).instruction == second
+    assert tools_only.items == ()
 
 
 @dataclass
@@ -315,10 +353,10 @@ ROUTE INSTRUCTIONS
     warehouse.open_toolbox("skill:route-guide")
 
     warehouse.activate(["skill:route-guide:instructions"], scope="run")
-    assert warehouse.persisted_skills() == []
+    assert warehouse.persisted_instructions() == []
     warehouse.release(reason="change scope")
     warehouse.activate(["skill:route-guide:instructions"], scope="session")
-    assert [skill.metadata.name for skill in warehouse.persisted_skills()] == ["route-guide"]
+    assert [item.name for item in warehouse.persisted_instructions()] == ["route-guide"]
 
 
 def test_skill_body_enters_prompt_only_after_leaf_activation(tmp_path, monkeypatch):
@@ -350,3 +388,50 @@ PRIVATE ROUTE INSTRUCTIONS
     warehouse.apply_to_session(session)
     active_prompt = str(ModelPromptBuilder().build_messages(session)[0]["content"])
     assert "PRIVATE ROUTE INSTRUCTIONS" in active_prompt
+
+
+def test_builtin_skill_toolboxes_group_specialized_runtime_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    app = create_app(workspace_root=tmp_path)
+    warehouse = app.engine.capability_warehouse
+    initial_names = {definition.name for definition in app.engine.tools.definitions()}
+
+    assert {"git_status", "git_diff"} <= initial_names
+    assert {"git_show", "run_tests"}.isdisjoint(initial_names)
+
+    git_manifest = warehouse.open_toolbox("skill:git-helper")
+    assert [item.name for item in git_manifest.items] == [
+        "instructions",
+        "git_show",
+    ]
+    warehouse.activate([item.id for item in git_manifest.items], scope="run", reason="git workflow")
+    active_names = {definition.name for definition in app.engine.tools.definitions()}
+    assert {"git_status", "git_diff", "git_show"} <= active_names
+    assert "run_tests" not in active_names
+
+    warehouse.release(reason="switch workflows")
+    active_names = {definition.name for definition in app.engine.tools.definitions()}
+    assert {"git_status", "git_diff"} <= active_names
+    assert "git_show" not in active_names
+
+    pytest_manifest = warehouse.open_toolbox("skill:pytest-helper")
+    assert [item.name for item in pytest_manifest.items] == ["instructions", "run_tests"]
+    warehouse.activate([item.id for item in pytest_manifest.items], scope="run", reason="test workflow")
+    active_names = {definition.name for definition in app.engine.tools.definitions()}
+    assert "run_tests" in active_names
+    assert {"git_status", "git_diff"} <= active_names
+    assert "git_show" not in active_names
+
+
+def test_session_restores_skill_owned_tool_leaf(tmp_path, monkeypatch):
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    first = create_app(workspace_root=tmp_path)
+    manifest = first.engine.capability_warehouse.open_toolbox("skill:git-helper")
+    git_show_id = next(item.id for item in manifest.items if item.name == "git_show")
+    first.engine.capability_warehouse.activate([git_show_id], scope="session")
+
+    restored = create_app(workspace_root=tmp_path)
+    restored.engine.capability_warehouse.restore_capabilities([git_show_id])
+
+    assert restored.engine.tools.definition_for("git_show") is not None
+    assert restored.engine.capability_warehouse.persisted_capability_ids() == [git_show_id]

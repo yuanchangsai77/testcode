@@ -12,7 +12,7 @@
 每次 run 创建独立的 session context，并按以下顺序循环：
 
 1. 加载项目规则、相关 workspace 摘要和显式上下文。
-2. 恢复已持久化的 Skill 与 capability activation。
+2. 只通过已持久化的 `active_capability_ids` 恢复 capability activation。
 3. 将当前可见工具和 session context 发送给模型。
 4. 将回复解析为最终回答或工具动作。
 5. 对工具执行可见性、预检、安全审批和实际调用。

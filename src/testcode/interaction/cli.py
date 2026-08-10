@@ -109,6 +109,7 @@ class CLI:
                 session.status = "active"
                 session.messages = list(conversation)
                 self.session_store.save(session)
+            self.prepare_session_runtime(session)
             self.presenter.show_session_state(session, resumed=resumed, engine=self.engine)
             if resumed and hasattr(self.presenter, "show_session_history"):
                 self.presenter.show_session_history(session)
@@ -154,10 +155,8 @@ class CLI:
                 continue
 
 
-            active_skills = []
             active_capability_ids = []
             if session is not None:
-                active_skills = getattr(session, "active_skills", [])
                 active_capability_ids = getattr(session, "active_capability_ids", [])
 
             request = UserRequest(
@@ -166,7 +165,6 @@ class CLI:
                 metadata={
                     "conversation": list(conversation),
                     "session_id": session.session_id if session is not None else None,
-                    "active_skills": list(active_skills),
                     "active_capability_ids": list(active_capability_ids),
                     "session_trace": list(getattr(session, "trace", [])[-6:]) if session is not None else [],
                     "resume_state": getattr(session, "resume_state", None),
@@ -192,8 +190,6 @@ class CLI:
                 if session is not None:
                     session.messages = list(conversation)
                     session.status = "active"
-                    if hasattr(summary, "active_skills"):
-                        session.active_skills = [s.metadata.name for s in summary.active_skills]
                     session.active_capability_ids = list(
                         getattr(summary, "active_capability_ids", [])
                     )
@@ -223,6 +219,16 @@ class CLI:
             return None
         return self.session_store.load(session_id)
 
+    def prepare_session_runtime(self, session: StoredSession | None) -> None:
+        if session is None:
+            return
+        prepare = getattr(self.engine, "prepare_session_state", None)
+        if callable(prepare):
+            prepare(
+                session.session_id,
+                getattr(session, "active_capability_ids", []),
+            )
+
     def latest_session(self) -> StoredSession | None:
         if self.session_store is None:
             return None
@@ -246,8 +252,6 @@ class CLI:
             ]
         )
         session.status = status
-        if hasattr(summary, "active_skills"):
-            session.active_skills = [skill.metadata.name for skill in summary.active_skills]
         session.active_capability_ids = list(
             getattr(summary, "active_capability_ids", [])
         )
@@ -491,6 +495,7 @@ class CLI:
                 conversation.clear()
                 conversation.extend(selected_session.messages)
             self.active_session = selected_session
+            self.prepare_session_runtime(selected_session)
             if self.presenter:
                 self.presenter.show_session_state(selected_session, resumed=True, engine=self.engine)
                 if hasattr(self.presenter, "show_session_history"):

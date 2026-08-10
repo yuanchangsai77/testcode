@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import math
-
 from ..types import ToolAction, ToolDefinition, ToolResult
 from .base import ToolContext
+from .result_packager import ToolResultPackager
+from .schema_validation import validate_schema
 
 
 class ToolRegistry:
@@ -20,6 +20,7 @@ class ToolRegistry:
         self._providers = []
         self._provider_tool_owners: dict[str, int] = {}
         self._max_output_bytes = max(1, int(max_output_bytes))
+        self._result_packager = ToolResultPackager(self._max_output_bytes)
         self._interceptors = list(interceptors or [])
 
     def register_interceptor(self, interceptor) -> None:
@@ -114,12 +115,14 @@ class ToolRegistry:
     def execute(self, action: ToolAction, *, cwd: str = ".", allowed_roots: list[str] | None = None) -> ToolResult:
         blocked = self.preflight(action, cwd=cwd, allowed_roots=allowed_roots)
         if blocked is not None:
+            blocked = self._result_packager.package(blocked)
             self._record_result(blocked)
             return blocked
         tool = self._tools[action.name]
         context = self._context(cwd, allowed_roots)
         self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
         result = tool.run(action, context)
+        result = self._result_packager.package(result)
         self._record_result(result)
         return result
 
@@ -170,97 +173,39 @@ class ToolRegistry:
         return tool.summarize(result)
 
     def _validate(self, action: ToolAction, schema: dict) -> ToolResult | None:
-        required = set(schema.get("required", []))
-        properties = set(schema.get("properties", {}).keys())
-        additional = schema.get("additionalProperties", True)
-
-        missing = sorted(name for name in required if name not in action.arguments)
-        if missing:
+        issue = validate_schema(action.arguments, schema)
+        if issue is None:
+            return None
+        if issue.keyword == "required":
+            missing = list(issue.expected or [])
             return ToolResult(
                 name=action.name,
                 success=False,
-                output=f"missing required argument(s): {', '.join(missing)}",
+                output=issue.message,
                 error_code="missing_argument",
                 metadata={"missing": missing},
             )
-
-        if additional is False:
-            unknown = sorted(name for name in action.arguments if name not in properties)
-            if unknown:
-                return ToolResult(
-                    name=action.name,
-                    success=False,
-                    output=f"unknown argument(s): {', '.join(unknown)}",
-                    error_code="unknown_argument",
-                    metadata={"unknown": unknown},
-                )
-
-        property_schemas = schema.get("properties", {})
-        if isinstance(property_schemas, dict):
-            for name, value in action.arguments.items():
-                field_schema = property_schemas.get(name)
-                if not isinstance(field_schema, dict):
-                    continue
-                expected = field_schema.get("type")
-                if isinstance(expected, str) and not self._matches_type(value, expected):
-                    return ToolResult(
-                        name=action.name,
-                        success=False,
-                        output=(
-                            f"argument '{name}' must have type {expected}; "
-                            f"received {type(value).__name__}"
-                        ),
-                        error_code="invalid_argument_type",
-                        metadata={
-                            "argument": name,
-                            "expected": expected,
-                            "actual": type(value).__name__,
-                        },
-                    )
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    if not math.isfinite(float(value)):
-                        return self._invalid_number(action, name, "must be finite")
-                    minimum = field_schema.get("minimum")
-                    maximum = field_schema.get("maximum")
-                    if isinstance(minimum, (int, float)) and value < minimum:
-                        return self._invalid_number(
-                            action,
-                            name,
-                            f"must be at least {minimum}",
-                        )
-                    if isinstance(maximum, (int, float)) and value > maximum:
-                        return self._invalid_number(
-                            action,
-                            name,
-                            f"must be at most {maximum}",
-                        )
-
-        return None
-
-    def _matches_type(self, value, expected: str) -> bool:
-        checks = {
-            "array": lambda item: isinstance(item, list),
-            "boolean": lambda item: isinstance(item, bool),
-            "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
-            "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
-            "object": lambda item: isinstance(item, dict),
-            "string": lambda item: isinstance(item, str),
-        }
-        check = checks.get(expected)
-        return True if check is None else check(value)
-
-    def _invalid_number(
-        self,
-        action: ToolAction,
-        name: str,
-        reason: str,
-    ) -> ToolResult:
+        if issue.keyword == "additionalProperties":
+            unknown = list(issue.expected or [])
+            return ToolResult(
+                name=action.name,
+                success=False,
+                output=issue.message,
+                error_code="unknown_argument",
+                metadata={"unknown": unknown},
+            )
+        error_code = "invalid_argument_type" if issue.keyword == "type" else "invalid_argument_value"
         return ToolResult(
             name=action.name,
             success=False,
-            output=f"argument '{name}' {reason}",
-            error_code="invalid_argument_value",
-            metadata={"argument": name, "reason": reason},
+            output=f"argument '{issue.path or '<root>'}' {issue.message}",
+            error_code=error_code,
+            metadata={
+                "argument": issue.path,
+                "constraint": issue.keyword,
+                "expected": issue.expected,
+                "actual": issue.actual,
+            },
         )
 
     def _record_result(self, result: ToolResult) -> None:

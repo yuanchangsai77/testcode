@@ -98,7 +98,7 @@ def path_error(action: ToolAction, resolved: ResolvedPath, expected: str | None 
     return None
 
 
-def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, input_text: str | None = None, max_output_bytes: int = MAX_OUTPUT_BYTES) -> ToolResult:
+def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, input_text: str | None = None, max_output_bytes: int | None = MAX_OUTPUT_BYTES) -> ToolResult:
     try:
         completed = subprocess.run(
             command,
@@ -110,8 +110,8 @@ def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, 
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
-        stdout = clip(error.stdout or "", max_output_bytes)
-        stderr = clip(error.stderr or "", max_output_bytes)
+        stdout = _captured_text(error.stdout or "", max_output_bytes)
+        stderr = _captured_text(error.stderr or "", max_output_bytes)
         return ToolResult(
             name="command",
             success=False,
@@ -122,8 +122,8 @@ def run_command(command, cwd: Path, *, timeout: float = 30, shell: bool = True, 
     except FileNotFoundError as error:
         return ToolResult(name="command", success=False, output=str(error), error_code="command_not_found")
 
-    stdout = clip(completed.stdout, max_output_bytes)
-    stderr = clip(completed.stderr, max_output_bytes)
+    stdout = _captured_text(completed.stdout, max_output_bytes)
+    stderr = _captured_text(completed.stderr, max_output_bytes)
     return ToolResult(
         name="command",
         success=completed.returncode == 0,
@@ -142,6 +142,12 @@ def format_process_output(stdout: str, stderr: str, exit_code: int | None) -> st
     if stderr:
         parts.append(f"stderr:\n{stderr}")
     return "\n".join(parts) if parts else "exit_code: 0"
+
+
+def _captured_text(value: str | bytes, max_output_bytes: int | None) -> str:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value if max_output_bytes is None else clip(value, max_output_bytes)
 
 
 def positive_int(value: object, default: int) -> int:

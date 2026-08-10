@@ -24,7 +24,7 @@
 | `ToolDefinition.input_schema` | 是 | 否 | 否 | API tool schema 和本地参数校验。 |
 | `ToolDefinition.risk_level` | 是 | 否 | 否 | policy/approval 判断，也提示模型风险。 |
 | `ToolAction.arguments` | 是，作为 history args | 审批时可见 | 是 | 模型请求工具时给出的参数。 |
-| `ToolResult.output` | 是；当前直接进入 history | fallback 可见 | 是 | 给模型继续推理的主要结果；未来由 packager 决定裁剪。 |
+| `ToolResult.output` | 是；经统一结果包装后进入 history | fallback 可见 | 是 | 给模型继续推理的有界结果。 |
 | `ToolResult.success` | 是，转成 status | 是 | 是 | 表示工具是否成功。 |
 | `ToolResult.error_code` | 是，转成 status | 是 | 是 | 稳定错误恢复、policy 判断和展示。 |
 | `ToolResult.metadata` | 默认否；仅特殊字段进入 history | 默认否 | 是 | 给 runtime、测试、日志使用的结构化数据。 |
@@ -33,9 +33,13 @@
 
 ## 放置原则
 
-模型可能需要继续工作的短结果放 `ToolResult.output`。当前实现会把它直接写入
-session history，并在下一次模型请求中发送；因此工具本身仍必须做好长度限制。
-规划中的 `ContextPackager` 落地后，才会在统一入口决定摘要、裁剪或省略。
+模型可能需要继续工作的短结果放 `ToolResult.output`。`ToolRegistry` 在结果离开工具时统一
+执行字节预算、UTF-8 安全裁剪和截断标记，再写入 session history。工具仍可实施更小的
+领域限制，但不得依赖各自实现来满足全局输出上限。
+
+统一包装会在 metadata 中记录原始/可见字节数、摘要哈希和 `truncated` 状态。完整的跨消息
+`ContextPackager` 仍负责 conversation、Skill、显式上下文和 checkpoint 的总预算；单项工具
+结果包装是它之前的第一道稳定边界。
 
 大输出不要只依赖 `output` 承载。工具应在 `metadata` 中保留 source reference、路径、大小、truncated 状态、artifact id 或 run id，让 packager 可以用摘要进入 prompt，并在需要时回查完整内容。
 
@@ -109,7 +113,9 @@ ToolResult(
 
 ## 当前边界
 
-当前实现中，`SessionContext.add_tool_result()` 只把 `output`、状态、`error_code` 和特殊的 `metadata["action_arguments"]` 写入 session history。`ModelPromptBuilder` 再把 session history 放进模型输入。
+当前实现中，`ToolRegistry` 先统一包装结果；`SessionContext.add_tool_result()` 只把有界
+`output`、状态、`error_code` 和特殊的 `metadata["action_arguments"]` 写入 session history。
+`ModelPromptBuilder` 再把 session history 放进模型输入。
 
 目标架构中，session history 和 tool result 会先进入 `ContextPackager`，由 packager 生成预算内 `PromptContextPackage`。因此新增 tool 不应假设 `output` 必然完整进入最终 prompt。
 

@@ -24,7 +24,9 @@ This document defines the Skill file format, discovery sources, toolbox contents
 
 ## 1. 目标
 
-Provide standard built-in and custom project/user Skills without loading every instruction body into every model request. The current application exposes Skill metadata through the capability warehouse; instructions enter model context only after explicit capability activation.
+Provide standard built-in and custom project/user Skills without loading every instruction body into every
+model request. The current application exposes Skill metadata through the capability warehouse;
+instructions and explicitly assigned local tools enter the workbench only after capability activation.
 
 Skill loading follows the same long-task context rule as the rest of the runtime: full skill files and referenced artifacts may exist on disk, but the prompt receives only active, task-relevant, budgeted guidance after context packaging. A skill is not a mechanism for bypassing context budgets.
 
@@ -77,7 +79,12 @@ dedicated override diagnostic.
 
 ## 4. 架构与选择流程
 
-Application composition scans lightweight metadata into `SkillRegistry`, then exposes each Skill through `SkillToolboxSource`. The model can inspect the capability catalog, open one Skill toolbox to see its instructions manifest, and activate that leaf. Activated Skill content is attached to `SessionContext` and rendered by `ModelPromptBuilder`; a separate budgeted `ContextPackager` remains planned.
+Application composition scans lightweight metadata into `SkillRegistry`, adapts it into
+`LocalToolboxSpec`, then exposes it through the shared `LocalToolboxSource`. The model can inspect the
+capability catalog, open one toolbox to see its
+instructions and local-tool manifest, and activate only the required leaves. Activated Skill content is
+attached to `SessionContext`; activated tools are registered through the same atomic warehouse path. A
+separate budgeted `ContextPackager` remains planned.
 
 ```mermaid
 graph TD
@@ -85,9 +92,9 @@ graph TD
     B --> C[SkillRegistry: Scan Metadata]
     C --> D[Capability catalog exposes Skill metadata]
     D --> E[Open Skill toolbox manifest]
-    E --> F[Activate instructions leaf]
-    F --> G[Load SKILL.md content]
-    G --> H[ModelPromptBuilder renders active guidance]
+    E --> F[Activate selected instructions/tool leaves]
+    F --> G[Load SKILL.md or register local tool]
+    G --> H[Runtime exposes active workflow]
 ```
 
 ### Core Abstractions
@@ -123,13 +130,8 @@ class SkillRegistry:
         """Lightweight scan of skill metadata. Does not load full file contents."""
         pass
 
-    def match_skills(self, prompt: str) -> list[Skill]:
-        """Matches a user prompt against triggers and returns populated Skill instances.
-        
-        Triggers must be matched case-insensitively and respect word boundaries (e.g. using
-        regex pattern r"\b" + re.escape(trigger) + r"\b") to prevent substring false positives
-        (e.g., prompt containing 'greatest' triggering the skill for 'test').
-        """
+    def get_skill(self, name: str) -> Skill | None:
+        """Load one explicitly selected Skill after warehouse activation."""
         pass
 ```
 
@@ -141,20 +143,24 @@ The active application path is:
 
 ### 1. Application Assembly (`src/testcode/app.py`)
 - Initialize the `SkillRegistry` with paths resolved dynamically.
-- Wrap the registry in `SkillToolboxSource` and attach it to `CapabilityWarehouse`.
-- Keep `SkillContextLoader` available as a compatibility extension, but do not register it in the current `create_app()` context-loader list.
+- Adapt the registry and its explicitly assigned local tools into `LocalToolboxSpec`, then attach the
+  shared `LocalToolboxSource` to `CapabilityWarehouse`.
+- Use the shared `LocalToolboxSource` as the only activation path. Trigger strings remain catalog tags for
+  discovery; they do not silently inject instructions.
 
 ### 2. Execution Engine (`src/testcode/orchestration/engine.py`)
-- Restore persisted Skill capability ids and active Skill names at the start of a session run.
-- Apply activated Skill objects from `CapabilityWarehouse` to `SessionContext`.
-- Persist session-scoped active Skills into the execution summary for later turns.
+- Restore only persisted `active_capability_ids` at the start of a session run.
+- Apply activated generic `InstructionContent` objects from `CapabilityWarehouse` to `SessionContext`.
+- Persist session-scoped capability ids into the execution summary; instruction names are not a parallel
+  persistence channel.
 
 ### 3. Prompt Assembly
-- `ModelPromptBuilder.build_messages(session)` currently reads `session.active_skills` directly and renders active guidance into the system lines:
+- `ModelPromptBuilder.build_messages(session)` reads generic `session.active_instructions` and renders
+  active workflow guidance into the system lines:
     ```markdown
-    ### Active Skill Guidelines:
+    ### Active Workflow Instructions:
     
-    [Skill: python-unittest-helper]
+    [Workflow: python-unittest-helper]
     When writing or running Python unit tests:
     - Prefer using `pytest` over standard `unittest` unless specified...
     ```
@@ -164,7 +170,8 @@ The active application path is:
 - `references/`, `assets/`, and `scripts/` must be indexed separately from prompt content.
 - Reference files should be read on demand and clipped or summarized before prompt injection.
 - Script execution must become an ordinary tool action and pass the same policy, approval, and logging path as built-in tools.
-- Skill content included in a long-task resume packet should be the active skill name, version, matched trigger, short guidance summary, and source path, not the full skill body by default.
+- Workflow content included in a long-task resume packet should be the instruction id, name, version,
+  short guidance summary, and source path, not the full body by default.
 
 ---
 
@@ -172,20 +179,9 @@ The active application path is:
 
 Skill activation must remain observable through the following records:
 
-1. **Event `skills.matched`**:
-   - The compatibility trigger-matching path emits this event during run initialization.
-   - Payload:
-     ```json
-     {
-       "matched_skills": [
-         {
-           "name": "python-unittest-helper",
-           "version": "1.0.0",
-           "matched_trigger": "run tests"
-         }
-       ]
-     }
-     ```
+1. **Capability activation events**:
+   - Skill selection uses the same `capability.toolbox.opened`, `capability.activated`,
+     `capability.used` and `capability.released` events as other warehouse capabilities.
 2. **Run start payload**:
    - `run.start` lists scanned/registered skills for discovery diagnostics:
      ```json
@@ -194,20 +190,30 @@ Skill activation must remain observable through the following records:
      }
      ```
 3. **Trace file (`details.log`)**:
-   - The overview lists active skills:
+   - The overview lists active workflow instructions:
      ```text
      Overview
      - run_id: 2026-06-23T14-53-32
      - prompt: run tests in this workspace
-     - active skills: python-unittest-helper (v1.0.0)
+     - active workflow instructions: python-unittest-helper (v1.0.0)
      ```
 
 ---
 
 ## 7. 当前边界
 
-The current runtime scans Skill metadata, exposes Skills through `SkillToolboxSource`, activates instructions through the capability warehouse, injects active instructions into model context, and restores session-scoped activations. Built-in `git-helper` and `pytest-helper` Skills exercise this path.
+The current runtime scans Skill metadata, adapts Skills into the same `LocalToolboxSource` used by other
+local capability groups, and activates
+instructions and local tools through the capability warehouse, injects active instructions into model
+context, and restores session-scoped activations.
 
-`SkillContextLoader` trigger matching remains a compatibility path rather than the primary `create_app()` assembly. Standardized on-demand handling for `references/`, `assets/`, and `scripts`, plus budgeted source references and script approval semantics, is not yet complete.
+There is one Skill activation path: warehouse catalog → toolbox manifest → explicit activation. Built-in
+`git-helper` groups Git workflow instructions with the lower-frequency `git_show`; `git_status` and
+`git_diff` remain reusable core observation tools. Built-in `pytest-helper` groups `run_tests` with its
+workflow instructions. Tool providers own implementations; Skills declare workflow groupings and do not
+control whether a core tool exists. The
+runtime no longer maintains an independent trigger-matching loader. Standardized on-demand handling for
+`references/`, `assets/`, and `scripts`, plus budgeted source references and script approval semantics,
+is not yet complete.
 
 Implementation priority and completion status belong to [the roadmap](../roadmap.md); this document owns the Skill format and runtime contract.

@@ -1,6 +1,8 @@
 from testcode.model.prompt import ModelPromptBuilder
+from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.session import SessionContext
 from testcode.tools.base import SimpleTool, ToolContext
+from testcode.tools.registry import ToolRegistry
 from testcode.types import ToolAction, ToolResult, UserRequest
 
 
@@ -46,3 +48,24 @@ def test_tool_summarizer_is_display_only():
     assert result.metadata == {"internal_value": "runtime-only"}
     assert tool.summarize(result) == "user-visible summary"
     assert "summary" not in result.metadata
+
+
+def test_registry_packages_every_tool_result_before_history():
+    registry = ToolRegistry(InMemoryLogger(), max_output_bytes=24)
+    registry.register(
+        SimpleTool(
+            name="verbose",
+            description="Verbose.",
+            arguments={},
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda _action, _context: ToolResult("verbose", True, "x" * 200),
+        )
+    )
+
+    result = registry.execute(ToolAction("verbose"), cwd="/repo")
+
+    assert len(result.output.encode("utf-8")) <= 24
+    assert result.metadata["truncated"] is True
+    assert result.metadata["output_original_bytes"] == 200
+    assert result.metadata["output_visible_bytes"] <= 24
+    assert len(result.metadata["output_sha256"]) == 64

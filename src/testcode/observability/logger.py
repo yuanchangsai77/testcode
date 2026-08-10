@@ -125,7 +125,7 @@ class InMemoryLogger:
             return
 
         turns = self._group_turns()
-        active_skills = getattr(summary, "active_skills", [])
+        active_instructions = getattr(summary, "active_instructions", [])
 
         lines = [
             "Overview",
@@ -133,9 +133,12 @@ class InMemoryLogger:
             f"- prompt: {redact_text(request.prompt)}",
         ]
 
-        if active_skills:
-            active_skills_str = ", ".join(f"{s.metadata.name} (v{s.metadata.version})" for s in active_skills)
-            lines.append(f"- active skills: {active_skills_str}")
+        if active_instructions:
+            instruction_text = ", ".join(
+                f"{item.name} (v{item.version})" if item.version else item.name
+                for item in active_instructions
+            )
+            lines.append(f"- active workflow instructions: {instruction_text}")
 
         lines.extend([
             f"- cwd: {request.cwd}",

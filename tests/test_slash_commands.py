@@ -19,6 +19,8 @@ def test_slash_command_registry_completions():
     assert "/status" in cmd_names
     assert "/mode" in cmd_names
     assert "/skills" in cmd_names
+    assert "/skill" in cmd_names
+    assert "/capabilities" in cmd_names
     assert "/tasks" in cmd_names
     assert "/resume" in cmd_names
     assert "/exit" in cmd_names
@@ -69,6 +71,133 @@ def test_custom_command_registration():
     cli = CLI(engine=None, presenter=ConsolePresenter(), command_registry=registry)
     cli.command_registry.execute(cli, "/custom arg1 arg2")
     assert called == [["arg1", "arg2"]]
+
+
+def test_capability_commands_share_the_runtime_warehouse(tmp_path, monkeypatch):
+    from testcode.app import create_app
+
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    output = StringIO()
+    app = create_app(workspace_root=tmp_path)
+    app.presenter._output = output
+    session = app.session_store.create(cwd=str(tmp_path))
+
+    app.command_registry.execute(app, "/capabilities list", session=session)
+    assert "local:subagents" in output.getvalue()
+
+    output.seek(0)
+    output.truncate(0)
+    app.command_registry.execute(app, "/capabilities open local:subagents", session=session)
+    assert "subagent_spawn" in output.getvalue()
+
+    app.command_registry.execute(
+        app,
+        "/capabilities activate local:subagents:subagent_status --scope=session",
+        session=session,
+    )
+    assert session.active_capability_ids == ["local:subagents:subagent_status"]
+    assert app.session_store.load(session.session_id).active_capability_ids == session.active_capability_ids
+    assert app.engine.tools.definition_for("subagent_status") is not None
+
+    app.command_registry.execute(app, "/capabilities release", session=session)
+    assert session.active_capability_ids == []
+    assert app.engine.tools.definition_for("subagent_status") is None
+
+
+def test_skill_command_uses_warehouse_activation(tmp_path, monkeypatch):
+    from testcode.app import create_app
+
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    app = create_app(workspace_root=tmp_path)
+    session = app.session_store.create(cwd=str(tmp_path))
+
+    app.command_registry.execute(app, "/skill pytest-helper", session=session)
+
+    assert session.active_capability_ids == [
+        "skill:pytest-helper:instructions",
+        "skill:pytest-helper:tool:run_tests",
+    ]
+    assert app.engine.tools.definition_for("run_tests") is not None
+    assert app.engine.capability_warehouse.persisted_capability_ids() == session.active_capability_ids
+    assert app.session_store.load(session.session_id).active_capability_ids == session.active_capability_ids
+
+
+def test_skill_command_preserves_restored_session_capabilities(tmp_path, monkeypatch):
+    from testcode.app import create_app
+
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    app = create_app(workspace_root=tmp_path)
+    session = app.session_store.create(cwd=str(tmp_path))
+    session.active_capability_ids = ["skill:git-helper:tool:git_show"]
+    app.session_store.save(session)
+
+    app.command_registry.execute(app, "/skill pytest-helper", session=session)
+
+    assert session.active_capability_ids == [
+        "skill:git-helper:tool:git_show",
+        "skill:pytest-helper:instructions",
+        "skill:pytest-helper:tool:run_tests",
+    ]
+    assert app.engine.tools.definition_for("git_show") is not None
+    assert app.engine.tools.definition_for("run_tests") is not None
+
+
+def test_capability_commands_isolate_runtime_state_between_sessions(tmp_path, monkeypatch):
+    from testcode.app import create_app
+
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    app = create_app(workspace_root=tmp_path)
+    first = app.session_store.create(cwd=str(tmp_path))
+    second = app.session_store.create(cwd=str(tmp_path))
+
+    app.command_registry.execute(app, "/skill pytest-helper", session=first)
+    app.command_registry.execute(app, "/skill git-helper", session=second)
+
+    assert second.active_capability_ids == [
+        "skill:git-helper:instructions",
+        "skill:git-helper:tool:git_show",
+    ]
+    assert app.engine.tools.definition_for("run_tests") is None
+    assert app.engine.tools.definition_for("git_show") is not None
+
+
+def test_run_scope_command_survives_first_execution_initialization(tmp_path, monkeypatch):
+    from testcode.app import create_app
+    from testcode.types import ModelReply, UserRequest
+
+    class CapturingModel:
+        def __init__(self):
+            self.visible_tools = set()
+
+        def respond(self, context):
+            self.visible_tools = {item.name for item in context.available_tools}
+            return ModelReply(done=True, message="done")
+
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    app = create_app(workspace_root=tmp_path)
+    session = app.session_store.create(cwd=str(tmp_path))
+    model = CapturingModel()
+    app.engine.model = model
+
+    app.command_registry.execute(app, "/capabilities open local:subagents", session=session)
+    app.command_registry.execute(
+        app,
+        "/capabilities activate local:subagents:subagent_status --scope=run",
+        session=session,
+    )
+    app.engine.execute(
+        UserRequest(
+            "inspect child status",
+            cwd=str(tmp_path),
+            metadata={
+                "session_id": session.session_id,
+                "active_capability_ids": session.active_capability_ids,
+            },
+        )
+    )
+
+    assert "subagent_status" in model.visible_tools
+    assert app.engine.tools.definition_for("subagent_status") is None
 
 
 def test_reset_and_compact_commands():
@@ -213,7 +342,3 @@ def test_print_exit_info(tmp_path):
         
     finally:
         sys.stdout = original_stdout
-
-
-
-

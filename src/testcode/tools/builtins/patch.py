@@ -7,7 +7,7 @@ from ...types import ToolAction, ToolResult
 from ..base import SimpleTool, ToolContext
 from ..shared import ResolvedPath, resolve_workspace_path, retarget, run_command, schema
 from ..summary import patch_summary
-from .read_state import (
+from ..observation_state import (
     observed_empty_file,
     observed_line,
     observed_line_matches,

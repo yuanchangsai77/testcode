@@ -533,6 +533,13 @@ class ConsolePresenter:
                     self._print(f"    Triggers: {', '.join(triggers)}")
         self._print()
 
+    def show_capabilities(self, title: str, payload) -> None:
+        import json
+
+        self._print(f"\033[1m{title}:\033[0m")
+        self._print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        self._print()
+
     def show_or_change_mode(self, engine, mode_arg: str | None = None) -> None:
         GREEN = "\033[1;32m"
         YELLOW = "\033[1;33m"

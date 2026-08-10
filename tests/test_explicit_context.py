@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from testcode.app import create_app
 from testcode.context import ExplicitContextLoader
 from testcode.model.prompt import ModelPromptBuilder
 from testcode.observability.logger import InMemoryLogger
@@ -134,17 +133,3 @@ def test_explicit_context_prompt_section_and_logging(tmp_path):
     assert "hello" in system
     assert system.index("### Explicit User Context:") < system.index("Available tools:")
     assert logger.events[-1].name == "context.explicit"
-
-
-def test_create_app_registers_explicit_context_loader(tmp_path, monkeypatch):
-    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
-    monkeypatch.chdir(tmp_path)
-
-    app = create_app()
-
-    loader_names = [loader.__class__.__name__ for loader in app.engine.context_loaders]
-    assert loader_names == [
-        "ProjectRulesLoader",
-        "WorkspaceSummaryLoader",
-        "ExplicitContextLoader",
-    ]

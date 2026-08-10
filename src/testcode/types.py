@@ -72,14 +72,14 @@ class ResourceContent:
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from .skills.model import Skill
+    from .capabilities.model import InstructionContent
 
 
 @dataclass(slots=True)
 class ExecutionSummary:
     final_message: str
     tool_results: list[ToolResult]
-    active_skills: list[Skill] = field(default_factory=list)
+    active_instructions: list[InstructionContent] = field(default_factory=list)
     active_capability_ids: list[str] = field(default_factory=list)
     outcome: str = "completed"
 
@@ -140,7 +140,6 @@ class StoredSession:
     status: str
     messages: list[dict[str, str]] = field(default_factory=list)
     run_ids: list[str] = field(default_factory=list)
-    active_skills: list[str] = field(default_factory=list)
     active_capability_ids: list[str] = field(default_factory=list)
     trace: list[SessionRunTrace] = field(default_factory=list)
     resume_state: SessionResumeState = field(default_factory=SessionResumeState)

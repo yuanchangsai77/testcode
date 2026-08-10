@@ -4,7 +4,7 @@ from pathlib import Path
 
 from testcode.observability.logger import InMemoryLogger
 from testcode.project import ProjectCommandResolver, ProjectDetector
-from testcode.tools.builtin import build_builtin_registry
+from testcode.tools.builtin_provider import build_builtin_registry
 from testcode.types import ToolAction
 
 

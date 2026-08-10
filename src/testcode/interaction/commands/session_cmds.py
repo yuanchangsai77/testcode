@@ -23,7 +23,6 @@ def handle_reset(cli: CLI, args: list[str], session: StoredSession | None = None
     if session is not None and cli.session_store is not None:
         old_id = session.session_id
         new_session = cli.session_store.create(cwd=session.cwd, messages=[])
-        new_session.active_skills = list(getattr(session, "active_skills", []))
         new_session.active_capability_ids = list(getattr(session, "active_capability_ids", []))
         new_session.trace = list(getattr(session, "trace", []))
         new_session.run_ids = list(getattr(session, "run_ids", []))
@@ -34,6 +33,7 @@ def handle_reset(cli: CLI, args: list[str], session: StoredSession | None = None
         session.session_id = new_session.session_id
         session.messages = list(new_session.messages)
         cli.active_session = new_session
+        cli.prepare_session_runtime(new_session)
 
         if cli.presenter and hasattr(cli.presenter, "_print"):
             CYAN = "\033[1;36m"
@@ -95,7 +95,6 @@ def handle_compact(cli: CLI, args: list[str], session: StoredSession | None = No
     if cli.session_store is not None and session is not None:
         old_id = session.session_id
         new_session = cli.session_store.create(cwd=session.cwd, messages=list(conversation))
-        new_session.active_skills = list(getattr(session, "active_skills", []))
         new_session.active_capability_ids = list(getattr(session, "active_capability_ids", []))
         new_session.trace = list(getattr(session, "trace", []))
         new_session.run_ids = list(getattr(session, "run_ids", []))
@@ -106,6 +105,7 @@ def handle_compact(cli: CLI, args: list[str], session: StoredSession | None = No
         session.session_id = new_session.session_id
         session.messages = list(new_session.messages)
         cli.active_session = new_session
+        cli.prepare_session_runtime(new_session)
 
 
         if cli.presenter and hasattr(cli.presenter, "_print"):

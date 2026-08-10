@@ -28,7 +28,6 @@ class SessionImage:
     created_at: str
     cwd: str
     messages: list[dict[str, str]] = field(default_factory=list)
-    active_skills: list[str] = field(default_factory=list)
     active_capability_ids: list[str] = field(default_factory=list)
     source_session_id: str = ""
     description: str = ""
@@ -84,7 +83,6 @@ class SessionImageStore:
         *,
         cwd: str,
         messages: list[dict[str, str]] | None = None,
-        active_skills: list[str] | None = None,
         active_capability_ids: list[str] | None = None,
         source_session_id: str = "",
         description: str = "",
@@ -96,7 +94,6 @@ class SessionImageStore:
             created_at=_timestamp(),
             cwd=str(Path(cwd).resolve()),
             messages=_normalize_messages(messages or []),
-            active_skills=_string_list(active_skills or []),
             active_capability_ids=_string_list(active_capability_ids or []),
             source_session_id=source_session_id,
             description=_bounded_text(description, "image description", 1000),
@@ -115,7 +112,6 @@ class SessionImageStore:
             name,
             cwd=session.cwd,
             messages=session.messages,
-            active_skills=session.active_skills,
             active_capability_ids=session.active_capability_ids,
             source_session_id=session.session_id,
             description=description,
@@ -136,7 +132,6 @@ class SessionImageStore:
             created_at=str(payload["created_at"]),
             cwd=str(payload["cwd"]),
             messages=_normalize_messages(payload.get("messages", [])),
-            active_skills=_string_list(payload.get("active_skills", [])),
             active_capability_ids=_string_list(payload.get("active_capability_ids", [])),
             source_session_id=str(payload.get("source_session_id", "")),
             description=str(payload.get("description", "")),

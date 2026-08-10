@@ -8,7 +8,7 @@ from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.engine import ExecutionEngine
 from testcode.safety.guardrails import Guardrails
 from testcode.safety.policy import DefaultPolicy
-from testcode.tools.builtin import build_builtin_registry
+from testcode.tools.builtin_provider import build_builtin_registry
 from testcode.types import ExecutionSummary, ModelReply, ToolAction, ToolResult, UserRequest
 
 

@@ -11,7 +11,7 @@ from testcode.orchestration.engine import ExecutionEngine
 from testcode.safety.guardrails import Guardrails
 from testcode.safety.policy import DefaultPolicy
 from testcode.sessions import SessionStore
-from testcode.tools.builtin import build_builtin_registry
+from testcode.tools.builtin_provider import build_builtin_registry
 from testcode.types import (
     ExecutionSummary,
     ModelReply,
@@ -1823,7 +1823,6 @@ def test_session_store_tolerates_null_trace_fields(tmp_path):
                 "created_at": "2026-07-10T02:00:00Z",
                 "updated_at": "2026-07-10T02:00:00Z",
                 "messages": [],
-                "active_skills": None,
                 "trace": [
                     {
                         "run_id": "run-1",
@@ -1850,7 +1849,6 @@ def test_session_store_tolerates_null_trace_fields(tmp_path):
     loaded = store.load(session_id)
 
     assert loaded is not None
-    assert loaded.active_skills == []
     assert loaded.trace[0].event_count == 0
     assert loaded.trace[0].turns[0].actions == []
     assert loaded.resume_state.last_tool_names == []
@@ -2076,7 +2074,6 @@ def test_logger_summary_captures_action_and_result_details(tmp_path):
                     },
                 )()
             ],
-            "active_skills": [],
         },
     )()
     logger.finalize(request, summary)

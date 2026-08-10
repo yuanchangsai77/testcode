@@ -91,6 +91,8 @@
   - `/status`：查看 Session ID、工作区路径、安全模式与模型状态
   - `/resume`：恢复或选择历史会话
   - `/mode`、`/skills`、`/tasks`：查看或切换安全模式、Skill 列表和后台任务
+  - `/capabilities`：列举、打开、激活、释放和查看统一能力仓库
+  - `/skill <name>`：通过能力仓库打开并以 session scope 激活一个 Skill
   - `/exit` / `/quit`：退出工作台
 - **窗口滚动与导航**：使用 `↑` / `↓` 移动选中项。选中项超出当前可视区域时，
   窗口自动滚动，并显示 `▲ (N more above)` / `▼ (N more below)`。

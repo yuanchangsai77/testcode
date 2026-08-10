@@ -429,12 +429,12 @@ def test_composer_slash_command_autocomplete_navigation_and_tab_fill():
     # Filtering by prefix /sk
     composer.set_value("/sk")
     matches_sk = composer.get_completion_matches()
-    assert [cmd for cmd, _ in matches_sk] == ["/skills"]
+    assert [cmd for cmd, _ in matches_sk] == ["/skill", "/skills"]
 
-    # Enter confirms selection /skills
+    # Enter confirms the selected /skill command
     result = composer.edit("\r", [])
     assert result == "changed"
-    assert composer.value == "/skills"
+    assert composer.value == "/skill"
 
     # Subsequent enter submits
     result_submit = composer.edit("\r", [])
@@ -452,7 +452,7 @@ def test_composer_rows_renders_slash_command_completion_menu():
     assert any("Commands (" in row for row in plain_rows)
     assert any("/clear" in row for row in plain_rows)
     assert any("/compact" in row for row in plain_rows)
-    assert any("▼ (7 more below)" in row for row in plain_rows)
+    assert any("▼ (9 more below)" in row for row in plain_rows)
 
     # Scroll selection down to /status
     status_idx = next(i for i, (cmd, _) in enumerate(matches) if cmd == "/status")
@@ -461,7 +461,6 @@ def test_composer_rows_renders_slash_command_completion_menu():
     scrolled_plain = [_plain(row) for row in scrolled_rows]
     assert any("▲ (" in row for row in scrolled_plain)
     assert any("› /status" in row for row in scrolled_plain)
-
 
 
 

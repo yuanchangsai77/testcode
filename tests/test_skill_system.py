@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from testcode.skills import Skill, SkillMetadata, SkillRegistry, SkillContextLoader, parse_frontmatter
+import tomllib
+from testcode.skills import Skill, SkillMetadata, SkillRegistry, parse_frontmatter
 
+from testcode.capabilities import CapabilityWarehouse, LocalToolboxSource, skill_toolbox_specs
 from testcode.orchestration.session import SessionContext
 from testcode.orchestration.engine import ExecutionEngine
 from testcode.orchestration.ext import ContextLoader
 from testcode.types import UserRequest, ToolDefinition, ToolAction, ToolResult, ModelReply
 from testcode.model.prompt import ModelPromptBuilder
 from testcode.observability.logger import InMemoryLogger
+from testcode.tools.registry import ToolRegistry
 
 
 def test_parse_frontmatter():
@@ -40,6 +42,29 @@ version: 2.0
     assert meta2["name"] == "git-helper"
     assert meta2["triggers"] == ["git commit", "git push"]
     assert meta2["version"] == "2.0"
+
+
+def test_builtin_skill_metadata_and_guidance_are_actionable():
+    builtins = Path(__file__).parents[1] / "src" / "testcode" / "skills" / "builtins"
+    registry = SkillRegistry(builtins_dir=builtins, global_dir=None, project_dir=None)
+    registry.scan_metadata()
+
+    pytest_skill = registry.get_skill("pytest-helper")
+    git_skill = registry.get_skill("git-helper")
+
+    assert pytest_skill is not None
+    assert pytest_skill.metadata.description == "A focused pytest workflow with on-demand project-aware test execution."
+    assert "Prefer `run_tests`" in pytest_skill.content
+    assert git_skill is not None
+    assert "Use `git_status`" in git_skill.content
+    assert "read-only Git tools" in git_skill.content
+
+
+def test_builtin_skill_files_are_declared_as_package_data():
+    root = Path(__file__).parents[1]
+    config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "builtins/*/SKILL.md" in config["tool"]["setuptools"]["package-data"]["testcode.skills"]
 
 
 def test_registry_scanning_and_override(tmp_path):
@@ -116,7 +141,7 @@ Project skill-b body""", encoding="utf-8")
     assert loaded_a.metadata.version == "1.2.0"
 
 
-def test_registry_trigger_matching_and_boundaries(tmp_path):
+def test_skill_activation_has_one_warehouse_owned_path(tmp_path):
     builtins = tmp_path / "builtins"
     builtins.mkdir()
 
@@ -133,86 +158,27 @@ body""", encoding="utf-8")
     registry = SkillRegistry(builtins_dir=builtins, global_dir=None, project_dir=None)
     registry.scan_metadata()
 
-    # Exact boundary matching: "test" matches
-    matches = registry.match_skills("we should test this")
-    assert len(matches) == 1
-    assert matches[0].metadata.name == "test-skill"
-    assert matches[0].matched_trigger == "test"
-
-    # Substring matching: "greatest" contains "test" but should NOT trigger
-    matches_substring = registry.match_skills("this is the greatest thing")
-    assert len(matches_substring) == 0
-
-    # Case insensitivity: "RUN TESTS" matches "run tests"
-    matches_case = registry.match_skills("RUN TESTS NOW")
-    assert len(matches_case) == 1
-    assert matches_case[0].metadata.name == "test-skill"
-    assert matches_case[0].matched_trigger == "run tests"
-
-    # Explicit command match: "/skill test-skill"
-    matches_explicit = registry.match_skills("/skill test-skill")
-    assert len(matches_explicit) == 1
-    assert matches_explicit[0].metadata.name == "test-skill"
-    assert matches_explicit[0].matched_trigger == "/skill"
-
-
-def test_skill_loader_and_persistence(tmp_path):
-    # Setup registry with git-helper
-    builtins = tmp_path / "builtins"
-    builtins.mkdir()
-
-    skill_git = builtins / "git-helper"
-    skill_git.mkdir()
-    (skill_git / "SKILL.md").write_text("""---
-name: git-helper
-description: Git guidelines
-triggers: ["git commit"]
-version: 1.0.0
----
-Git instructions""", encoding="utf-8")
-
-    registry = SkillRegistry(builtins_dir=builtins, global_dir=None, project_dir=None)
-    registry.scan_metadata()
-
     logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
-    loader = SkillContextLoader(registry=registry, logger=logger)
-
-    # Request 1: triggers git-helper
-    request = UserRequest(prompt="let's git commit now", cwd=str(tmp_path), metadata={})
+    warehouse = CapabilityWarehouse(
+        sources=[LocalToolboxSource(skill_toolbox_specs(registry))],
+        registry=ToolRegistry(logger),
+        logger=logger,
+    )
+    request = UserRequest(prompt="use the test skill", cwd=str(tmp_path), metadata={})
     session = SessionContext(request=request)
+    manifest = warehouse.open_toolbox("skill:test-skill")
+    warehouse.activate([manifest.items[0].id], scope="session", reason="explicit selection")
+    warehouse.apply_to_session(session)
 
-    # Initialize run log
-    logger.start_run(request, registered_skills=["git-helper"])
-
-    loader.load_context(request, session)
-
-    assert len(session.active_skills) == 1
-    assert session.active_skills[0].metadata.name == "git-helper"
+    assert len(session.active_instructions) == 1
+    assert session.active_instructions[0].name == "test-skill"
 
     # Verify prompt formatting
     builder = ModelPromptBuilder()
     msgs = builder.build_messages(session)
     system_prompt = msgs[0]["content"]
-    assert "### Active Skill Guidelines:" in system_prompt
-    assert "[Skill: git-helper]" in system_prompt
-    assert "Git instructions" in system_prompt
-
-    # Verify skills.matched event was recorded in logger
-    matched_events = [e for e in logger.events if e.name == "skills.matched"]
-    assert len(matched_events) == 1
-    payload = matched_events[0].payload
-    assert payload["matched_skills"][0]["name"] == "git-helper"
-    assert payload["matched_skills"][0]["matched_trigger"] == "git commit"
-
-    # Turn 2: prompt does not match git-helper trigger, but active_skills is persisted via request.metadata
-    request2 = UserRequest(
-        prompt="and now push it",
-        cwd=str(tmp_path),
-        metadata={"active_skills": ["git-helper"]}
-    )
-    session2 = SessionContext(request=request2)
-    loader.load_context(request2, session2)
-
-    # Skill should still be active due to persistence!
-    assert len(session2.active_skills) == 1
-    assert session2.active_skills[0].metadata.name == "git-helper"
+    assert "### Active Workflow Instructions:" in system_prompt
+    assert "[Workflow: test-skill]" in system_prompt
+    assert "body" in system_prompt
+    assert warehouse.persisted_capability_ids() == ["skill:test-skill:instructions"]
+    assert not any(event.name == "skills.matched" for event in logger.events)

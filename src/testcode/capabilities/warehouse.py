@@ -30,7 +30,7 @@ class CapabilityWarehouse:
     max_active_schema_chars: int = MAX_ACTIVE_SCHEMA_CHARS
     _opened: dict[str, CapabilityManifest] = field(default_factory=dict)
     _active: dict[str, ActivationRecord] = field(default_factory=dict)
-    _active_skills: dict[str, object] = field(default_factory=dict)
+    _active_instructions: dict[str, object] = field(default_factory=dict)
     _released: list[dict[str, object]] = field(default_factory=list)
 
     def catalog_entries(self) -> list[CapabilityEntry]:
@@ -157,12 +157,12 @@ class CapabilityWarehouse:
             record.reason = reason
         for activated, schema_chars in pending:
             tool_name = ""
-            skill_name = ""
+            instruction_name = ""
             if activated.tool is not None:
                 tool_name = activated.tool.name
-            if activated.skill is not None:
-                skill_name = activated.skill.metadata.name
-                self._active_skills[skill_name] = activated.skill
+            if activated.instruction is not None:
+                instruction_name = activated.instruction.name
+                self._active_instructions[activated.id] = activated.instruction
             record = ActivationRecord(
                 capability_id=activated.id,
                 toolbox_id=activated.toolbox_id,
@@ -173,7 +173,7 @@ class CapabilityWarehouse:
                 last_used_at=0.0,
                 schema_chars=schema_chars,
                 tool_name=tool_name,
-                skill_name=skill_name,
+                instruction_name=instruction_name,
             )
             self._active[activated.id] = record
             if self.logger is not None:
@@ -215,8 +215,8 @@ class CapabilityWarehouse:
                 continue
             if record.tool_name:
                 self.registry.unregister(record.tool_name)
-            if record.skill_name:
-                self._active_skills.pop(record.skill_name, None)
+            if record.instruction_name:
+                self._active_instructions.pop(capability_id, None)
             released.append(capability_id)
             released_record = asdict(record)
             released_record.update(
@@ -252,13 +252,17 @@ class CapabilityWarehouse:
             if scopes is None or record.scope in scopes
         ]
 
-    def persisted_skills(self) -> list[object]:
-        names = {
-            record.skill_name
-            for record in self._active.values()
-            if record.scope == "session" and record.skill_name
+    def persisted_instructions(self) -> list[object]:
+        ids = {
+            capability_id
+            for capability_id, record in self._active.items()
+            if record.scope == "session" and record.instruction_name
         }
-        return [skill for name, skill in self._active_skills.items() if name in names]
+        return [
+            instruction
+            for capability_id, instruction in self._active_instructions.items()
+            if capability_id in ids
+        ]
 
     def persisted_capability_ids(self) -> list[str]:
         return [
@@ -283,13 +287,8 @@ class CapabilityWarehouse:
             except (KeyError, ValueError):
                 continue
 
-    def restore_skills(self, skill_names: Iterable[str]) -> None:
-        self.restore_capabilities(
-            f"skill:{name}:instructions" for name in skill_names
-        )
-
     def apply_to_session(self, session: SessionContext) -> None:
-        session.active_skills = list(self._active_skills.values())
+        session.active_instructions = list(self._active_instructions.values())
 
     def status(self, toolbox_id: str | None = None) -> dict[str, object]:
         entries = self.catalog_entries()
@@ -363,8 +362,8 @@ class CapabilityWarehouse:
                     default=str,
                 )
             )
-        if activated.skill is not None:
-            return len(activated.skill.content)
+        if activated.instruction is not None:
+            return len(activated.instruction.content)
         return 0
 
     def _entry_payload(self, entry: CapabilityEntry) -> dict[str, object]:

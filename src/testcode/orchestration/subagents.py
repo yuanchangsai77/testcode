@@ -21,7 +21,6 @@ class SubagentLaunchSpec:
     task_summary: str = ""
     cwd: str = ""
     messages: list[dict[str, str]] = field(default_factory=list)
-    active_skills: list[str] = field(default_factory=list)
     active_capability_ids: list[str] = field(default_factory=list)
     image_id: str = ""
 
@@ -61,7 +60,7 @@ class SubagentCoordinator:
         if not any(member.session_id == parent.session_id for member in cluster.members):
             raise ValueError("parent session is not a member of the session cluster")
 
-        cwd, messages, skills, capabilities, image_id = self._launch_material(parent, spec)
+        cwd, messages, capabilities, image_id = self._launch_material(parent, spec)
         child = self.session_store.create(
             cwd=cwd,
             messages=messages,
@@ -71,7 +70,6 @@ class SubagentCoordinator:
             launch_source=spec.source,
             session_image_id=image_id,
         )
-        child.active_skills = skills
         child.active_capability_ids = capabilities
         self.session_store.save(child)
 
@@ -197,13 +195,12 @@ class SubagentCoordinator:
         self,
         parent: StoredSession,
         spec: SubagentLaunchSpec,
-    ) -> tuple[str, list[dict[str, str]], list[str], list[str], str]:
+    ) -> tuple[str, list[dict[str, str]], list[str], str]:
         parent_root = Path(parent.cwd).resolve()
         if spec.source == "inherit":
             return (
                 str(parent_root),
                 list(parent.messages),
-                list(parent.active_skills),
                 list(parent.active_capability_ids),
                 "",
             )
@@ -212,7 +209,6 @@ class SubagentCoordinator:
             return (
                 str(child_root),
                 list(spec.messages),
-                list(spec.active_skills),
                 list(spec.active_capability_ids),
                 "",
             )
@@ -225,7 +221,6 @@ class SubagentCoordinator:
         return (
             str(child_root),
             list(image.messages),
-            list(image.active_skills),
             list(image.active_capability_ids),
             image.image_id,
         )

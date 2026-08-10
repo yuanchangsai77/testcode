@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from typing import Iterable
 
 from ..intent import RequestIntentClassifier
 from ..model.types import ModelRetryableError
@@ -112,19 +113,15 @@ class ExecutionEngine:
 
     def _execute(self, request: UserRequest) -> ExecutionSummary:
         session_key = self._session_key(request)
-        self._prepare_tool_state(session_key)
+        self.prepare_session_state(
+            session_key,
+            request.metadata.get("active_capability_ids", []),
+        )
         attach_state = getattr(self.tools, "attach_state", None)
         if callable(attach_state):
             attach_state("active_session_id", session_key)
         self._keep_tool_state = session_key is not None
         permissions = PermissionContext()
-        if self.capability_warehouse is not None:
-            self.capability_warehouse.restore_skills(
-                request.metadata.get("active_skills", [])
-            )
-            self.capability_warehouse.restore_capabilities(
-                request.metadata.get("active_capability_ids", [])
-            )
         available_tools = self.tools.definitions()
         provider_statuses = getattr(self.tools, "provider_statuses", lambda: [])()
         session = SessionContext(
@@ -225,7 +222,7 @@ class ExecutionEngine:
                     ExecutionSummary(
                         final_message=reply.message,
                         tool_results=session.tool_results,
-                        active_skills=session.active_skills,
+                        active_instructions=session.active_instructions,
                     )
                 )
 
@@ -364,7 +361,7 @@ class ExecutionEngine:
                         final_message=reply.message,
                         tool_results=session.tool_results,
                         outcome=self._terminal_outcome(turn_results),
-                        active_skills=session.active_skills,
+                        active_instructions=session.active_instructions,
                     )
                 )
 
@@ -382,7 +379,7 @@ class ExecutionEngine:
                             final_message="Stopping after 3 consecutive failing test runs. Review the latest test output before retrying.",
                             tool_results=session.tool_results,
                             outcome="stalled",
-                            active_skills=session.active_skills,
+                            active_instructions=session.active_instructions,
                         )
                     )
             elif turn_results:
@@ -411,7 +408,7 @@ class ExecutionEngine:
                             final_message=self._non_retryable_failure_message(turn_results),
                             tool_results=session.tool_results,
                             outcome=self._blocked_outcome(turn_results),
-                            active_skills=session.active_skills,
+                            active_instructions=session.active_instructions,
                         )
                     )
             else:
@@ -422,7 +419,7 @@ class ExecutionEngine:
                 final_message="Model exceeded the maximum number of turns without producing a final answer.",
                 tool_results=session.tool_results,
                 outcome="exhausted",
-                active_skills=session.active_skills,
+                active_instructions=session.active_instructions,
             )
         )
 
@@ -435,7 +432,7 @@ class ExecutionEngine:
             summary.outcome = self._terminal_outcome([summary.tool_results[-1]])
         self.current_session = None
         if self._keep_tool_state and self.capability_warehouse is not None:
-            summary.active_skills = self.capability_warehouse.persisted_skills()
+            summary.active_instructions = self.capability_warehouse.persisted_instructions()
             summary.active_capability_ids = self.capability_warehouse.persisted_capability_ids()
             self.capability_warehouse.release_scopes({"turn", "run"})
         if not self._keep_tool_state:
@@ -472,6 +469,16 @@ class ExecutionEngine:
         if isinstance(session_id, str) and session_id:
             return session_id
         return None
+
+    def prepare_session_state(
+        self,
+        session_key: str | None,
+        active_capability_ids: Iterable[str] = (),
+    ) -> None:
+        """Switch runtime tool state to one session and restore its persisted capabilities."""
+        self._prepare_tool_state(session_key)
+        if self.capability_warehouse is not None:
+            self.capability_warehouse.restore_capabilities(active_capability_ids)
 
     def _prepare_tool_state(self, session_key: str | None) -> None:
         reset_state = getattr(self.tools, "reset_state", None)

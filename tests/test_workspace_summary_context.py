@@ -4,7 +4,6 @@ import subprocess
 
 import pytest
 
-from testcode.app import create_app
 from testcode.context import WorkspaceSummaryLoader
 from testcode.model.prompt import ModelPromptBuilder
 from testcode.observability.logger import InMemoryLogger
@@ -154,17 +153,3 @@ def test_workspace_summary_can_be_explicitly_enabled_for_non_project_prompt(tmp_
     WorkspaceSummaryLoader().load_context(request, session)
 
     assert session.workspace_summary is not None
-
-
-def test_create_app_registers_workspace_summary_loader(tmp_path, monkeypatch):
-    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
-    monkeypatch.chdir(tmp_path)
-
-    app = create_app()
-
-    loader_names = [loader.__class__.__name__ for loader in app.engine.context_loaders]
-    assert loader_names == [
-        "ProjectRulesLoader",
-        "WorkspaceSummaryLoader",
-        "ExplicitContextLoader",
-    ]
