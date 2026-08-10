@@ -81,6 +81,7 @@ class ExecutionSummary:
     tool_results: list[ToolResult]
     active_skills: list[Skill] = field(default_factory=list)
     active_capability_ids: list[str] = field(default_factory=list)
+    outcome: str = "completed"
 
 
 
@@ -143,3 +144,8 @@ class StoredSession:
     active_capability_ids: list[str] = field(default_factory=list)
     trace: list[SessionRunTrace] = field(default_factory=list)
     resume_state: SessionResumeState = field(default_factory=SessionResumeState)
+    parent_session_id: str = ""
+    cluster_id: str = ""
+    session_role: str = "primary"
+    launch_source: str = "direct"
+    session_image_id: str = ""

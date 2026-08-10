@@ -1,6 +1,7 @@
 import http.client
 import io
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -30,7 +31,7 @@ def test_post_json_wraps_timeout_as_runtime_error(monkeypatch):
     def fail_with_timeout(*_args, **_kwargs):
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr("urllib.request.urlopen", fail_with_timeout)
+    monkeypatch.setattr(client, "_open_url", fail_with_timeout)
 
     with pytest.raises(ModelTimeoutError, match="timed out after 1.5 seconds"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
@@ -46,7 +47,8 @@ def test_post_json_recognizes_timeout_wrapped_by_url_error(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "urllib.request.urlopen",
+        client,
+        "_open_url",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError(TimeoutError("timed out"))),
     )
 
@@ -65,7 +67,7 @@ def test_post_json_wraps_remote_disconnect_as_runtime_error(monkeypatch):
     def fail_with_remote_disconnect(*_args, **_kwargs):
         raise http.client.RemoteDisconnected("Remote end closed connection without response")
 
-    monkeypatch.setattr("urllib.request.urlopen", fail_with_remote_disconnect)
+    monkeypatch.setattr(client, "_open_url", fail_with_remote_disconnect)
 
     with pytest.raises(ModelConnectionError, match="Remote end closed connection without response"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
@@ -87,7 +89,7 @@ def test_post_json_wraps_http_and_url_errors(monkeypatch):
             fp=io.BytesIO(b"boom"),
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", fail_with_http_error)
+    monkeypatch.setattr(client, "_open_url", fail_with_http_error)
 
     with pytest.raises(ModelServiceError, match="HTTP 500"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
@@ -96,7 +98,7 @@ def test_post_json_wraps_http_and_url_errors(monkeypatch):
     def fail_with_url_error(*_args, **_kwargs):
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr("urllib.request.urlopen", fail_with_url_error)
+    monkeypatch.setattr(client, "_open_url", fail_with_url_error)
 
     with pytest.raises(ModelConnectionError, match="connection refused"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
@@ -120,12 +122,12 @@ def test_post_json_rejects_invalid_json_and_missing_choices(monkeypatch):
         def read(self):
             return self.body
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse(b"not-json"))
+    monkeypatch.setattr(client, "_open_url", lambda *_args, **_kwargs: FakeResponse(b"not-json"))
     with pytest.raises(RuntimeError, match="not valid JSON"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
     assert logger.events[-1].name == "model.invalid_json"
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: FakeResponse(b'{"id":"x"}'))
+    monkeypatch.setattr(client, "_open_url", lambda *_args, **_kwargs: FakeResponse(b'{"id":"x"}'))
     with pytest.raises(RuntimeError, match="missing choices"):
         client._post_json("http://127.0.0.1:3000/v1/chat/completions", {"messages": []})
     assert logger.events[-1].name == "model.invalid_shape"
@@ -149,6 +151,40 @@ def test_openai_client_accepts_config_object():
     assert client.base_url == "http://127.0.0.1:3000"
     assert client.model == "custom-model"
     assert client.timeout == 3.5
+
+
+def test_loopback_model_requests_use_proxy_free_opener(monkeypatch):
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+    marker = object()
+    direct_calls = []
+
+    monkeypatch.setattr(
+        client._direct_opener,
+        "open",
+        lambda request, timeout: direct_calls.append((request.full_url, timeout)) or marker,
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("loopback used proxy-aware urlopen")),
+    )
+
+    request = urllib.request.Request("http://127.0.0.1:3000/v1/chat/completions")
+    assert client._open_url(request, timeout=4) is marker
+    assert direct_calls == [(request.full_url, 4)]
+
+
+def test_response_read_enforces_total_deadline(monkeypatch):
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000", timeout=1)
+
+    class SlowResponse:
+        def read1(self, _size):
+            return b"x"
+
+    times = iter([0.0, 0.6, 1.1])
+    monkeypatch.setattr("testcode.model.client.time.monotonic", lambda: next(times))
+
+    with pytest.raises(TimeoutError, match="deadline exceeded"):
+        client._read_response(SlowResponse(), deadline=1.0)
 
 
 def test_create_model_client_uses_stub_without_base_url(monkeypatch):
@@ -205,6 +241,25 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
     assert "Session history:" in user
     assert "Available tools:" not in user
     assert "- read_file: Read a workspace file." not in user
+
+
+def test_build_messages_marks_delegated_subagent_and_prioritizes_current_task():
+    session = SessionContext(
+        request=UserRequest(
+            prompt="implement the delegated page",
+            cwd="/repo",
+            metadata={
+                "conversation": [{"role": "user", "content": "spawn another agent"}],
+                "subagent": {"role": "subagent", "parent_session_id": "parent"},
+            },
+        )
+    )
+
+    system = str(ModelPromptBuilder().build_messages(session)[0]["content"])
+
+    assert "You are already a subagent" in system
+    assert "current delegated request overrides inherited conversational intent" in system
+    assert "Do not create or run another subagent" in system
 
 
 def test_build_messages_explains_staged_warehouse_without_exposing_contents():

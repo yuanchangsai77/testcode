@@ -14,6 +14,7 @@ from .mcp.config import MCPServerConfig, load_mcp_server_configs
 MAX_MODEL_RETRIES = 20
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_MODEL_TURNS = 500
+MAX_SUBAGENT_MODEL_TIMEOUT_SECONDS = 300.0
 MAX_MCP_TOOLS_PER_SERVER = 1_024
 MAX_ACTIVE_CAPABILITIES = 32
 MAX_TOOL_OUTPUT_BYTES = 1_048_576
@@ -30,6 +31,8 @@ class ModelRetryConfig:
 @dataclass(frozen=True, slots=True)
 class OrchestrationConfig:
     max_turns: int = 100
+    subagent_max_model_retries: int = 1
+    subagent_model_timeout: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +114,21 @@ def _load_tuning(cwd: str | Path | None) -> tuple[ModelRetryConfig, Orchestratio
     return (
         ModelRetryConfig(max_retries=max_retries, delays=delays),
         OrchestrationConfig(
-            max_turns=_bounded_int(values.get("orchestration.max_turns"), 100, 1, MAX_MODEL_TURNS, "orchestration.max_turns")
+            max_turns=_bounded_int(values.get("orchestration.max_turns"), 100, 1, MAX_MODEL_TURNS, "orchestration.max_turns"),
+            subagent_max_model_retries=_bounded_int(
+                values.get("orchestration.subagent_max_model_retries"),
+                1,
+                0,
+                MAX_MODEL_RETRIES,
+                "orchestration.subagent_max_model_retries",
+            ),
+            subagent_model_timeout=_bounded_float(
+                values.get("orchestration.subagent_model_timeout"),
+                30.0,
+                1.0,
+                MAX_SUBAGENT_MODEL_TIMEOUT_SECONDS,
+                "orchestration.subagent_model_timeout",
+            ),
         ),
         RuntimeLimits(
             mcp_tools_per_server=_bounded_int(values.get("limits.mcp_tools_per_server"), 256, 1, MAX_MCP_TOOLS_PER_SERVER, "limits.mcp_tools_per_server"),
@@ -142,6 +159,17 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int, name: 
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum} (internal hard limit)")
     return value
+
+
+def _bounded_float(value: object, default: float, minimum: float, maximum: float, name: str) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    normalized = float(value)
+    if not minimum <= normalized <= maximum:
+        raise ValueError(f"{name} must be between {minimum:g} and {maximum:g} (internal hard limit)")
+    return normalized
 
 
 def _retry_delays(value: object, max_retries: int) -> tuple[float, ...]:

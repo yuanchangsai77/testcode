@@ -293,6 +293,9 @@ Core files:
 - `src/testcode/config.py`
 - `src/testcode/sessions/__init__.py`
 - `src/testcode/sessions/store.py`
+- `src/testcode/sessions/cluster.py`
+- `src/testcode/orchestration/subagents.py`
+- `src/testcode/orchestration/subagent_runner.py`
 
 Configuration structure:
 
@@ -308,6 +311,8 @@ Persistence structure:
   writes JSON files under that root's `.testcode/sessions/`; it does not derive
   this path from the active target workspace.
 - Stored sessions currently include cwd, timestamps, status, messages, run ids, active Skill/capability ids, bounded trace records, and derived resume state.
+- Subagent session clusters add explicit parent/child launch provenance. Session images are immutable launch inputs, while the cluster public state stores only bounded member status, findings, verification results, blockers, and artifact references. Members do not gain direct access to each other's conversation or tool history; see [Subagent 会话集群](core/subagent-session-clusters.md).
+- `SubagentRunner` atomically claims ready members and executes them concurrently through separately composed runtimes. Model-visible spawn, run-ready, and status tools expose this lifecycle without turning the public state into a direct message bus.
 - Future checkpoint/archive records should store task state, summaries, archive references, full tool history, read-state hashes, and latest verification status.
 - Corrupt session files are skipped when listing sessions.
 

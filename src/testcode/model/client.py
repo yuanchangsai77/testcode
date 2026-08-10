@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from ..orchestration.session import SessionContext
@@ -64,11 +67,7 @@ class OpenAICompatibleModelClient:
         self.logger = logger
         self.prompt_builder = prompt_builder or ModelPromptBuilder()
         self.parser = parser or ModelReplyParser(logger=logger)
-        import socket
-        try:
-            socket.setdefaulttimeout(self.timeout)
-        except Exception:
-            pass
+        self._direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def respond(self, session: SessionContext) -> ModelReply:
         messages = self.prompt_builder.build_messages(session)
@@ -121,9 +120,10 @@ class OpenAICompatibleModelClient:
             method="POST",
         )
 
+        deadline = time.monotonic() + self.timeout
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
+            with self._open_url(request, timeout=self.timeout) as response:
+                body = self._read_response(response, deadline).decode("utf-8")
         except urllib.error.HTTPError as error:
             body = error.read().decode("utf-8", errors="replace")
             if self.logger is not None:
@@ -183,6 +183,49 @@ class OpenAICompatibleModelClient:
             raise RuntimeError(f"Model response missing choices: {data}")
 
         return data
+
+    def _open_url(self, request: urllib.request.Request, *, timeout: float):
+        hostname = urllib.parse.urlsplit(request.full_url).hostname or ""
+        if self._is_loopback_host(hostname):
+            return self._direct_opener.open(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout)
+
+    def _read_response(self, response, deadline: float) -> bytes:
+        read1 = getattr(response, "read1", None)
+        if not callable(read1):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("model request deadline exceeded")
+            return response.read()
+
+        chunks: list[bytes] = []
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("model request deadline exceeded")
+            self._set_response_timeout(response, remaining)
+            chunk = read1(65_536)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+
+    def _set_response_timeout(self, response, timeout: float) -> None:
+        candidates = [
+            getattr(response, "fp", None),
+            getattr(getattr(response, "fp", None), "raw", None),
+        ]
+        for candidate in candidates:
+            sock = getattr(candidate, "_sock", None)
+            if sock is not None and hasattr(sock, "settimeout"):
+                sock.settimeout(timeout)
+                return
+
+    def _is_loopback_host(self, hostname: str) -> bool:
+        if hostname.lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            return False
 
 __all__ = [
     "OpenAICompatibleModelClient",

@@ -12,7 +12,16 @@ from testcode.safety.guardrails import Guardrails
 from testcode.safety.policy import DefaultPolicy
 from testcode.sessions import SessionStore
 from testcode.tools.builtin import build_builtin_registry
-from testcode.types import ModelReply, SessionRunTrace, SessionTurnTrace, ToolAction, ToolDefinition, UserRequest
+from testcode.types import (
+    ExecutionSummary,
+    ModelReply,
+    SessionRunTrace,
+    SessionTurnTrace,
+    ToolAction,
+    ToolDefinition,
+    ToolResult,
+    UserRequest,
+)
 
 
 def test_scaffold_runs_end_to_end(tmp_path, monkeypatch):
@@ -468,7 +477,39 @@ def test_engine_stops_repeated_non_retryable_tool_failures(tmp_path):
 
     assert model.calls == 2
     assert "requires explicit approval" in summary.final_message
+    assert summary.outcome == "blocked"
     assert summary.tool_results[-1].error_code == "approval_required"
+    assert [event.name for event in logger.events].count("tool.result") == 2
+
+
+def test_done_turn_cannot_hide_blocked_action_behind_later_success(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+
+    class MixedResultModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="done",
+                actions=[
+                    ToolAction(name="shell_exec", arguments={"command": "true"}),
+                    ToolAction(name="read_file", arguments={"path": "target.txt"}),
+                ],
+                done=True,
+            )
+
+    summary = ExecutionEngine(
+        model=MixedResultModel(),
+        tools=build_builtin_registry(InMemoryLogger()),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=InMemoryLogger()),
+        logger=InMemoryLogger(),
+        approval_callback=None,
+    ).execute(UserRequest(prompt="execute and inspect", cwd=str(tmp_path)))
+
+    assert [(result.name, result.success) for result in summary.tool_results] == [
+        ("shell_exec", False),
+        ("read_file", True),
+    ]
+    assert summary.outcome == "blocked"
 
 
 def test_engine_stops_spinner_without_masking_tool_execute_exception(tmp_path):
@@ -1196,6 +1237,43 @@ def test_engine_stops_repeated_duplicate_tool_actions(tmp_path):
     ]
     logged_results = [event for event in logger.events if event.name == "tool.result"]
     assert len(logged_results) == len(summary.tool_results)
+
+
+def test_successful_execute_action_invalidates_stale_read_duplicates(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+
+    class ReadWriteReadModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls in {1, 3}:
+                return ModelReply(
+                    message="read target",
+                    actions=[ToolAction(name="read_file", arguments={"path": "target.txt"})],
+                    done=False,
+                )
+            if self.calls == 2:
+                return ModelReply(
+                    message="write target",
+                    actions=[ToolAction(name="shell_exec", arguments={"command": "printf 'after\\n' > target.txt"})],
+                    done=False,
+                )
+            return ModelReply(message="verified", done=True)
+
+    logger = InMemoryLogger()
+    summary = ExecutionEngine(
+        model=ReadWriteReadModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(), logger=logger),
+        logger=logger,
+        approval_callback=lambda _action, _reason: True,
+    ).execute(UserRequest(prompt="update and verify", cwd=str(tmp_path)))
+
+    reads = [result for result in summary.tool_results if result.name == "read_file"]
+    assert [result.output for result in reads] == ["before\n", "after\n"]
+    assert all(result.error_code is None for result in reads)
 
 
 def test_engine_recovers_read_duplicate_loop_for_file_change_request(tmp_path):
@@ -2008,3 +2086,67 @@ def test_logger_summary_captures_action_and_result_details(tmp_path):
     assert run_summary.turns[0].action_details[0].startswith('read_file args=')
     assert "README.md" in run_summary.turns[0].action_details[0]
     assert run_summary.turns[0].tool_result_details[0].startswith("read_file [ok]")
+
+
+def test_logger_summary_keeps_requested_action_when_preflight_skips_execution(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(prompt="inspect", cwd=str(tmp_path))
+    logger.start_run(request)
+    logger.record("model.request", {"messages": []})
+    logger.record(
+        "model.parsed_reply",
+        {
+            "message": "inspect",
+            "done": False,
+            "actions": [{"name": "read_file", "arguments": {"path": "missing.md"}}],
+        },
+    )
+    logger.record(
+        "tool.result",
+        {
+            "name": "read_file",
+            "success": False,
+            "output": "path not found",
+            "error_code": "path_not_found",
+            "metadata": {},
+        },
+    )
+    logger.finalize(
+        request,
+        ExecutionSummary("stopped", [ToolResult("read_file", False, "path not found", "path_not_found")], outcome="blocked"),
+    )
+
+    turn = logger.last_run_summary.turns[0]
+    assert turn.actions == ["read_file"]
+    assert turn.action_details == ['read_file args={"path": "missing.md"}']
+    assert turn.tool_results == ["read_file:path_not_found"]
+
+
+def test_completed_trace_does_not_keep_intermediate_duplicate_as_open_issue(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd=str(tmp_path))
+    session.trace.append(
+        SessionRunTrace(
+            run_id="run-completed",
+            started_at="2026-08-07T00:00:00Z",
+            completed_at="2026-08-07T00:01:00Z",
+            prompt="update docs",
+            final_message="done",
+            outcome="completed",
+            event_count=3,
+            turn_count=1,
+            tool_names=["read_file", "patch"],
+            turns=[
+                SessionTurnTrace(
+                    turn=1,
+                    message="done",
+                    tool_results=["read_file:duplicate_tool_call", "patch:ok"],
+                )
+            ],
+        )
+    )
+
+    store.save(session)
+
+    assert session.resume_state.open_issue == ""
+    assert session.resume_state.recovery_hint == "Continue from the latest completed state and only call tools needed for the next step."

@@ -54,7 +54,24 @@ class ModelPromptBuilder:
             "- Prefer structured tools such as list_dir, find_files, read_file, search_text, and patch over shell_exec when they can do the job.",
             "- Do not use shell_exec to create or edit files when patch is available.",
             "- Do not retry a failed tool call with the same arguments unless the user gives new information.",
+            "- A completed subagent result is a delegated handoff. Reuse its summary and reported verification; do not reread or reimplement its artifact solely to confirm it.",
+            "- Verify a completed subagent only when evidence is missing, results conflict, the user requests review, or the change is security-sensitive. Keep verification targeted to the claim.",
+            "- Send feedback or a failed verification back to the same child with subagent_resume. Do not spawn a replacement child for the same artifact unless isolation or independent parallel exploration is required.",
         ]
+
+        subagent = session.request.metadata.get("subagent")
+        if isinstance(subagent, dict) and subagent.get("role") == "subagent":
+            system_lines.extend(
+                [
+                    "",
+                    "### Delegated Subagent Runtime:",
+                    "- You are already a subagent. Complete the current delegated user request directly.",
+                    "- The current delegated request overrides inherited conversational intent when they differ.",
+                    "- Do not create or run another subagent.",
+                    "- Structured workspace writes such as patch are pre-authorized for this run.",
+                    "- Interactive approval is unavailable. If execute, test, network, or destructive work is required and blocked, report the blocker once and stop.",
+                ]
+            )
 
         active_skills = getattr(session, "active_skills", [])
         if active_skills:

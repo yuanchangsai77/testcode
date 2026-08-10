@@ -80,6 +80,37 @@ def test_main_once_passes_context_paths_to_request_metadata(monkeypatch, tmp_pat
     assert fake.runs[0].metadata["context_paths"] == ["README.md", "docs/*.md"]
 
 
+def test_main_once_creates_persisted_session_for_subagent_runtime(monkeypatch, tmp_path):
+    fake = FakeApp()
+    created = []
+
+    class Store:
+        def create(self, cwd):
+            session = SimpleNamespace(
+                session_id="session-once",
+                cwd=cwd,
+                messages=[],
+                active_skills=[],
+                active_capability_ids=[],
+                trace=[],
+                resume_state=None,
+            )
+            created.append(session)
+            return session
+
+    fake.session_store = Store()
+    monkeypatch.setattr(sys, "argv", ["testcode", "--once", "delegate"])
+    monkeypatch.setattr(app_module, "create_app", lambda mode, **_kwargs: fake)
+    monkeypatch.chdir(tmp_path)
+
+    app_module.main()
+
+    assert len(created) == 1
+    assert fake.runs[0].metadata["session_id"] == "session-once"
+    assert fake.persisted_runs[0][0] is created[0]
+    assert fake.persisted_runs[0][3] == {"status": "closed", "close_runtime": True}
+
+
 def test_main_once_resume_persists_completed_run(monkeypatch, tmp_path):
     fake = FakeApp()
     session = SimpleNamespace(

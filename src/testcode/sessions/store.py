@@ -13,7 +13,17 @@ class SessionStore:
         root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[3]
         self.base_dir = root / ".testcode" / "sessions"
 
-    def create(self, cwd: str, messages: list[dict[str, str]] | None = None) -> StoredSession:
+    def create(
+        self,
+        cwd: str,
+        messages: list[dict[str, str]] | None = None,
+        *,
+        parent_session_id: str = "",
+        cluster_id: str = "",
+        session_role: str = "primary",
+        launch_source: str = "direct",
+        session_image_id: str = "",
+    ) -> StoredSession:
         now = self._timestamp()
         session = StoredSession(
             session_id=self._build_session_id(now),
@@ -25,12 +35,30 @@ class SessionStore:
             run_ids=[],
             trace=[],
             resume_state=SessionResumeState(),
+            parent_session_id=parent_session_id,
+            cluster_id=cluster_id,
+            session_role=session_role,
+            launch_source=launch_source,
+            session_image_id=session_image_id,
         )
         self.save(session)
         return session
 
     def save(self, session: StoredSession) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        path = self.base_dir / f"{session.session_id}.json"
+        if path.exists() and not session.cluster_id:
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                existing = {}
+            persisted_cluster_id = existing.get("cluster_id") if isinstance(existing, dict) else ""
+            if isinstance(persisted_cluster_id, str) and persisted_cluster_id:
+                session.cluster_id = persisted_cluster_id
+                session.parent_session_id = str(existing.get("parent_session_id", session.parent_session_id))
+                session.session_role = str(existing.get("session_role", session.session_role))
+                session.launch_source = str(existing.get("launch_source", session.launch_source))
+                session.session_image_id = str(existing.get("session_image_id", session.session_image_id))
         updated_at = self._timestamp()
         session.updated_at = updated_at
         session.resume_state = self._build_resume_state(session)
@@ -46,8 +74,12 @@ class SessionStore:
             "active_capability_ids": list(getattr(session, "active_capability_ids", [])),
             "trace": [self._trace_to_payload(item) for item in getattr(session, "trace", [])],
             "resume_state": self._resume_state_to_payload(session.resume_state),
+            "parent_session_id": session.parent_session_id,
+            "cluster_id": session.cluster_id,
+            "session_role": session.session_role,
+            "launch_source": session.launch_source,
+            "session_image_id": session.session_image_id,
         }
-        path = self.base_dir / f"{session.session_id}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self._write_trace_log(session)
         replay_path = self.base_dir / f"{session.session_id}.replay.log"
@@ -78,6 +110,11 @@ class SessionStore:
             active_capability_ids=self._string_list(payload.get("active_capability_ids", [])),
             trace=self._normalize_trace(payload.get("trace", [])),
             resume_state=self._normalize_resume_state(payload.get("resume_state", {})),
+            parent_session_id=str(payload.get("parent_session_id", "")),
+            cluster_id=str(payload.get("cluster_id", "")),
+            session_role=str(payload.get("session_role", "primary")),
+            launch_source=str(payload.get("launch_source", "direct")),
+            session_image_id=str(payload.get("session_image_id", "")),
         )
 
     def list_sessions(self) -> list[SessionRecord]:
@@ -303,14 +340,6 @@ class SessionStore:
         recovery_hint = ""
         if trace.outcome != "completed":
             open_issue = trace.final_message
-        elif "Model API is unavailable right now." in trace.final_message:
-            open_issue = trace.final_message
-        elif any("approval_denied" in result for turn in trace.turns for result in turn.tool_results):
-            open_issue = "A tool action was declined by the user."
-        elif any("approval_required" in result for turn in trace.turns for result in turn.tool_results):
-            open_issue = "A tool was blocked waiting for approval."
-        elif any("duplicate_tool_call" in result for turn in trace.turns for result in turn.tool_results):
-            open_issue = "The last run repeated an earlier tool call instead of progressing."
 
         if open_issue:
             recovery_hint = (

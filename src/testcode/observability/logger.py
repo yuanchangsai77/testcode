@@ -274,7 +274,12 @@ class InMemoryLogger:
                 name = result.get("name", "tool")
                 status = "ok" if result.get("success") else result.get("error_code") or "failed"
                 tool_results.append(f"{name}:{status}")
-            for action in turn.get("tool_executes", []):
+            requested_actions = parsed_reply.get("actions")
+            if not isinstance(requested_actions, list):
+                requested_actions = turn.get("tool_executes", [])
+            for action in requested_actions:
+                if not isinstance(action, dict):
+                    continue
                 name = action.get("name", "tool")
                 arguments = action.get("arguments", {})
                 try:
@@ -294,8 +299,10 @@ class InMemoryLogger:
                     message=message,
                     actions=[
                         action.get("name", "")
-                        for action in turn.get("tool_executes", [])
-                        if isinstance(action.get("name"), str) and action.get("name")
+                        for action in requested_actions
+                        if isinstance(action, dict)
+                        and isinstance(action.get("name"), str)
+                        and action.get("name")
                     ],
                     tool_results=tool_results,
                     action_details=action_details,
@@ -303,7 +310,7 @@ class InMemoryLogger:
                 )
             )
 
-        outcome = "completed"
+        outcome = getattr(summary, "outcome", "completed")
         if any(event.name == "run.error" for event in self.events):
             outcome = "runtime_error"
         elif "Interrupted" == summary.final_message:

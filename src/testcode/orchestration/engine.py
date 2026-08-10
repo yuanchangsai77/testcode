@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -36,6 +37,8 @@ class ExecutionEngine:
         "missing_argument",
         "path_outside_workspace",
         "path_not_found",
+        "subagent_blocked",
+        "subagent_failed",
         "test_command_ambiguous",
         "test_command_not_detected",
         "unknown_argument",
@@ -77,9 +80,11 @@ class ExecutionEngine:
         self._tool_state_session_key: str | None = None
         self._keep_tool_state = False
         self._runtime_cancelled = False
+        self._cancel_event = threading.Event()
 
     def execute(self, request: UserRequest) -> ExecutionSummary:
         self._runtime_cancelled = False
+        self._cancel_event.clear()
         try:
             return self._execute(request)
         except KeyboardInterrupt:
@@ -98,6 +103,7 @@ class ExecutionEngine:
         if self._runtime_cancelled:
             return
         self._runtime_cancelled = True
+        self._cancel_event.set()
         self.current_session = None
         self._tool_state_session_key = None
         reset_state = getattr(self.tools, "reset_state", None)
@@ -107,6 +113,9 @@ class ExecutionEngine:
     def _execute(self, request: UserRequest) -> ExecutionSummary:
         session_key = self._session_key(request)
         self._prepare_tool_state(session_key)
+        attach_state = getattr(self.tools, "attach_state", None)
+        if callable(attach_state):
+            attach_state("active_session_id", session_key)
         self._keep_tool_state = session_key is not None
         permissions = PermissionContext()
         if self.capability_warehouse is not None:
@@ -139,6 +148,7 @@ class ExecutionEngine:
         request_intent = self.intent_classifier.classify(request.prompt, request.metadata)
 
         for turn in range(1, self.max_turns + 1):
+            self._raise_if_cancelled()
             session.available_tools = self.tools.definitions()
             visible_tool_names = {definition.name for definition in session.available_tools}
             expiring_turn_capabilities = (
@@ -166,6 +176,7 @@ class ExecutionEngine:
                             )
                     try:
                         reply = self.model.respond(session)
+                        self._raise_if_cancelled()
                         break
                     except (ModelRetryableError, TimeoutError) as error:
                         if retry_count >= self.max_model_retries:
@@ -193,7 +204,8 @@ class ExecutionEngine:
                                 getattr(error, "retry_status", "Model request timed out"),
                                 retry_delay,
                             )
-                        time.sleep(retry_delay)
+                        if self._cancel_event.wait(retry_delay):
+                            raise KeyboardInterrupt
             finally:
                 if progress_handle is not None:
                     self.progress_reporter.model_finished(progress_handle)
@@ -219,6 +231,7 @@ class ExecutionEngine:
 
             turn_results: list[ToolResult] = []
             for action in reply.actions:
+                self._raise_if_cancelled()
                 if action.name not in visible_tool_names:
                     result = ToolResult(
                         name=action.name,
@@ -283,7 +296,7 @@ class ExecutionEngine:
                         session.add_tool_result(result)
                         turn_results.append(result)
                         if result.success or result.error_code in self.non_retryable_error_codes:
-                            if result.success and decision.risk_level == "write":
+                            if result.success and self._may_mutate_workspace(decision.risk_level):
                                 completed_actions.clear()
                                 duplicate_counts.clear()
                                 progress_recovery_sent = False
@@ -303,6 +316,7 @@ class ExecutionEngine:
                     if self.progress_reporter:
                         self.progress_reporter.tool_skipped(action, "denied by user")
                     self._attach_action_metadata(result, action)
+                    self._record_synthetic_tool_result(result)
                     session.add_tool_result(result)
                     turn_results.append(result)
                     continue
@@ -329,7 +343,7 @@ class ExecutionEngine:
                 session.add_tool_result(result)
                 turn_results.append(result)
                 if result.success or result.error_code in self.non_retryable_error_codes:
-                    if result.success and decision.risk_level == "write":
+                    if result.success and self._may_mutate_workspace(decision.risk_level):
                         completed_actions.clear()
                         duplicate_counts.clear()
                         progress_recovery_sent = False
@@ -349,6 +363,7 @@ class ExecutionEngine:
                     ExecutionSummary(
                         final_message=reply.message,
                         tool_results=session.tool_results,
+                        outcome=self._terminal_outcome(turn_results),
                         active_skills=session.active_skills,
                     )
                 )
@@ -366,6 +381,7 @@ class ExecutionEngine:
                         ExecutionSummary(
                             final_message="Stopping after 3 consecutive failing test runs. Review the latest test output before retrying.",
                             tool_results=session.tool_results,
+                            outcome="stalled",
                             active_skills=session.active_skills,
                         )
                     )
@@ -394,6 +410,7 @@ class ExecutionEngine:
                         ExecutionSummary(
                             final_message=self._non_retryable_failure_message(turn_results),
                             tool_results=session.tool_results,
+                            outcome=self._blocked_outcome(turn_results),
                             active_skills=session.active_skills,
                         )
                     )
@@ -404,11 +421,18 @@ class ExecutionEngine:
             ExecutionSummary(
                 final_message="Model exceeded the maximum number of turns without producing a final answer.",
                 tool_results=session.tool_results,
+                outcome="exhausted",
                 active_skills=session.active_skills,
             )
         )
 
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise KeyboardInterrupt
+
     def _finish(self, summary: ExecutionSummary) -> ExecutionSummary:
+        if summary.outcome == "completed" and summary.tool_results:
+            summary.outcome = self._terminal_outcome([summary.tool_results[-1]])
         self.current_session = None
         if self._keep_tool_state and self.capability_warehouse is not None:
             summary.active_skills = self.capability_warehouse.persisted_skills()
@@ -419,6 +443,29 @@ class ExecutionEngine:
             if callable(close_state):
                 close_state()
         return summary
+
+    def _may_mutate_workspace(self, risk_level: str) -> bool:
+        return risk_level in {"write", "execute", "test", "destructive"}
+
+    def _terminal_outcome(self, results: list[ToolResult]) -> str:
+        if not any(not result.success for result in results):
+            return "completed"
+        return self._blocked_outcome(results, default="stalled")
+
+    def _blocked_outcome(self, results: list[ToolResult], *, default: str = "stalled") -> str:
+        error_codes = {result.error_code for result in results if not result.success}
+        if error_codes & {
+            "approval_required",
+            "approval_denied",
+            "blocked_by_policy",
+            "blocked_by_security_policy",
+            "path_outside_workspace",
+            "subagent_blocked",
+        }:
+            return "blocked"
+        if error_codes & {"duplicate_tool_call", "progress_required"}:
+            return "stalled"
+        return default
 
     def _session_key(self, request: UserRequest) -> str | None:
         session_id = request.metadata.get("session_id")

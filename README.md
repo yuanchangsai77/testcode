@@ -27,6 +27,8 @@ Detailed design is in [docs/architecture.md](docs/architecture.md).
 | 当前架构 | [总体架构](docs/architecture.md) | runtime 分层、对象职责和当前数据流 | 专项行为和优先级 |
 | 当前功能 | [Agent 执行循环](docs/core/agent-loop.md) | 模型—工具循环、重复动作纠正和停止条件 | TUI 渲染和长任务 roadmap |
 | 当前功能 | [执行安全](docs/core/execution-safety.md) | 风险模式、审批、危险动作和写入内容检查 | Shell 隔离和工具字段定义 |
+| 当前功能 | [Subagent 会话集群](docs/core/subagent-session-clusters.md) | 子会话启动、attempt 生命周期、并发 runner 和结构化交付 | 远程 A2A transport |
+| 安全设计 | [审批代理与委托授权](docs/core/approval-delegation.md) | 后台审批阻塞、未来请求代理和可验证授权边界 | 用模型调用代替人工审批 |
 | 当前功能 | [项目感知](docs/core/project-awareness.md) | 项目规则、workspace 摘要、项目探测和测试命令解析 | 通用扩展接口 |
 | 配置参考 | [配置参考](docs/reference/configuration.md) | 配置来源、覆盖顺序、默认值和硬上限 | MCP 协议语义 |
 | 字段参考 | [工具契约](docs/reference/tool-contract.md) | Tool 定义、结果、metadata 和摘要的字段流向 | 工具实现教程 |
@@ -74,6 +76,9 @@ Run a single request:
 ```bash
 .venv/bin/testcode --once "summarize this repository"
 ```
+
+Single-request mode also creates and closes a persisted session, so delegated
+subagent work and later `--resume` use the same session contract as interactive mode.
 
 When developing without an editable install, use the source-tree form:
 

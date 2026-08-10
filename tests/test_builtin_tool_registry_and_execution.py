@@ -569,6 +569,33 @@ def test_patch_automatically_relocates_unique_unchanged_observed_lines(tmp_path)
     assert target.read_text(encoding="utf-8").splitlines()[51] == "changed-32"
 
 
+def test_patch_relocates_uniquely_observed_context_from_incorrect_hunk_line(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("alpha\nbeta\ntarget\nomega\n", encoding="utf-8")
+    registry = make_registry()
+    registry.execute(
+        ToolAction(
+            name="read_file",
+            arguments={"path": "file.txt", "start_line": 3, "end_line": 3},
+        ),
+        cwd=str(tmp_path),
+    )
+
+    applied = registry.execute(
+        ToolAction(
+            name="patch",
+            arguments={
+                "diff": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1,2 @@\n target\n+added\n"
+            },
+        ),
+        cwd=str(tmp_path),
+    )
+
+    assert applied.success is True
+    assert applied.metadata["relocations"][0]["offset"] == 2
+    assert target.read_text(encoding="utf-8") == "alpha\nbeta\ntarget\nadded\nomega\n"
+
+
 def test_patch_rejects_ambiguous_relocation_matches(tmp_path):
     target = tmp_path / "file.txt"
     original = ["header", "before", "target", "after", "middle", "before", "target", "after"]

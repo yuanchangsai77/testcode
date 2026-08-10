@@ -5,6 +5,8 @@ try:
 except ImportError:
     pass
 
+from pathlib import Path
+
 from ..types import ExecutionSummary, SessionRecord, StoredSession, UserRequest
 from .presenter import ConsolePresenter
 
@@ -21,12 +23,18 @@ class CLI:
         presenter: ConsolePresenter,
         logger=None,
         session_store=None,
+        subagent_coordinator=None,
+        subagent_runner=None,
+        subagent_grant=None,
         command_registry: SlashCommandRegistry | None = None,
     ) -> None:
         self.engine = engine
         self.presenter = presenter
         self.logger = logger
         self.session_store = session_store
+        self.subagent_coordinator = subagent_coordinator
+        self.subagent_runner = subagent_runner
+        self.subagent_grant = subagent_grant
         self.command_registry = command_registry or default_slash_command_registry()
         if hasattr(self.presenter, "command_registry"):
             self.presenter.command_registry = self.command_registry
@@ -39,6 +47,46 @@ class CLI:
 
     def run(self, request: UserRequest) -> ExecutionSummary:
         return self._run_once(request)
+
+    def run_background(self, request: UserRequest) -> ExecutionSummary:
+        """Execute without terminal rendering, for an isolated subagent worker."""
+        if self.subagent_grant is not None:
+            self._validate_subagent_grant(request)
+        if self.logger is not None:
+            self.logger.start_run(request)
+        try:
+            summary = self.engine.execute(request)
+        except Exception:
+            if self.logger is not None:
+                self.logger.record("run.error", {"message": "subagent execution failed"})
+            raise
+        if self.logger is not None:
+            self.logger.finalize(request, summary)
+        return summary
+
+    def _validate_subagent_grant(self, request: UserRequest) -> None:
+        grant = self.subagent_grant
+        if not grant.is_runner_issued():
+            raise RuntimeError("delegated subagent execution grant was not issued by the runner")
+        subagent = request.metadata.get("subagent")
+        if not isinstance(subagent, dict):
+            raise RuntimeError("delegated subagent request is missing its execution identity")
+        expected = {
+            "session_id": request.metadata.get("session_id"),
+            "cluster_id": subagent.get("cluster_id"),
+            "parent_session_id": subagent.get("parent_session_id"),
+            "attempt": subagent.get("attempt"),
+            "workspace_root": str(Path(request.cwd).resolve()),
+        }
+        actual = {
+            "session_id": grant.session_id,
+            "cluster_id": grant.cluster_id,
+            "parent_session_id": grant.parent_session_id,
+            "attempt": grant.attempt,
+            "workspace_root": str(Path(grant.workspace_root).resolve()),
+        }
+        if expected != actual:
+            raise RuntimeError("delegated subagent request does not match its execution grant")
 
     def chat(
         self,
@@ -483,7 +531,11 @@ class CLI:
                     reset_state()
             self.presenter.clear_running_status_bar(tools_count)
             self.presenter.show_interrupted()
-            interrupted_summary = ExecutionSummary(final_message="Interrupted", tool_results=interrupted_results)
+            interrupted_summary = ExecutionSummary(
+                final_message="Interrupted",
+                tool_results=interrupted_results,
+                outcome="interrupted",
+            )
             if hasattr(self.engine, "_finish"):
                 self.engine._finish(interrupted_summary)
             if self.logger is not None:
@@ -500,6 +552,7 @@ class CLI:
                     f"{error}. You can keep this session open and try again later."
                 ),
                 tool_results=[],
+                outcome="runtime_error",
             )
         self.presenter.show_summary(summary)
         if self.logger is not None:

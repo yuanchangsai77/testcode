@@ -108,14 +108,17 @@ MCP 最小主链路已经完成，不再规划第二套 transport 或全量工�
 
 ## P4：Subagent、Team 与 A2A
 
-只有在 P0 的 checkpoint、任务状态和上下文预算稳定后，才进入多 Agent 编排。
-跨项目的 Model Plane、Device Plane 与设备能力目标边界见
-[未来平台蓝图](future/README.md)；该蓝图不改变本路线图的当前优先级。
+本地 subagent 的会话基础设施提前实施，但不绕过 P0 尚未完成的 checkpoint、任务状态和上下文
+预算。首阶段建立独立子会话、会话镜像、集群关系、公共状态空间和进程内并发 runner，具体契约见
+[Subagent 会话集群](core/subagent-session-clusters.md)。跨进程常驻调度和故障续跑仍需依赖 P0 的
+checkpoint 与恢复能力。
 
 - 本地 subagent 使用独立 session、tool history、run id、权限和 context budget。
-- parent 只接收结构化摘要、关键发现、修改文件和验证结果。
-- 并发写入必须通过文件锁或 patch 前 hash 避免冲突。
-- Team 在本地消息结构稳定后再扩展到远程 A2A。
+- 子会话可继承主会话、使用新配置或从会话镜像仓库启动。
+- parent 与子会话不直连，只通过有来源的结构化公共状态交换有界结果。
+- 主 Agent 可批量创建子会话，并通过独立 runtime 并发执行所有 ready 成员。
+- 并发公共状态写入使用文件锁和原子替换；workspace 修改仍需 patch 前 hash 或文件锁。
+- Team 在本地状态结构稳定后再扩展到远程 A2A。
 - 远程修改必须以 patch/artifact 回到本地审批流。
 
 ## 暂不优先

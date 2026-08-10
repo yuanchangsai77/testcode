@@ -49,6 +49,11 @@
 单独确认。用户拒绝审批会返回 `approval_denied`，模式直接阻断会返回
 `blocked_by_policy`。
 
+主会话显式批准运行子会话时，后台 runtime 可在 `confirm` 模式下自动执行工作区内的
+结构化 `write` 工具。该委派授权不覆盖 `execute`、`test`、`network` 或 `destructive`，
+也不会扩大工作区根目录；无法取得额外审批时必须返回结构化阻塞结果。
+审批在会话间的传递与代理见[审批代理与委托授权](approval-delegation.md)。
+
 ## 写入内容检查
 
 风险审批回答“是否允许执行这类动作”，内容检查回答“拟写入内容是否包含高置信度

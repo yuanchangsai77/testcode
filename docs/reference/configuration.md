@@ -38,6 +38,12 @@ delays = [0.5, 1, 1.5, 2, 3, 5, 8]
 # 一次任务中模型最多可继续思考或调用工具的轮数。
 # 默认 100，内部硬上限 500。
 max_turns = 100
+# 后台子会话单次模型请求失败后的最大重试次数。
+# 默认 1，且不会超过 model.retry.max_retries。
+subagent_max_model_retries = 1
+# 后台子会话单次模型请求总截止时间，默认 30 秒，内部硬上限 300 秒；
+# 实际值不会超过 TESTCODE_MODEL_TIMEOUT。
+subagent_model_timeout = 30
 
 [limits]
 # 每个 MCP 服务最多发现的工具数。默认 256，内部硬上限 1024。
@@ -81,6 +87,9 @@ TESTCODE_MODEL_NAME=gpt-5.4
 TESTCODE_MODEL_TIMEOUT=60
 TESTCODE_MODE=confirm
 ```
+
+当模型地址是 `localhost` 或 loopback IP 时，模型客户端始终绕过环境代理，并把
+`TESTCODE_MODEL_TIMEOUT` 作为整个 HTTP 请求的总截止时间，而不只是单次 socket 操作的超时。
 
 `TESTCODE_MODE` 可选值为 `readonly`、`confirm`、`auto`。MCP 的敏感值应通过系统环境变量提供，例如 `AMAP_MCP_KEY`。
 

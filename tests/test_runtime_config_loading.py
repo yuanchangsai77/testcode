@@ -137,6 +137,8 @@ max_retries = 4
 
 [orchestration]
 max_turns = 12
+subagent_max_model_retries = 1
+subagent_model_timeout = 15
 
 [limits]
 active_capabilities = 5
@@ -150,6 +152,8 @@ search_results = 300
     assert config.model_retry.max_retries == 4
     assert config.model_retry.delays == (0.1,)
     assert config.orchestration.max_turns == 12
+    assert config.orchestration.subagent_max_model_retries == 1
+    assert config.orchestration.subagent_model_timeout == 15.0
     assert config.limits.active_capabilities == 5
     assert config.limits.search_results == 300
 

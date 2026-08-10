@@ -99,6 +99,7 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
 
     check = run_command(["git", "apply", "--check", "-"], root, input_text=diff, shell=False)
     use_recount = False
+    use_unidiff_zero = False
     if not check.success:
         error_code = classify_git_apply_failure(check.output)
         if error_code == "patch_syntax_error":
@@ -106,7 +107,19 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
             if recount_check.success:
                 check = recount_check
                 use_recount = True
-        
+
+        if not use_recount:
+            minimal_context_check = run_command(
+                ["git", "apply", "--check", "--recount", "--unidiff-zero", "-"],
+                root,
+                input_text=diff,
+                shell=False,
+            )
+            if minimal_context_check.success:
+                check = minimal_context_check
+                use_recount = True
+                use_unidiff_zero = True
+
         if not use_recount:
             if error_code == "patch_context_mismatch":
                 stale = stale_read_error(
@@ -132,7 +145,12 @@ def run(action: ToolAction, context: ToolContext) -> ToolResult:
                 metadata={"changed_files": changed_files, "preview": diff, "line_stats": line_stats(diff)},
             )
 
-    cmd = ["git", "apply", "--recount", "-"] if use_recount else ["git", "apply", "-"]
+    cmd = ["git", "apply"]
+    if use_recount:
+        cmd.append("--recount")
+    if use_unidiff_zero:
+        cmd.append("--unidiff-zero")
+    cmd.append("-")
     applied = run_command(cmd, root, input_text=diff, shell=False)
     if not applied.success:
         return retarget(applied, action.name)
@@ -281,11 +299,13 @@ def validate_hunks_were_read(
     for hunk in hunks:
         required = hunk.get("required", [])
         if required:
-            missing.extend(
-                line_no
+            contents = [content for _line_no, content in required]
+            exact_match = all(
+                observed_line_matches(entry, line_no, content)
                 for line_no, content in required
-                if not observed_line_matches(entry, line_no, content)
             )
+            if not exact_match and observed_sequence_start(entry, contents) is None:
+                missing.extend(line_no for line_no, _content in required)
             continue
 
         old_start = int(hunk.get("old_start", 0))
@@ -453,6 +473,24 @@ def find_line_sequence(lines: list[str], sequence: list[str]) -> list[int]:
         for index in range(len(lines) - width + 1)
         if lines[index : index + width] == sequence
     ]
+
+
+def observed_sequence_start(entry: dict, sequence: list[str]) -> int | None:
+    if not sequence:
+        return None
+    starts: set[int] = set()
+    width = len(sequence)
+    for observation in entry.get("observations", []):
+        observed_lines = observation.get("lines", {})
+        for start in observed_lines:
+            if all(
+                observed_lines.get(start + offset) == sequence[offset]
+                for offset in range(width)
+            ):
+                starts.add(start)
+    if len(starts) != 1:
+        return None
+    return next(iter(starts))
 
 
 def relocate_diff_hunks(

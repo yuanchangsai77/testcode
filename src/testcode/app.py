@@ -23,13 +23,16 @@ from .model.client import OpenAICompatibleModelClient, StubModelClient
 from .model.types import ModelClientConfig
 from .observability.logger import InMemoryLogger
 from .orchestration.engine import ExecutionEngine
+from .orchestration.subagent_runner import SubagentExecutionGrant, SubagentRunner
+from .orchestration.subagents import SubagentCoordinator
 from .project import ProjectDetector
 from .safety.guardrails import Guardrails
 from .safety.policy import DefaultPolicy
 from .safety.content import build_content_safety_interceptors
-from .sessions import SessionStore
+from .sessions import SessionClusterStore, SessionImageStore, SessionStore
 from .tools.builtin_provider import BuiltinToolProvider
 from .tools.registry import ToolRegistry
+from .tools.subagents import build_subagent_tools
 from .skills.registry import SkillRegistry
 from .types import ExecutionSummary, UserRequest
 from pathlib import Path
@@ -48,7 +51,12 @@ def create_mcp_client(server):
     return UnsupportedMCPClient(config=server)
 
 
-def create_model_client(logger, config=None) -> StubModelClient | OpenAICompatibleModelClient:
+def create_model_client(
+    logger,
+    config=None,
+    *,
+    timeout: float | None = None,
+) -> StubModelClient | OpenAICompatibleModelClient:
     config = config or load_runtime_config()
     if not config.model_base_url:
         return StubModelClient()
@@ -56,7 +64,7 @@ def create_model_client(logger, config=None) -> StubModelClient | OpenAICompatib
     model_config = ModelClientConfig(
         base_url=config.model_base_url,
         model=config.model_name,
-        timeout=config.model_timeout,
+        timeout=config.model_timeout if timeout is None else timeout,
     )
     return OpenAICompatibleModelClient(config=model_config, logger=logger)
 
@@ -66,11 +74,30 @@ def create_app(
     workspace_root: str | Path | None = None,
     *,
     interactive: bool = False,
+    background: bool = False,
+    subagent_grant: SubagentExecutionGrant | None = None,
 ) -> CLI:
     root = Path(workspace_root or os.getcwd()).resolve()
     config = load_runtime_config(mode=mode, cwd=root)
+    delegated_write = subagent_grant is not None and subagent_grant.is_runner_issued()
+    runtime_mode = "auto" if delegated_write and config.mode == "confirm" else config.mode
+    session_store = SessionStore()
+    subagent_coordinator = SubagentCoordinator(
+        session_store=session_store,
+        cluster_store=SessionClusterStore(),
+        image_store=SessionImageStore(),
+    )
+    subagent_runner = SubagentRunner(
+        coordinator=subagent_coordinator,
+        runtime_factory=lambda session, grant: create_app(
+            mode=config.mode,
+            workspace_root=session.cwd,
+            background=True,
+            subagent_grant=grant,
+        ),
+    )
     logger = InMemoryLogger()
-    policy = DefaultPolicy(mode=config.mode)
+    policy = DefaultPolicy(mode=runtime_mode)
     guardrails = Guardrails(policy=policy, logger=logger)
 
     # Resolve skill registry directories
@@ -141,6 +168,9 @@ def create_app(
     for provider in providers:
         for tool in provider.get_tools():
             tools.register(tool)
+    if not background:
+        for tool in build_subagent_tools():
+            tools.register(tool)
     capability_warehouse = CapabilityWarehouse(
         sources=capability_sources,
         registry=tools,
@@ -150,10 +180,20 @@ def create_app(
     for tool in build_warehouse_tools(capability_warehouse):
         tools.register(tool)
     tools.attach_state("capability_warehouse", capability_warehouse, persistent=True)
+    tools.attach_state("subagent_coordinator", subagent_coordinator, persistent=True)
+    tools.attach_state("subagent_runner", subagent_runner, persistent=True)
     if mcp_manager is not None:
         tools.attach_state("mcp_manager", mcp_manager, persistent=True)
 
-    model = create_model_client(logger, config=config)
+    model = create_model_client(
+        logger,
+        config=config,
+        timeout=(
+            min(config.model_timeout, config.orchestration.subagent_model_timeout)
+            if background
+            else None
+        ),
+    )
     presenter_type = TUIConsolePresenter if interactive and should_use_tui() else ConsolePresenter
     presenter = presenter_type(tool_result_summarizer=tools.summarize_result)
     engine = ExecutionEngine(
@@ -163,9 +203,16 @@ def create_app(
         logger=logger,
         context_loaders=[project_rules_loader, workspace_summary_loader, explicit_context_loader],
         capability_warehouse=capability_warehouse,
-        approval_callback=presenter.confirm_tool_action,
-        progress_reporter=presenter,
-        max_model_retries=config.model_retry.max_retries,
+        approval_callback=None if background else presenter.confirm_tool_action,
+        progress_reporter=None if background else presenter,
+        max_model_retries=(
+            min(
+                config.model_retry.max_retries,
+                config.orchestration.subagent_max_model_retries,
+            )
+            if background
+            else config.model_retry.max_retries
+        ),
         model_retry_delays=config.model_retry.delays,
         max_turns=config.orchestration.max_turns,
         mcp_server_count=sum(server.enabled for server in config.mcp_servers),
@@ -185,8 +232,15 @@ def create_app(
     engine.skills_registry = skills_registry
     presenter.engine = engine
 
-    session_store = SessionStore()
-    return CLI(engine=engine, presenter=presenter, logger=logger, session_store=session_store)
+    return CLI(
+        engine=engine,
+        presenter=presenter,
+        logger=logger,
+        session_store=session_store,
+        subagent_coordinator=subagent_coordinator,
+        subagent_runner=subagent_runner,
+        subagent_grant=subagent_grant,
+    )
 
 
 def main() -> None:
@@ -279,6 +333,9 @@ def main() -> None:
             prompt = initial_prompt or input("testcode> ").strip()
             if not prompt:
                 return
+            session_store = getattr(app, "session_store", None)
+            if resumed_session is None and session_store is not None:
+                resumed_session = session_store.create(cwd=cwd)
             metadata = {}
             if resumed_session is not None:
                 metadata["conversation"] = list(resumed_session.messages)
@@ -298,7 +355,11 @@ def main() -> None:
                     app.persist_run(
                         resumed_session,
                         prompt,
-                        ExecutionSummary(final_message="Interrupted", tool_results=[]),
+                        ExecutionSummary(
+                            final_message="Interrupted",
+                            tool_results=[],
+                            outcome="interrupted",
+                        ),
                         status="closed",
                         close_runtime=True,
                     )
