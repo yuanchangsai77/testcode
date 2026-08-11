@@ -48,7 +48,8 @@ subagent_model_timeout = 30
 [limits]
 # 每个 MCP 服务最多发现的工具数。默认 256，内部硬上限 1024。
 mcp_tools_per_server = 256
-# 同时激活的 MCP/Skill 能力数。默认 8，内部硬上限 32。
+# 同时激活的 toolbox/单体能力组数。同一 toolbox 的叶子共享一个数量单位；
+# 所有叶子 schema 仍受字符预算约束。默认 8，内部硬上限 32。
 active_capabilities = 8
 # shell/search 等命令工具保留的输出字节数。默认 32000，内部硬上限 1048576。
 tool_output_bytes = 32000

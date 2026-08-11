@@ -12,6 +12,7 @@ from .model import (
     ActivationRecord,
     CapabilityEntry,
     CapabilityManifest,
+    ManifestItem,
 )
 from .source import CapabilitySource
 
@@ -111,9 +112,11 @@ class CapabilityWarehouse:
             schema_chars = self._schema_chars(activated)
             pending.append((activated, schema_chars))
 
-        if len(self._active) + len(pending) > self.max_active_capabilities:
+        projected_toolboxes = set(self.active_toolbox_ids())
+        projected_toolboxes.update(activated.toolbox_id for activated, _ in pending)
+        if len(projected_toolboxes) > self.max_active_capabilities:
             raise ValueError(
-                f"activation limit exceeded: max {self.max_active_capabilities} capabilities"
+                f"activation limit exceeded: max {self.max_active_capabilities} toolboxes"
             )
         current_chars = sum(record.schema_chars for record in self._active.values())
         pending_chars = sum(size for _, size in pending)
@@ -252,6 +255,44 @@ class CapabilityWarehouse:
             if scopes is None or record.scope in scopes
         ]
 
+    def active_toolbox_ids(self) -> list[str]:
+        return sorted({record.toolbox_id for record in self._active.values()})
+
+    def opened_items(self, toolbox_id: str | None = None) -> list[ManifestItem]:
+        return [
+            item
+            for manifest_id, manifest in sorted(self._opened.items())
+            if toolbox_id is None or manifest_id == toolbox_id
+            for item in manifest.items
+        ]
+
+    def expand_activation_targets(self, target_ids: Iterable[str]) -> list[str]:
+        toolbox_ids = {entry.id for entry in self.catalog_entries() if entry.kind == "toolbox"}
+        capability_ids: list[str] = []
+        for target_id in dict.fromkeys(target_ids):
+            if target_id in toolbox_ids:
+                manifest = self._opened.get(target_id) or self.open_toolbox(target_id)
+                if not manifest.items:
+                    raise ValueError(f"toolbox has no activatable capabilities: {target_id}")
+                capability_ids.extend(item.id for item in manifest.items)
+                continue
+            toolbox_id = self._toolbox_for_capability(target_id)
+            if toolbox_id not in self._opened:
+                self.open_toolbox(toolbox_id)
+            capability_ids.append(target_id)
+        return list(dict.fromkeys(capability_ids))
+
+    def expand_release_targets(self, target_ids: Iterable[str]) -> list[str]:
+        capability_ids: list[str] = []
+        for target_id in dict.fromkeys(target_ids):
+            grouped_ids = [
+                capability_id
+                for capability_id, record in self._active.items()
+                if record.toolbox_id == target_id
+            ]
+            capability_ids.extend(grouped_ids or [target_id])
+        return list(dict.fromkeys(capability_ids))
+
     def persisted_instructions(self) -> list[object]:
         ids = {
             capability_id
@@ -316,6 +357,8 @@ class CapabilityWarehouse:
             "entries": [self._entry_payload(entry) for entry in entries],
             "budgets": {
                 "max_active_capabilities": self.max_active_capabilities,
+                "active_toolboxes": len(self.active_toolbox_ids()),
+                "active_capabilities": len(self._active),
                 "max_active_schema_chars": self.max_active_schema_chars,
                 "active_schema_chars": sum(item.schema_chars for item in self._active.values()),
             },

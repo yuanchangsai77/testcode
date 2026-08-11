@@ -463,8 +463,135 @@ def test_composer_rows_renders_slash_command_completion_menu():
     assert any("› /status" in row for row in scrolled_plain)
 
 
+@pytest.mark.parametrize("columns", [50, 80, 120])
+def test_completion_rows_never_wrap_long_capability_descriptions(monkeypatch, columns):
+    presenter = TUIConsolePresenter(output=StringIO())
+    presenter._composer.set_value("/capabilities activate ")
+    monkeypatch.setattr(
+        "testcode.interaction.tui._terminal_size",
+        lambda _output=None: os.terminal_size((columns, 24)),
+    )
+    matches = [
+        (
+            "local:subagents:subagent_spawn",
+            "Create a new independent child session for a delegated task. "
+            "Do not use this for feedback or repairs owned by another child.",
+        ),
+        (
+            "local:subagents:subagent_run_ready",
+            "Execute every ready child session concurrently with isolated model runtimes.",
+        ),
+    ]
+
+    rows = presenter._completion_rows(matches)
+    plain_rows = [_plain(row) for row in rows]
+
+    assert all(_display_width(row) < columns for row in plain_rows)
+    assert any(row.endswith("…") for row in plain_rows)
 
 
+def test_composer_offers_dynamic_second_level_command_options(tmp_path, monkeypatch):
+    from testcode.app import create_app
 
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    app = create_app(workspace_root=tmp_path)
+    first_session = app.session_store.create(cwd=str(tmp_path), messages=[{"role": "user", "content": "first task"}])
+    composer = ComposerState(
+        command_registry=app.command_registry,
+        command_context=app,
+    )
 
+    composer.set_value("/mode ")
+    assert [value for value, _ in composer.get_completion_matches()] == [
+        "/mode readonly",
+        "/mode confirm",
+        "/mode auto",
+    ]
+    composer.set_value("/mo")
+    assert composer.edit("\r", []) == "changed"
+    assert composer.value == "/mode "
+    assert len(composer.get_completion_matches()) == 3
+    composer.set_value("/mode")
+    assert composer.edit("\t", []) == "changed"
+    assert composer.value == "/mode "
+    assert composer.edit("\x1b[B", []) == "changed"
+    assert composer.edit("\r", []) == "changed"
+    assert composer.value == "/mode confirm"
+    assert composer.edit("\r", []) == "submit"
 
+    composer.set_value("/skill ")
+    assert [value for value, _ in composer.get_completion_matches()] == [
+        "/skill git-helper",
+        "/skill pytest-helper",
+    ]
+
+    composer.set_value("/resume ")
+    assert any(
+        value == f"/resume {first_session.session_id}"
+        for value, _ in composer.get_completion_matches()
+    )
+    composer.set_value("/resu")
+    assert composer.edit("\r", []) == "changed"
+    assert composer.value == "/resume "
+    assert composer.get_completion_matches()
+
+    composer.set_value("/capabilities ")
+    assert [value for value, _ in composer.get_completion_matches()] == [
+        "/capabilities list",
+        "/capabilities open",
+        "/capabilities status",
+        "/capabilities activate",
+        "/capabilities release",
+    ]
+
+    composer.set_value("/capabilities open ")
+    open_matches = [value for value, _ in composer.get_completion_matches()]
+    assert "/capabilities open local:subagents" in open_matches
+    assert app.engine.capability_warehouse.status()["opened"] == []
+
+    composer.set_value("/capabilities activate --scope=run")
+    unopened_capability_matches = [
+        value for value, _ in composer.get_completion_matches()
+    ]
+    assert (
+        "/capabilities activate --scope=run local:subagents"
+        in unopened_capability_matches
+    )
+    assert app.engine.capability_warehouse.status()["opened"] == []
+
+    composer.set_value("/capabilities o")
+    assert composer.edit("\r", []) == "changed"
+    assert composer.value == "/capabilities open "
+    assert composer.get_completion_matches()
+
+    app.engine.capability_warehouse.open_toolbox("local:subagents")
+    composer.set_value("/capabilities activate sub")
+    activate_matches = [value for value, _ in composer.get_completion_matches()]
+    assert activate_matches == []
+
+    composer.set_value("/capabilities activate --scope=turn")
+    capability_matches = [value for value, _ in composer.get_completion_matches()]
+    assert capability_matches == [
+        "/capabilities activate --scope=turn skill:git-helper",
+        "/capabilities activate --scope=turn skill:pytest-helper",
+        "/capabilities activate --scope=turn local:subagents",
+    ]
+    assert all("--scope=" not in value.rsplit(" ", 1)[-1] for value in capability_matches)
+    assert composer.edit("\r", []) == "changed"
+    assert composer.value == "/capabilities activate --scope=turn skill:git-helper"
+
+    composer.set_value("/capabilities activate local:subagents ")
+    scope_matches = [value for value, _ in composer.get_completion_matches()]
+    assert "/capabilities activate local:subagents --scope=session" in scope_matches
+    composer.set_value(
+        "/capabilities activate local:subagents --scope=turn"
+    )
+    assert composer.edit("\r", []) == "submit"
+
+    presenter = TUIConsolePresenter(output=StringIO())
+    presenter._composer = composer
+    option_rows = presenter._completion_rows(composer.get_completion_matches())
+    plain_option_rows = [_plain(row) for row in option_rows]
+    assert any("Options (" in row for row in plain_option_rows)
+    assert any("--scope=turn" in row for row in plain_option_rows)
+    assert all("/capabilities activate" not in row for row in plain_option_rows)

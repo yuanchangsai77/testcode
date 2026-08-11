@@ -208,12 +208,19 @@ class ConsolePresenter:
         if engine:
             loaders_count = len(getattr(engine, "context_loaders", []))
             tools_count = len(getattr(engine.tools, "_tools", {})) if hasattr(engine, "tools") else 0
-            skills_count = len(getattr(engine.skills_registry, "_skills", {})) if hasattr(engine, "skills_registry") else 0
-            mcp_server_count = getattr(engine, "mcp_server_count", 0)
+            capability_entries = []
+            warehouse = getattr(engine, "capability_warehouse", None)
+            if warehouse is not None:
+                capability_entries = warehouse.catalog_entries()
+            toolbox_entries = [
+                entry for entry in capability_entries if entry.kind == "toolbox"
+            ]
+            toolbox_count = len(toolbox_entries)
+            source_summary = self._capability_source_summary(toolbox_entries)
             loader_label = "Context Loader" if loaders_count == 1 else "Context Loaders"
             tool_label = "Tool" if tools_count == 1 else "Tools"
-            skill_label = "Skill" if skills_count == 1 else "Skills"
-            mcp_label = "MCP Server" if mcp_server_count == 1 else "MCP Servers"
+            toolbox_label = "Toolbox" if toolbox_count == 1 else "Toolboxes"
+            toolbox_summary = f" ({source_summary})" if source_summary else ""
 
             output.extend(
                 [
@@ -221,8 +228,7 @@ class ConsolePresenter:
                     f"   {GREEN}•{RESET} {BOLD}{loaders_count}{RESET} {loader_label}",
                     f"   {GREEN}•{RESET} {BOLD}{tools_count}{RESET} {tool_label}",
                     f" {GRAY}›{RESET} {BOLD}Capability Catalog:{RESET}",
-                    f"   {GREEN}•{RESET} {BOLD}{skills_count}{RESET} {skill_label}",
-                    f"   {GREEN}•{RESET} {BOLD}{mcp_server_count}{RESET} {mcp_label}",
+                    f"   {GREEN}•{RESET} {BOLD}{toolbox_count}{RESET} {toolbox_label}{toolbox_summary}",
                     border,
                 ]
             )
@@ -476,12 +482,23 @@ class ConsolePresenter:
             mode_val = getattr(engine.guardrails.policy, "mode", "confirm")
 
         model_name = getattr(getattr(engine, "model", None), "model", "StubModel")
+        warehouse = getattr(engine, "capability_warehouse", None)
+        capability_summary = ""
+        if warehouse is not None:
+            entries = warehouse.catalog_entries()
+            toolbox_count = sum(entry.kind == "toolbox" for entry in entries)
+            active_count = len(warehouse.active_toolbox_ids())
+            toolbox_label = "toolbox" if toolbox_count == 1 else "toolboxes"
+            capability_summary = f"{active_count} active · {toolbox_count} {toolbox_label}"
 
         self._print(f"{BOLD}Session Status & Environment:{RESET}")
         self._print(f" {GRAY}›{RESET} {BOLD}Session ID:{RESET}  {YELLOW}{session_id}{RESET}")
         self._print(f" {GRAY}›{RESET} {BOLD}Workspace:{RESET}   {cwd}")
         self._print(f" {GRAY}›{RESET} {BOLD}Model:{RESET}       {CYAN}{model_name}{RESET}")
-        self._print(f" {GRAY}›{RESET} {BOLD}Safety Mode:{RESET} {GREEN}{mode_val}{RESET}\n")
+        self._print(f" {GRAY}›{RESET} {BOLD}Safety Mode:{RESET} {GREEN}{mode_val}{RESET}")
+        if capability_summary:
+            self._print(f" {GRAY}›{RESET} {BOLD}Capabilities:{RESET} {capability_summary}")
+        self._print()
 
     def show_help(self, registry=None) -> None:
         CYAN = "\033[1;36m"
@@ -512,33 +529,208 @@ class ConsolePresenter:
         self._print("No active background tasks running in this session.\n")
 
     def show_skills(self, engine) -> None:
-        CYAN = "\033[1;36m"
-        BOLD = "\033[1m"
-        RESET = "\033[0m"
-        
-        skills = {}
-        if engine and hasattr(engine, "skills_registry") and engine.skills_registry:
-            skills = getattr(engine.skills_registry, "_skills", {})
-            
-        self._print(f"{BOLD}Scanned Skill Registry:{RESET}")
-        if not skills:
-            self._print("  No skills found in registry.")
+        entries = []
+        warehouse = getattr(engine, "capability_warehouse", None)
+        if warehouse is not None:
+            entries = [
+                warehouse.describe_entry(entry)
+                for entry in warehouse.catalog_entries()
+                if entry.kind == "toolbox" and entry.source == "skill"
+            ]
         else:
-            for name, meta in skills.items():
-                version = getattr(meta, "version", "0.1.0")
-                desc = getattr(meta, "description", "")
-                triggers = getattr(meta, "triggers", [])
-                self._print(f"  {CYAN}• {name}{RESET} (v{version}) - {desc}")
-                if triggers:
-                    self._print(f"    Triggers: {', '.join(triggers)}")
-        self._print()
+            registry = getattr(engine, "skills_registry", None)
+            skills = getattr(registry, "_skills", {}) if registry is not None else {}
+            entries = [
+                {
+                    "id": f"skill:{name}",
+                    "name": name,
+                    "source": "skill",
+                    "description": getattr(metadata, "description", ""),
+                    "enabled": True,
+                    "lifecycle_state": "stored",
+                }
+                for name, metadata in skills.items()
+            ]
+        self.show_capabilities("Skill Toolboxes", {"entries": entries})
 
     def show_capabilities(self, title: str, payload) -> None:
-        import json
+        BOLD = "\033[1m"
+        RED = "\033[1;31m"
+        RESET = "\033[0m"
 
-        self._print(f"\033[1m{title}:\033[0m")
-        self._print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-        self._print()
+        lines = [f"{BOLD}{title}{RESET}"]
+        if not isinstance(payload, dict):
+            lines.extend([str(payload), ""])
+            self._print_many(lines)
+            return
+        if payload.get("error"):
+            lines.extend([f"{RED}Error:{RESET} {payload['error']}", ""])
+            self._print_many(lines)
+            return
+
+        if "catalog_count" in payload:
+            lines.extend(self._capability_status_lines(payload))
+        elif "toolbox_id" in payload and "items" in payload:
+            lines.extend(self._capability_manifest_lines(payload))
+        elif "entries" in payload:
+            lines.extend(self._capability_catalog_lines(payload.get("entries", [])))
+        elif "activated" in payload or "released" in payload:
+            lines.extend(self._capability_result_lines(payload))
+        else:
+            lines.extend(f"{key}: {value}" for key, value in payload.items())
+        lines.append("")
+        self._print_many(lines)
+
+    @staticmethod
+    def _capability_source_summary(entries) -> str:
+        counts: dict[str, int] = {}
+        for entry in entries:
+            source = str(getattr(entry, "source", "unknown") or "unknown").lower()
+            counts[source] = counts.get(source, 0) + 1
+        labels = {"skill": "Skill", "local": "Local", "mcp": "MCP"}
+        priority = {"skill": 0, "local": 1, "mcp": 2}
+        ordered = sorted(counts, key=lambda source: (priority.get(source, 3), source))
+        return " · ".join(
+            f"{counts[source]} {labels.get(source, source.replace('_', ' ').title())}"
+            for source in ordered
+        )
+
+    def _capability_catalog_lines(self, entries) -> list[str]:
+        entries = [entry for entry in entries if isinstance(entry, dict)]
+        count = len(entries)
+        noun = "toolbox" if count == 1 else "toolboxes"
+        lines = [f"{count} {noun}", ""]
+        if not entries:
+            return ["No toolboxes are available."]
+        for entry in entries:
+            source = self._capability_source_label(entry.get("source"))
+            state = "disabled" if not entry.get("enabled", True) else entry.get("lifecycle_state", "stored")
+            lines.append(
+                f"{self._capability_bullet(state)} {entry.get('name') or entry.get('id', 'unnamed')}"
+                f"  {source} · {state}"
+            )
+            lines.append(f"  {entry.get('id', '')}")
+            if entry.get("description"):
+                lines.append(f"  {entry['description']}")
+            lines.append("")
+        lines.append("Open a toolbox with /capabilities open <toolbox-id>")
+        return lines
+
+    def _capability_manifest_lines(self, payload: dict) -> list[str]:
+        toolbox_id = str(payload.get("toolbox_id", ""))
+        name = toolbox_id.split(":", 1)[-1] or toolbox_id
+        state = str(payload.get("state", "unknown"))
+        items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+        noun = "capability" if len(items) == 1 else "capabilities"
+        lines = [
+            f"{self._capability_bullet(state)} {name}  {state}",
+            f"  {toolbox_id}",
+            f"  {len(items)} {noun}",
+            "",
+        ]
+        if not items:
+            lines.append("No capabilities are available in this toolbox.")
+            return lines
+        for item in items:
+            risk = str(item.get("risk", "read"))
+            lines.append(f"• {item.get('name') or item.get('id', 'unnamed')}  {risk}")
+            lines.append(f"  {item.get('id', '')}")
+            if item.get("description"):
+                lines.append(f"  {item['description']}")
+            lines.append("")
+        lines.append(
+            f"Activate this toolbox with /capabilities activate --scope=session {toolbox_id}"
+        )
+        return lines
+
+    def _capability_status_lines(self, payload: dict) -> list[str]:
+        entries = [item for item in payload.get("entries", []) if isinstance(item, dict)]
+        opened = [item for item in payload.get("opened", []) if isinstance(item, dict)]
+        active = [item for item in payload.get("active", []) if isinstance(item, dict)]
+        released = [item for item in payload.get("released", []) if isinstance(item, dict)]
+        budgets = payload.get("budgets", {})
+        lines = [
+            f"Catalog {payload.get('catalog_count', len(entries))} · Opened {len(opened)} · Active leaves {len(active)}"
+        ]
+        if isinstance(budgets, dict):
+            leaf_count = budgets.get("active_capabilities", len(active))
+            leaf_label = "leaf capability" if leaf_count == 1 else "leaf capabilities"
+            lines.append(
+                "Budget "
+                f"{budgets.get('active_toolboxes', 0)}/{budgets.get('max_active_capabilities', '?')} toolboxes · "
+                f"{leaf_count} {leaf_label} · "
+                f"{budgets.get('active_schema_chars', 0)}/{budgets.get('max_active_schema_chars', '?')} schema chars"
+            )
+        if entries:
+            lines.extend(["", "Catalog"])
+            for entry in entries:
+                source = self._capability_source_label(entry.get("source"))
+                lifecycle = str(entry.get("lifecycle_state", "stored"))
+                health = str(entry.get("health_state", "unknown"))
+                state = health if health not in {"unknown", "ready"} else lifecycle
+                lines.append(
+                    f"{self._capability_bullet(state)} {entry.get('name') or entry.get('id', 'unnamed')}"
+                    f"  {source} · {lifecycle} · {health}"
+                )
+                lines.append(f"  {entry.get('id', '')}")
+        if opened:
+            lines.extend(["", "Opened"])
+            for item in opened:
+                state = str(item.get("state", "unknown"))
+                lines.append(
+                    f"{self._capability_bullet(state)} {item.get('name') or item.get('toolbox_id', 'unnamed')}"
+                    f"  {state} · {item.get('item_count', 0)} items"
+                )
+        if active:
+            lines.extend(["", "Active"])
+            for item in active:
+                lines.append(
+                    f"• {item.get('capability_id', 'unknown')}  "
+                    f"{item.get('scope', 'run')} · {item.get('state', 'activated')}"
+                )
+        if released:
+            lines.extend(["", "Recently released"])
+            for item in released[-5:]:
+                lines.append(f"• {item.get('capability_id', 'unknown')}")
+        return lines
+
+    def _capability_result_lines(self, payload: dict) -> list[str]:
+        GREEN = "\033[1;32m"
+        RESET = "\033[0m"
+        action = "Activated" if "activated" in payload else "Released"
+        values = payload.get(action.lower(), [])
+        values = list(values) if isinstance(values, (list, tuple)) else []
+        toolboxes = payload.get("toolboxes", [])
+        toolboxes = list(toolboxes) if isinstance(toolboxes, (list, tuple)) else []
+        noun = "capability" if len(values) == 1 else "capabilities"
+        scope = f" · scope: {payload.get('scope')}" if payload.get("scope") else ""
+        if toolboxes:
+            toolbox_noun = "toolbox" if len(toolboxes) == 1 else "toolboxes"
+            lines = [
+                f"{GREEN}✓{RESET} {action} {len(toolboxes)} {toolbox_noun} · "
+                f"{len(values)} leaf {noun}{scope}"
+            ]
+            lines.extend(f"  • {toolbox_id}" for toolbox_id in toolboxes)
+            return lines
+        lines = [f"{GREEN}✓{RESET} {action} {len(values)} {noun}{scope}"]
+        lines.extend(f"  • {value}" for value in values)
+        return lines
+
+    @staticmethod
+    def _capability_source_label(source) -> str:
+        value = str(source or "unknown").lower()
+        return {"skill": "Skill", "local": "Local", "mcp": "MCP"}.get(
+            value, value.replace("_", " ").title()
+        )
+
+    @staticmethod
+    def _capability_bullet(state) -> str:
+        value = str(state or "unknown").lower()
+        if value in {"ready", "opened", "activated", "used", "stored"}:
+            return "\033[1;32m•\033[0m"
+        if value in {"disabled", "unavailable", "failed", "degraded"}:
+            return "\033[1;31m•\033[0m"
+        return "\033[1;33m•\033[0m"
 
     def show_or_change_mode(self, engine, mode_arg: str | None = None) -> None:
         GREEN = "\033[1;32m"

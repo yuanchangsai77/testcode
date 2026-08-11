@@ -44,15 +44,35 @@
 ────────────────────────────────────────────────────────
  › Runtime:
    • 3 Context Loaders
-   • 17 Tools
+   • 14 Tools
  › Capability Catalog:
-   • 2 Skills
-   • 1 MCP Server
+   • 4 Toolboxes (2 Skill · 1 Local · 1 MCP)
 ────────────────────────────────────────────────────────
   Type "exit" or "quit" to end the session.
 ```
 
 这些内容立即进入原生历史，不会在 resize 时由应用重新打印。
+其中 Capability Catalog 的工具箱数量来自统一能力仓库，包括尚未激活的 Skill、Subagent 和 MCP 工具箱；
+Runtime 仍只统计当前已加载的组件。
+底部状态栏和 `/status` 显示配置的真实模型名称，不将不同 GPT 或 Gemini 模型改写成固定别名。
+
+`/capabilities` 按命令结果显示组织过的目录、工具箱内容、状态或操作回执，不直接输出内部 JSON。
+目录例如：
+
+```text
+Capability Warehouse
+4 toolboxes
+
+• git-helper  Skill · stored
+  skill:git-helper
+  Safe Git inspection and change workflows.
+
+• subagents  Local · stored
+  local:subagents
+  Delegate independent work to isolated child sessions.
+
+Open a toolbox with /capabilities open <toolbox-id>
+```
 
 ### 空闲输入
 
@@ -72,13 +92,13 @@
 ```text
 
  testcode> /
-   Commands (12 total): (1-5 of 12)
+   Commands (14 total): (1-5 of 14)
    › /clear    Clear terminal screen
      /compact  Compact and summarize conversation context
      /exit     Exit workbench session
      /help     Show help message and shortcuts
      /mode     Show or change safety mode
-   ▼ (7 more below)
+   ▼ (9 more below)
 
  ? for shortcuts                                      model
 ```
@@ -88,16 +108,43 @@
   - `/clear`：清空终端屏幕历史（保持上下文记忆）
   - `/reset` / `/new`：重置对话历史，开启新对话
   - `/compact`：压缩并总结历史对话上下文
-  - `/status`：查看 Session ID、工作区路径、安全模式与模型状态
+  - `/status`：查看 Session ID、工作区路径、安全模式、模型与当前能力状态
   - `/resume`：恢复或选择历史会话
-  - `/mode`、`/skills`、`/tasks`：查看或切换安全模式、Skill 列表和后台任务
+  - `/mode`、`/skills`、`/tasks`：查看或切换安全模式、能力仓库中的 Skill 工具箱和后台任务
   - `/capabilities`：列举、打开、激活、释放和查看统一能力仓库
-  - `/skill <name>`：通过能力仓库打开并以 session scope 激活一个 Skill
+  - `/skill [name]`：通过能力仓库列出或以 session scope 激活一个 Skill
   - `/exit` / `/quit`：退出工作台
 - **窗口滚动与导航**：使用 `↑` / `↓` 移动选中项。选中项超出当前可视区域时，
   窗口自动滚动，并显示 `▲ (N more above)` / `▼ (N more below)`。
 - **自动填充与提交**：按 `Tab` 填充当前命令并加空格；再次按 `Enter` 提交。
 - **取消/关闭**：按 `Esc` 或删除 `/` 关闭补全面板。
+
+#### 二级参数候选
+
+带可选参数的命令统一使用方括号 usage。在一级菜单选中这类命令后按 `Enter`，
+或在命令后输入空格/按 `Tab`，都会进入二级候选：
+
+```text
+ testcode> /mode
+   Options (3 total):
+   › readonly  Reject write operations
+     confirm   Ask before write operations
+     auto      Run allowed tools automatically
+```
+
+- `/mode [mode]`：候选 `readonly`、`confirm`、`auto`。
+- `/resume [session_id]`：候选已保存会话，保留无参数时的完整会话选择器。
+- `/skill [name]`：候选能力仓库中的 Skill 工具箱；无参数时列出 Skill。
+- `/capabilities [operation]`：先候选 `list/open/status/activate/release`，再按操作候选 toolbox、
+  已激活 toolbox 或 activation scope。`activate` 固定先选 scope，再选一个外层 toolbox，
+  不在菜单中拆分展示 toolbox 内的叶子工具。
+  若先选 activation scope，完整 scope 进入输入框后，菜单会立即保留 scope 并切换为
+  可激活 toolbox，不需要再输入空格或确认一次；选中 toolbox 后，命令层打开其 manifest
+  并作为一组激活箱内叶子能力。
+
+二级菜单沿用一级菜单的键位和最多 5 条可见窗口；已知的动态候选只用于补全，
+不会因打开菜单而连接 MCP 或激活能力。
+候选名称和描述会按当前终端宽度裁剪，并预留自动换行边界，每个候选固定只占一行。
 
 
 ### 历史会话选择 (Interactive Session Selector)

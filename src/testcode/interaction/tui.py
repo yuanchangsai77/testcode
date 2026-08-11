@@ -30,6 +30,26 @@ def _display_width(value: str) -> int:
     return width
 
 
+def _truncate_display(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if _display_width(value) <= width:
+        return value
+    if width == 1:
+        return "…"
+    result = ""
+    used = 0
+    for character in value:
+        character_width = 0 if unicodedata.combining(character) else (
+            2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+        )
+        if used + character_width > width - 1:
+            break
+        result += character
+        used += character_width
+    return f"{result}…"
+
+
 def _terminal_size(output=None) -> os.terminal_size:
     output = output or sys.stdout
     try:
@@ -196,6 +216,7 @@ class ComposerState:
     completion_index: int = 0
     completion_dismissed: bool = False
     command_registry: SlashCommandRegistry | None = None
+    command_context: object | None = None
 
     def set_value(self, value: str) -> None:
         self.value = value
@@ -213,10 +234,10 @@ class ComposerState:
         self.completion_dismissed = False
 
     def get_completion_matches(self) -> list[tuple[str, str]]:
-        if self.completion_dismissed or not self.value.startswith("/") or " " in self.value:
+        if self.completion_dismissed or not self.value.startswith("/"):
             return []
         registry = self.command_registry or default_slash_command_registry()
-        return registry.get_completions(self.value)
+        return registry.get_completions(self.value, self.command_context)
 
 
     def edit(self, key: str, history: list[str]) -> str | None:
@@ -242,6 +263,10 @@ class ComposerState:
                     self.value = selected_cmd
                     self.cursor = len(self.value)
                     self.completion_index = 0
+                    if self._advance_to_argument_options(selected_cmd):
+                        return "changed"
+                    return "changed"
+                if self._advance_to_argument_options(selected_cmd):
                     return "changed"
                 return "submit"
             if key == "\x1b":
@@ -298,6 +323,31 @@ class ComposerState:
             self.insert(key)
             return "changed"
         return None
+
+    def _advance_to_argument_options(self, selected: str) -> bool:
+        parts = selected.split()
+        if not parts:
+            return False
+        should_advance = len(parts) == 1 or (
+            len(parts) == 2
+            and parts[0] == "/capabilities"
+            and parts[1] in {"open", "activate"}
+        ) or (
+            len(parts) == 3
+            and parts[:2] == ["/capabilities", "activate"]
+            and parts[2].startswith("--scope=")
+        )
+        if not should_advance:
+            return False
+        registry = self.command_registry or default_slash_command_registry()
+        next_value = f"{selected} "
+        if not registry.get_completions(next_value, self.command_context):
+            return False
+        self.value = next_value
+        self.cursor = len(self.value)
+        self.completion_index = 0
+        self.completion_dismissed = False
+        return True
 
     def _move_history(self, history: list[str], direction: int) -> str | None:
         if not history:
@@ -794,7 +844,8 @@ class TUIConsolePresenter(ConsolePresenter):
 
         visible_matches = matches[window_start : window_start + max_visible]
 
-        header = f"  {Ansi.GRAY}Commands ({total} total):{Ansi.RESET}"
+        menu_name = "Options" if " " in self._composer.value else "Commands"
+        header = f"  {Ansi.GRAY}{menu_name} ({total} total):{Ansi.RESET}"
         if total > max_visible:
             header += f" {Ansi.GRAY}({window_start + 1}-{window_start + len(visible_matches)} of {total}){Ansi.RESET}"
         rows: list[str] = [header]
@@ -802,20 +853,35 @@ class TUIConsolePresenter(ConsolePresenter):
         if window_start > 0:
             rows.append(f"   {Ansi.GRAY}▲ ({window_start} more above){Ansi.RESET}")
 
-        max_cmd_len = max(_display_width(cmd) for cmd, _ in matches)
-        for rel_idx, (cmd, desc) in enumerate(visible_matches):
+        display_matches = [
+            (cmd.rsplit(" ", 1)[-1] if menu_name == "Options" else cmd, desc)
+            for cmd, desc in matches
+        ]
+        visible_display_matches = display_matches[
+            window_start : window_start + max_visible
+        ]
+        columns = max(_terminal_size(self._output).columns, 1)
+        natural_cmd_width = max(_display_width(cmd) for cmd, _ in display_matches)
+        max_cmd_width = max(columns - 5 - 2 - 16 - 1, 8)
+        cmd_width = min(natural_cmd_width, max_cmd_width)
+        description_width = max(columns - 5 - cmd_width - 2 - 1, 0)
+        for rel_idx, (cmd, desc) in enumerate(visible_display_matches):
             actual_idx = window_start + rel_idx
             is_selected = actual_idx == selected_idx
             pointer = "›" if is_selected else " "
+            cmd = _truncate_display(cmd, cmd_width)
+            cmd_padding = " " * max(cmd_width - _display_width(cmd), 0)
+            desc = _truncate_display(desc, description_width)
             if is_selected:
-                cmd_str = f"{Ansi.CYAN}{Ansi.BOLD}{cmd:<{max_cmd_len}}{Ansi.RESET}"
+                cmd_str = f"{Ansi.CYAN}{Ansi.BOLD}{cmd}{cmd_padding}{Ansi.RESET}"
                 desc_str = f"{Ansi.YELLOW}{desc}{Ansi.RESET}"
                 pointer_str = f"{Ansi.CYAN}{Ansi.BOLD}{pointer}{Ansi.RESET}"
             else:
-                cmd_str = f"{Ansi.GRAY}{cmd:<{max_cmd_len}}{Ansi.RESET}"
+                cmd_str = f"{Ansi.GRAY}{cmd}{cmd_padding}{Ansi.RESET}"
                 desc_str = f"{Ansi.GRAY}{desc}{Ansi.RESET}"
                 pointer_str = f"{Ansi.GRAY}{pointer}{Ansi.RESET}"
-            rows.append(f"   {pointer_str} {cmd_str}  {desc_str}")
+            separator = "  " if desc else ""
+            rows.append(f"   {pointer_str} {cmd_str}{separator}{desc_str}")
 
         remaining_below = total - (window_start + len(visible_matches))
         if remaining_below > 0:

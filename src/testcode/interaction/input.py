@@ -44,11 +44,6 @@ class StatusBar:
         if engine and hasattr(engine, "model"):
             model_name = getattr(engine.model, "model", "StubModel")
 
-        if "gemini" in model_name.lower():
-            model_name = "Gemini 3.5 Flash"
-        elif "gpt-4" in model_name.lower() or "gpt-5" in model_name.lower():
-            model_name = "GPT-4o"
-
         if not is_running and active_tasks_count > 0:
             right_text = f"{model_name} · {active_tasks_count} task(s) · /tasks"
         else:

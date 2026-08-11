@@ -63,11 +63,29 @@ def handle_capabilities(cli: CLI, args: list[str], session=None, **kwargs) -> bo
                     scope = value.split("=", 1)[1]
                 else:
                     capability_ids.append(value)
+            toolbox_ids = {
+                entry.id for entry in warehouse.catalog_entries() if entry.kind == "toolbox"
+            }
+            selected_toolboxes = [
+                capability_id for capability_id in capability_ids if capability_id in toolbox_ids
+            ]
+            capability_ids = warehouse.expand_activation_targets(capability_ids)
             records = warehouse.activate(capability_ids, scope=scope, reason="activated by user command")
-            payload = {"activated": [record.capability_id for record in records], "scope": scope}
+            payload = {
+                "activated": [record.capability_id for record in records],
+                "toolboxes": selected_toolboxes,
+                "scope": scope,
+            }
             _sync_session_capabilities(cli, session, warehouse)
         elif operation == "release":
-            payload = {"released": warehouse.release(values or None, reason="released by user command")}
+            selected_toolboxes = [
+                value for value in values if value in warehouse.active_toolbox_ids()
+            ] if values else warehouse.active_toolbox_ids()
+            release_ids = warehouse.expand_release_targets(values) if values else None
+            payload = {
+                "released": warehouse.release(release_ids, reason="released by user command"),
+                "toolboxes": selected_toolboxes,
+            }
             _sync_session_capabilities(cli, session, warehouse)
         else:
             payload = {"error": "usage: /capabilities [list|open <toolbox>|status [toolbox]|activate <id...> [--scope=turn|run|session]|release [id...]]"}
@@ -78,8 +96,11 @@ def handle_capabilities(cli: CLI, args: list[str], session=None, **kwargs) -> bo
 
 
 def handle_skill(cli: CLI, args: list[str], session=None, **kwargs) -> bool:
+    if not args:
+        cli.presenter.show_skills(cli.engine)
+        return False
     if len(args) != 1:
-        cli.presenter.show_capabilities("Skill Activation", {"error": "usage: /skill <name>"})
+        cli.presenter.show_capabilities("Skill Activation", {"error": "usage: /skill [name]"})
         return False
     warehouse = getattr(cli.engine, "capability_warehouse", None)
     if warehouse is None:

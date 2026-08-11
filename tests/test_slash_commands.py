@@ -28,6 +28,10 @@ def test_slash_command_registry_completions():
 
     completions_res = registry.get_completions("/resu")
     assert [name for name, _ in completions_res] == ["/resume"]
+    assert registry.get("/mode").usage == "/mode [mode]"
+    assert registry.get("/resume").usage == "/resume [session_id]"
+    assert registry.get("/skill").usage == "/skill [name]"
+    assert registry.get("/capabilities").usage == "/capabilities [operation]"
 
 
 
@@ -87,6 +91,20 @@ def test_capability_commands_share_the_runtime_warehouse(tmp_path, monkeypatch):
 
     output.seek(0)
     output.truncate(0)
+    app.command_registry.execute(app, "/skills", session=session)
+    assert "Skill Toolboxes" in output.getvalue()
+    assert "2 toolboxes" in output.getvalue()
+    assert "skill:git-helper" in output.getvalue()
+    assert "local:subagents" not in output.getvalue()
+
+    output.seek(0)
+    output.truncate(0)
+    app.command_registry.execute(app, "/skill", session=session)
+    assert "Skill Toolboxes" in output.getvalue()
+    assert "2 toolboxes" in output.getvalue()
+
+    output.seek(0)
+    output.truncate(0)
     app.command_registry.execute(app, "/capabilities open local:subagents", session=session)
     assert "subagent_spawn" in output.getvalue()
 
@@ -98,6 +116,12 @@ def test_capability_commands_share_the_runtime_warehouse(tmp_path, monkeypatch):
     assert session.active_capability_ids == ["local:subagents:subagent_status"]
     assert app.session_store.load(session.session_id).active_capability_ids == session.active_capability_ids
     assert app.engine.tools.definition_for("subagent_status") is not None
+
+    output.seek(0)
+    output.truncate(0)
+    app.command_registry.execute(app, "/status", session=session)
+    assert "Capabilities:" in output.getvalue()
+    assert "1 active · 3 toolboxes" in output.getvalue()
 
     app.command_registry.execute(app, "/capabilities release", session=session)
     assert session.active_capability_ids == []
@@ -120,6 +144,45 @@ def test_skill_command_uses_warehouse_activation(tmp_path, monkeypatch):
     assert app.engine.tools.definition_for("run_tests") is not None
     assert app.engine.capability_warehouse.persisted_capability_ids() == session.active_capability_ids
     assert app.session_store.load(session.session_id).active_capability_ids == session.active_capability_ids
+
+
+def test_user_activation_command_opens_selected_local_toolbox(tmp_path, monkeypatch):
+    from testcode.app import create_app
+
+    monkeypatch.setenv("TESTCODE_MODEL_BASE_URL", "")
+    app = create_app(workspace_root=tmp_path)
+    session = app.session_store.create(cwd=str(tmp_path))
+
+    assert app.engine.capability_warehouse.status()["opened"] == []
+
+    app.command_registry.execute(
+        app,
+        "/capabilities activate --scope=turn local:subagents",
+        session=session,
+    )
+
+    for tool_name in (
+        "subagent_spawn",
+        "subagent_resume",
+        "subagent_run_ready",
+        "subagent_status",
+    ):
+        assert app.engine.tools.definition_for(tool_name) is not None
+    assert app.engine.capability_warehouse.status("local:subagents")["opened"]
+
+    app.command_registry.execute(
+        app,
+        "/capabilities release local:subagents",
+        session=session,
+    )
+
+    for tool_name in (
+        "subagent_spawn",
+        "subagent_resume",
+        "subagent_run_ready",
+        "subagent_status",
+    ):
+        assert app.engine.tools.definition_for(tool_name) is None
 
 
 def test_skill_command_preserves_restored_session_capabilities(tmp_path, monkeypatch):

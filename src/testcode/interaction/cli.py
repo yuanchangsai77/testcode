@@ -42,6 +42,7 @@ class CLI:
             self.presenter.prompt_box._composer.command_registry = self.command_registry
         if hasattr(self.presenter, "_composer"):
             self.presenter._composer.command_registry = self.command_registry
+            self.presenter._composer.command_context = self
         self.active_session = None
 
 

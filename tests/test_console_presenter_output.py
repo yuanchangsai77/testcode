@@ -1,5 +1,6 @@
 import os
 import re
+from types import SimpleNamespace
 
 from testcode.interaction.presenter import ConsolePresenter
 from testcode.interaction.terminal import Spinner, colored_border
@@ -197,6 +198,14 @@ def test_show_session_state(capsys):
                     self._skills = {"s1": object()}
             self.skills_registry = DummyRegistry()
             self.mcp_server_count = 1
+            self.capability_warehouse = SimpleNamespace(
+                catalog_entries=lambda: [
+                    SimpleNamespace(kind="toolbox", source="skill"),
+                    SimpleNamespace(kind="toolbox", source="local"),
+                    SimpleNamespace(kind="toolbox", source="mcp"),
+                    SimpleNamespace(kind="tool", source="local"),
+                ]
+            )
             class DummyGuardrails:
                 def __init__(self):
                     class DummyPolicy:
@@ -217,8 +226,98 @@ def test_show_session_state(capsys):
     assert "2 Context Loaders" in plain_output
     assert "3 Tools" in plain_output
     assert "Capability Catalog:" in plain_output
-    assert "1 Skill" in plain_output
-    assert "1 MCP Server" in plain_output
+    assert "3 Toolboxes (1 Skill · 1 Local · 1 MCP)" in plain_output
+
+
+def test_show_capabilities_formats_catalog_without_raw_json(capsys):
+    presenter = ConsolePresenter()
+    presenter.show_capabilities(
+        "Capability Warehouse",
+        {
+            "entries": [
+                {
+                    "id": "skill:git-helper",
+                    "name": "git-helper",
+                    "source": "skill",
+                    "description": "Safe Git workflows.",
+                    "enabled": True,
+                    "lifecycle_state": "stored",
+                },
+                {
+                    "id": "mcp:maps",
+                    "name": "maps",
+                    "source": "mcp",
+                    "description": "Map services.",
+                    "enabled": False,
+                    "lifecycle_state": "stored",
+                },
+            ]
+        },
+    )
+
+    output = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "2 toolboxes" in output
+    assert "git-helper  Skill · stored" in output
+    assert "maps  MCP · disabled" in output
+    assert "/capabilities open <toolbox-id>" in output
+    assert '"entries"' not in output
+
+
+def test_show_capabilities_formats_manifest_status_and_result(capsys):
+    presenter = ConsolePresenter()
+    presenter.show_capabilities(
+        "Capability Warehouse",
+        {
+            "toolbox_id": "local:subagents",
+            "state": "ready",
+            "items": [
+                {
+                    "id": "local:subagents:subagent_status",
+                    "name": "subagent_status",
+                    "risk": "read",
+                    "description": "Inspect child sessions.",
+                }
+            ],
+        },
+    )
+    presenter.show_capabilities(
+        "Capability Warehouse",
+        {
+            "catalog_count": 4,
+            "entries": [],
+            "opened": [{"toolbox_id": "local:subagents", "name": "subagents", "state": "ready", "item_count": 4}],
+            "active": [{"capability_id": "local:subagents:subagent_status", "scope": "session", "state": "activated"}],
+            "released": [],
+            "budgets": {
+                "max_active_capabilities": 8,
+                "active_toolboxes": 1,
+                "active_capabilities": 1,
+                "max_active_schema_chars": 40000,
+                "active_schema_chars": 500,
+            },
+        },
+    )
+    presenter.show_capabilities(
+        "Capability Warehouse",
+        {"activated": ["local:subagents:subagent_status"], "scope": "session"},
+    )
+    presenter.show_capabilities(
+        "Capability Warehouse",
+        {
+            "activated": [f"mcp:amap:tool-{index}" for index in range(15)],
+            "toolboxes": ["mcp:amap"],
+            "scope": "session",
+        },
+    )
+
+    output = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "subagents  ready" in output
+    assert "subagent_status  read" in output
+    assert "Catalog 4 · Opened 1 · Active leaves 1" in output
+    assert "Budget 1/8 toolboxes · 1 leaf capability · 500/40000 schema chars" in output
+    assert "Activated 1 capability · scope: session" in output
+    assert "Activated 1 toolbox · 15 leaf capabilities · scope: session" in output
+    assert "mcp:amap:tool-0" not in output
 
 
 def test_show_tool_start_and_end(capsys):
@@ -264,13 +363,13 @@ def test_presenter_show_status_bar_and_help(capsys):
     presenter.show_status_bar(engine=engine, active_tasks_count=3)
     output = capsys.readouterr().out
     assert "shortcuts" in output
-    assert "GPT-4o" in output
+    assert "gpt-4-turbo" in output
     assert "3 task(s)" in output
     
     presenter.show_status_bar(engine=engine, active_tasks_count=0)
     output_zero = capsys.readouterr().out
     assert "shortcuts" in output_zero
-    assert "GPT-4o" in output_zero
+    assert "gpt-4-turbo" in output_zero
     assert "task(s)" not in output_zero
     assert "/tasks" not in output_zero
     

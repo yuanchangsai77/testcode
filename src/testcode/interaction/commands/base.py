@@ -14,6 +14,7 @@ class SlashCommand:
     description: str
     usage: str = ""
     handler: Callable[..., bool | None] | None = None
+    argument_completer: Callable[[CLI, str], list[tuple[str, str]]] | None = None
 
 
 class SlashCommandRegistry:
@@ -35,9 +36,15 @@ class SlashCommandRegistry:
                 unique_cmds[cmd.name] = cmd
         return sorted(unique_cmds.values(), key=lambda c: c.name)
 
-    def get_completions(self, prefix: str) -> list[tuple[str, str]]:
+    def get_completions(self, prefix: str, context: CLI | None = None) -> list[tuple[str, str]]:
         if not prefix.startswith("/"):
             return []
+        command_name, separator, remainder = prefix.partition(" ")
+        if separator:
+            command = self.get(command_name)
+            if command is None or command.argument_completer is None or context is None:
+                return []
+            return command.argument_completer(context, remainder)
         prefix_lower = prefix.lower()
         completions: list[tuple[str, str]] = []
         for cmd in self.list_commands():

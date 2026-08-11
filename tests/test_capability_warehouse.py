@@ -73,13 +73,14 @@ def test_generic_local_toolbox_supports_multiple_or_no_workflow_instructions():
 @dataclass
 class FakeSource:
     tools: tuple[str, ...] = ("lookup",)
+    toolbox_id: str = "fake:maps"
     open_calls: int = 0
 
     def catalog_entries(self):
         return (
             CapabilityEntry(
-                id="fake:maps",
-                name="maps",
+                id=self.toolbox_id,
+                name=self.toolbox_id.split(":", 1)[-1],
                 kind="toolbox",
                 source="fake",
                 description="Map lookup and routes",
@@ -88,19 +89,19 @@ class FakeSource:
         )
 
     def owns_toolbox(self, toolbox_id):
-        return toolbox_id == "fake:maps"
+        return toolbox_id == self.toolbox_id
 
     def open_toolbox(self, toolbox_id):
         self.open_calls += 1
         return CapabilityManifest(
             toolbox_id=toolbox_id,
-            name="maps",
+            name=self.toolbox_id.split(":", 1)[-1],
             source="fake",
             state="ready",
             origin="local",
             items=tuple(
                 ManifestItem(
-                    id=f"fake:maps:{name}",
+                    id=f"{self.toolbox_id}:{name}",
                     toolbox_id=toolbox_id,
                     name=name,
                     kind="tool",
@@ -114,7 +115,7 @@ class FakeSource:
         name = capability_id.rsplit(":", 1)[1]
         return ActivatedCapability(
             id=capability_id,
-            toolbox_id="fake:maps",
+            toolbox_id=self.toolbox_id,
             kind="tool",
             tool=_tool(name),
         )
@@ -140,6 +141,36 @@ def test_catalog_lists_described_toolboxes_without_opening_them():
     assert status["lifecycle_state"] == "stored"
     assert status["health_state"] == "unknown"
     assert status["connection_state"] == "not_applicable"
+
+
+def test_opened_items_exposes_only_already_opened_manifest_items():
+    source = FakeSource(tools=("lookup", "route"))
+    warehouse, _registry = _warehouse(source)
+
+    assert warehouse.opened_items() == []
+
+    warehouse.open_toolbox("fake:maps")
+
+    assert [item.id for item in warehouse.opened_items()] == [
+        "fake:maps:lookup",
+        "fake:maps:route",
+    ]
+    assert source.open_calls == 1
+
+
+def test_activation_target_expands_one_toolbox_to_its_manifest_items():
+    source = FakeSource(tools=("lookup", "route"))
+    warehouse, _registry = _warehouse(source)
+
+    capability_ids = warehouse.expand_activation_targets(["fake:maps"])
+
+    assert capability_ids == ["fake:maps:lookup", "fake:maps:route"]
+    assert source.open_calls == 1
+
+    warehouse.activate(capability_ids)
+
+    assert warehouse.active_toolbox_ids() == ["fake:maps"]
+    assert warehouse.expand_release_targets(["fake:maps"]) == capability_ids
 
 
 def test_mcp_declared_capabilities_form_the_outer_description():
@@ -256,16 +287,23 @@ def test_activation_rejects_duplicate_tool_names_within_one_batch():
 
 
 def test_failed_activation_does_not_update_existing_scope_or_reason():
-    warehouse, _ = _warehouse(
-        FakeSource(tools=("one", "two")),
+    logger = InMemoryLogger()
+    warehouse = CapabilityWarehouse(
+        [
+            FakeSource(tools=("one",)),
+            FakeSource(tools=("two",), toolbox_id="other:routes"),
+        ],
+        ToolRegistry(logger),
+        logger=logger,
         max_active_capabilities=1,
     )
     warehouse.open_toolbox("fake:maps")
+    warehouse.open_toolbox("other:routes")
     warehouse.activate(["fake:maps:one"], scope="run", reason="initial")
 
     with pytest.raises(ValueError, match="activation limit exceeded"):
         warehouse.activate(
-            ["fake:maps:one", "fake:maps:two"],
+            ["fake:maps:one", "other:routes:two"],
             scope="session",
             reason="failed update",
         )
@@ -321,18 +359,46 @@ def test_session_capability_ids_restore_into_a_fresh_warehouse():
     assert restored_registry.definition_for("lookup") is not None
 
 
-def test_activation_budget_rejects_excess_leaf_tools():
-    warehouse, registry = _warehouse(
-        FakeSource(tools=("one", "two")),
+def test_activation_budget_counts_toolboxes_not_leaf_tools():
+    logger = InMemoryLogger()
+    registry = ToolRegistry(logger)
+    warehouse = CapabilityWarehouse(
+        [
+            FakeSource(tools=("one", "two")),
+            FakeSource(tools=("three",), toolbox_id="other:routes"),
+        ],
+        registry,
+        logger=logger,
         max_active_capabilities=1,
     )
     warehouse.open_toolbox("fake:maps")
+    warehouse.open_toolbox("other:routes")
+
+    warehouse.activate(["fake:maps:one", "fake:maps:two"])
+
+    assert registry.definition_for("one") is not None
+    assert registry.definition_for("two") is not None
 
     with pytest.raises(ValueError, match="activation limit exceeded"):
-        warehouse.activate(["fake:maps:one", "fake:maps:two"])
+        warehouse.activate(["other:routes:three"])
 
-    assert registry.definition_for("one") is None
-    assert registry.definition_for("two") is None
+    assert registry.definition_for("three") is None
+
+
+def test_one_large_toolbox_uses_one_count_unit_but_keeps_leaf_schema_budget():
+    tool_names = tuple(f"tool_{index}" for index in range(15))
+    warehouse, registry = _warehouse(
+        FakeSource(tools=tool_names),
+        max_active_capabilities=8,
+    )
+    warehouse.open_toolbox("fake:maps")
+
+    warehouse.activate([f"fake:maps:{name}" for name in tool_names])
+
+    assert all(registry.definition_for(name) is not None for name in tool_names)
+    budgets = warehouse.status()["budgets"]
+    assert budgets["active_toolboxes"] == 1
+    assert budgets["active_capabilities"] == 15
 
 
 def test_only_session_scoped_skills_are_selected_for_persistence(tmp_path, monkeypatch):
