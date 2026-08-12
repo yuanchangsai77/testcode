@@ -461,15 +461,15 @@ class CapabilityWarehouse:
         records = [
             record for record in self._active.values() if record.toolbox_id == manifest.toolbox_id
         ]
-        failures = [record for record in records if record.last_success is False]
-        if any(
+        service_failures = [
+            record for record in records
+            if record.last_success is False and (
             (record.last_error_code or "").startswith("mcp_transport_")
             or record.last_error_code in {"mcp_protocol_error", "mcp_server_unavailable"}
-            for record in failures
-        ):
+            )
+        ]
+        if service_failures:
             return "unavailable"
-        if failures and manifest.state == "ready":
-            return "degraded"
         return manifest.state
 
     def _connection_state(

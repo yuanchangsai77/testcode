@@ -59,6 +59,17 @@ class ModelPromptBuilder:
             "- Send feedback or a failed verification back to the same child with subagent_resume. Do not spawn a replacement child for the same artifact unless isolation or independent parallel exploration is required.",
         ]
 
+        runtime_model = session.request.metadata.get("runtime_model")
+        if isinstance(runtime_model, str) and runtime_model:
+            system_lines.extend(
+                [
+                    "",
+                    "### Runtime Facts:",
+                    f"- Configured model identifier: {runtime_model}",
+                    "- Treat this identifier as authoritative when asked which model is running.",
+                ]
+            )
+
         subagent = session.request.metadata.get("subagent")
         if isinstance(subagent, dict) and subagent.get("role") == "subagent":
             system_lines.extend(
@@ -68,10 +79,20 @@ class ModelPromptBuilder:
                     "- You are already a subagent. Complete the current delegated user request directly.",
                     "- The current delegated request overrides inherited conversational intent when they differ.",
                     "- Do not create or run another subagent.",
-                    "- Structured workspace writes such as patch are pre-authorized for this run.",
+                    "- Tool effects are limited by the delegated task contract below; never infer broader permission from the task wording.",
                     "- Interactive approval is unavailable. If execute, test, network, or destructive work is required and blocked, report the blocker once and stop.",
                 ]
             )
+            delegated_task = session.request.metadata.get("delegated_task")
+            if isinstance(delegated_task, dict):
+                system_lines.extend(
+                    [
+                        f"- task_id: {delegated_task.get('task_id', '')}",
+                        f"- allowed_effects: {', '.join(delegated_task.get('allowed_effects', []))}",
+                        f"- allowed_resources: {', '.join(delegated_task.get('allowed_resources', []))}",
+                        f"- required_evidence: {', '.join(delegated_task.get('required_evidence', []))}",
+                    ]
+                )
 
         active_instructions = getattr(session, "active_instructions", [])
         if active_instructions:

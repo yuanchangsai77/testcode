@@ -1320,6 +1320,47 @@ def test_engine_recovers_read_duplicate_loop_for_file_change_request(tmp_path):
     assert summary.tool_results[-1].success is True
 
 
+def test_engine_does_not_mask_earlier_unresolved_subagent_blocker():
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine._finish(
+        ExecutionSummary(
+            "patched unrelated file",
+            [
+                ToolResult("subagent_run_ready", False, "child blocked", "subagent_blocked"),
+                ToolResult("patch", True, "applied"),
+            ],
+        )
+    )
+
+    assert summary.outcome == "blocked"
+
+
+def test_progress_guard_is_advisory_when_model_legitimately_finishes():
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine._finish(
+        ExecutionSummary(
+            "No file change is needed because the requested state already exists.",
+            [ToolResult("progress_guard", False, "explain or write", "progress_required")],
+        )
+    )
+
+    assert summary.outcome == "completed"
+
+
 def test_blocked_write_does_not_reset_completed_read_context(tmp_path):
     target = tmp_path / "config.py"
     target.write_text("API_KEY = None\n", encoding="utf-8")
@@ -1550,6 +1591,41 @@ def test_session_store_lists_latest_first(tmp_path):
     assert sessions[0].preview == "second prompt"
 
 
+def test_session_store_merges_stale_concurrent_snapshots(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd=str(tmp_path))
+    first = store.load(session.session_id)
+    second = store.load(session.session_id)
+    first.messages.append({"role": "assistant", "content": "first writer"})
+    first.active_capability_ids = ["cap:first"]
+    store.save(first)
+    second.messages.append({"role": "assistant", "content": "second writer"})
+    second.active_capability_ids = ["cap:second"]
+    store.save(second)
+
+    loaded = store.load(session.session_id)
+
+    assert {item["content"] for item in loaded.messages} == {"first writer", "second writer"}
+    assert set(loaded.active_capability_ids) == {"cap:first", "cap:second"}
+    assert loaded.revision > first.revision
+
+
+def test_session_store_stale_snapshot_does_not_reopen_terminal_session(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd=str(tmp_path))
+    closing = store.load(session.session_id)
+    stale = store.load(session.session_id)
+    closing.status = "closed"
+    store.save(closing)
+    stale.messages.append({"role": "assistant", "content": "late writer"})
+    store.save(stale)
+
+    loaded = store.load(session.session_id)
+
+    assert loaded.status == "closed"
+    assert loaded.messages[-1]["content"] == "late writer"
+
+
 def test_session_store_loads_legacy_session_without_run_ids(tmp_path):
     store = SessionStore(base_dir=tmp_path)
     session = store.create(cwd="/repo", messages=[{"role": "user", "content": "hello"}])
@@ -1656,6 +1732,46 @@ def test_cli_creates_one_run_directory_per_request(tmp_path):
     assert (tmp_path / "runs" / second_run_id / "events.jsonl").exists()
     assert "first" in (tmp_path / "runs" / first_run_id / "details.log").read_text(encoding="utf-8")
     assert "second" in (tmp_path / "runs" / second_run_id / "details.log").read_text(encoding="utf-8")
+
+
+def test_persist_run_does_not_finalize_an_already_finalized_foreground_run(tmp_path):
+    class EchoEngine:
+        tools = None
+
+        def execute(self, request):
+            return ExecutionSummary(f"echo:{request.prompt}", [], outcome="completed")
+
+    class CountingLogger(InMemoryLogger):
+        finalize_count = 0
+
+        def finalize(self, request, summary):
+            self.finalize_count += 1
+            super().finalize(request, summary)
+
+    store = SessionStore(base_dir=tmp_path)
+    logger = CountingLogger(base_dir=str(tmp_path / "runs"))
+    cli = CLI(
+        engine=EchoEngine(),
+        presenter=ConsolePresenter(),
+        logger=logger,
+        session_store=store,
+    )
+    session = store.create(cwd=str(tmp_path))
+    request = UserRequest(
+        prompt="once",
+        cwd=str(tmp_path),
+        metadata={"session_id": session.session_id},
+    )
+
+    summary = cli.run(request)
+    finalized_run_id = logger.last_run_id
+    cli.persist_run(session, request.prompt, summary, status="closed")
+
+    stored = store.load(session.session_id)
+    assert logger.finalize_count == 1
+    assert logger.last_run_id == finalized_run_id
+    assert stored.run_ids == [finalized_run_id]
+    assert len(stored.trace) == 1
 
 
 def test_chat_persists_run_ids_on_session(tmp_path, monkeypatch):

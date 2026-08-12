@@ -13,6 +13,7 @@ class PolicyDecision:
     requires_confirmation: bool
     reason: str
     risk_level: str
+    error_code: str = ""
 
 
 class DefaultPolicy:
@@ -24,13 +25,23 @@ class DefaultPolicy:
     auto_allowed_risks = {"read", "write"}
     auto_confirm_risks = {"execute", "test", "network", "destructive", "confirm"}
 
-    def __init__(self, mode: str = "confirm") -> None:
+    def __init__(self, mode: str = "confirm", *, allowed_effects: set[str] | None = None) -> None:
         if mode not in self.valid_modes:
             raise ValueError(f"unknown safety mode: {mode}")
         self.mode = mode
+        self.allowed_effects = frozenset(allowed_effects) if allowed_effects is not None else None
 
     def evaluate(self, action: ToolAction, definition: ToolDefinition | None = None) -> PolicyDecision:
         risk_level = self._effective_risk(action, definition)
+
+        if self.allowed_effects is not None and risk_level not in self.allowed_effects:
+            return PolicyDecision(
+                False,
+                False,
+                f"tool '{action.name}' has effect '{risk_level}' outside the delegated task contract",
+                risk_level,
+                "delegated_effect_not_allowed",
+            )
 
         if self.mode == "readonly":
             if risk_level in self.read_risks:

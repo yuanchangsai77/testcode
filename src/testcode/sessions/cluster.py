@@ -45,6 +45,11 @@ class ClusterMember:
     task_summary: str = ""
     session_image_id: str = ""
     attempt: int = 1
+    task_id: str = ""
+    allowed_effects: list[str] = field(default_factory=lambda: ["read"])
+    allowed_resources: list[str] = field(default_factory=lambda: ["."])
+    required_evidence: list[str] = field(default_factory=lambda: ["response"])
+    approval_policy: str = "block"
 
 
 @dataclass(slots=True)
@@ -57,6 +62,12 @@ class SharedStateEntry:
     revision: int
     artifact_ref: str = ""
     metadata: dict[str, object] = field(default_factory=dict)
+    task_id: str = ""
+    attempt: int = 1
+    lifecycle_state: str = "active"
+    trust_class: str = "untrusted_observation"
+    validation_state: str = "unchecked"
+    supersedes: str = ""
 
 
 @dataclass(slots=True)
@@ -302,6 +313,12 @@ class SessionClusterStore:
                 revision=cluster.revision + 1,
                 artifact_ref=artifact_ref,
                 metadata=metadata,
+                task_id=str(metadata.get("task_id", "")),
+                attempt=int(metadata.get("attempt", 1)),
+                lifecycle_state=str(metadata.get("lifecycle_state", "active")),
+                trust_class=str(metadata.get("trust_class", "untrusted_observation")),
+                validation_state=str(metadata.get("validation_state", "unchecked")),
+                supersedes=str(metadata.get("supersedes", "")),
             )
             cluster.shared_state.append(entry)
             created.append(entry)
@@ -342,6 +359,13 @@ class SessionClusterStore:
                 return
             member.state = state
             member.updated_at = _timestamp()
+            previous = next(
+                (
+                    item for item in reversed(cluster.shared_state)
+                    if item.author_session_id == session_id
+                ),
+                None,
+            )
             entry = SharedStateEntry(
                 entry_id=_new_id("state"),
                 author_session_id=session_id,
@@ -351,6 +375,12 @@ class SessionClusterStore:
                 revision=cluster.revision + 1,
                 artifact_ref=artifact_ref,
                 metadata=metadata,
+                task_id=member.task_id,
+                attempt=attempt,
+                lifecycle_state=state,
+                trust_class=str(metadata.get("trust_class", "untrusted_observation")),
+                validation_state=str(metadata.get("validation_state", "validated")),
+                supersedes=previous.entry_id if previous is not None else "",
             )
             cluster.shared_state.append(entry)
             created.append(entry)

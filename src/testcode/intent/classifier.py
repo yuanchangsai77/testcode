@@ -92,22 +92,49 @@ CHINESE_PROJECT_TARGET_TERMS = {
     "目录",
 }
 CHINESE_FILE_CHANGE_TERMS = {
-    "编辑",
-    "构建",
-    "创建",
-    "删除",
-    "生成",
-    "实现",
+    "重命名",
+    "替换",
     "新增",
     "修改",
+    "生成",
+    "删除",
+    "实现",
+    "重构",
+    "升级",
+    "修复",
+    "创建",
+    "构建",
+    "编辑",
     "移动",
     "移除",
-    "替换",
-    "重命名",
-    "修复",
-    "升级",
-    "重构",
+    "写",
 }
+CHINESE_NEGATED_CHANGE_TERMS = {
+    "禁止修改",
+    "不要修改",
+    "请勿修改",
+    "无需修改",
+    "不能修改",
+    "不得修改",
+    "禁止编辑",
+    "不要编辑",
+    "请勿编辑",
+    "无需编辑",
+    "不能编辑",
+    "不得编辑",
+    "禁止写入",
+    "不要写入",
+    "禁止创建",
+    "不要创建",
+    "禁止删除",
+    "不要删除",
+    "禁止生成",
+    "不要生成",
+}
+CHINESE_NEGATED_CHANGE_CLAUSE_RE = re.compile(
+    r"(?:禁止|不要|请勿|无需|不能|不得)"
+    r"(?:(?![，,。；;！!？?]|但是|但|不过|然而).)*"
+)
 CODE_PATH_RE = re.compile(
     r"(?:^|[\s'\"`])(?:\.?\.?/)?[^\s'\"`]+\.(?:py|js|ts|tsx|jsx|go|rs|java|kt|toml|yaml|yml|json|md)(?:$|[\s'\"`])",
     re.IGNORECASE,
@@ -168,6 +195,12 @@ class RequestIntentClassifier:
 
     def _contains_change_action(self, prompt: str) -> bool:
         lowered = prompt.casefold()
+        # 否定作用域覆盖同一分句中的并列动作；分句后的独立交付要求仍参与判断。
+        # 例如“不要修改或删除文件，只做审查”是只读，而
+        # “无需修改源码，直接写报告”仍要求产生文件结果。
+        lowered = CHINESE_NEGATED_CHANGE_CLAUSE_RE.sub("", lowered)
+        for term in sorted(CHINESE_NEGATED_CHANGE_TERMS, key=len, reverse=True):
+            lowered = lowered.replace(term, "")
         return (
             self._contains_english(lowered, ENGLISH_FILE_CHANGE_TERMS)
             or self._contains_chinese(lowered, CHINESE_FILE_CHANGE_TERMS)

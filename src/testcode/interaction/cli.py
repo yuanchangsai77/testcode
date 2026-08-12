@@ -61,7 +61,7 @@ class CLI:
             if self.logger is not None:
                 self.logger.record("run.error", {"message": "subagent execution failed"})
             raise
-        if self.logger is not None:
+        if self.logger is not None and not request.metadata.get("defer_finalize"):
             self.logger.finalize(request, summary)
         return summary
 
@@ -88,6 +88,23 @@ class CLI:
         }
         if expected != actual:
             raise RuntimeError("delegated subagent request does not match its execution grant")
+        contract = request.metadata.get("delegated_task")
+        if not isinstance(contract, dict):
+            raise RuntimeError("delegated subagent request is missing its task contract")
+        if frozenset(contract.get("allowed_effects", [])) != grant.allowed_effects:
+            raise RuntimeError("delegated subagent effects do not match the execution grant")
+        if tuple(contract.get("allowed_resources", [])) != grant.allowed_resources:
+            raise RuntimeError("delegated subagent resources do not match the execution grant")
+        if grant.task_id and contract.get("task_id") != grant.task_id:
+            raise RuntimeError("delegated subagent task id does not match the execution grant")
+        if grant.objective and (
+            request.prompt != grant.objective or contract.get("objective") != grant.objective
+        ):
+            raise RuntimeError("delegated subagent objective does not match the execution grant")
+        if grant.required_evidence and tuple(contract.get("required_evidence", [])) != grant.required_evidence:
+            raise RuntimeError("delegated subagent evidence contract does not match the execution grant")
+        if grant.approval_policy and contract.get("approval_policy") != grant.approval_policy:
+            raise RuntimeError("delegated subagent approval policy does not match the execution grant")
 
     def chat(
         self,
@@ -185,6 +202,8 @@ class CLI:
                 self._attach_last_run_id(session)
                 self.session_store.save(session)
             try:
+                if session is not None and session.cluster_id and self.subagent_coordinator is not None:
+                    self.subagent_coordinator.update_member_state(session, "running")
                 summary = self._run_once(request)
                 conversation.append({"role": "user", "content": prompt})
                 conversation.append({"role": "assistant", "content": summary.final_message})
@@ -199,6 +218,11 @@ class CLI:
                         session.trace.append(run_summary)
                     self._attach_last_run_id(session)
                     self.session_store.save(session)
+                    if session.cluster_id and self.subagent_coordinator is not None:
+                        self.subagent_coordinator.update_member_state(
+                            session,
+                            self._cluster_state_for_outcome(summary.outcome),
+                        )
             except KeyboardInterrupt:
                 if session is not None:
                     run_summary = getattr(self.logger, "last_run_summary", None)
@@ -206,6 +230,8 @@ class CLI:
                         session.trace.append(run_summary)
                     self._attach_last_run_id(session)
                     self.session_store.save(session)
+                    if session.cluster_id and self.subagent_coordinator is not None:
+                        self.subagent_coordinator.update_member_state(session, "cancelled")
                 prompt = None
                 continue
             prompt = None
@@ -246,6 +272,16 @@ class CLI:
     ) -> None:
         if self.session_store is None:
             return
+        # Normal foreground runs are finalized by _run_once. Background subagents
+        # deliberately defer that step until the runner has validated the final
+        # outcome, leaving the logger's run open here.
+        if self.logger is not None and getattr(self.logger, "run_dir", None) is not None:
+            request = UserRequest(
+                prompt=prompt,
+                cwd=session.cwd,
+                metadata={"session_id": session.session_id},
+            )
+            self.logger.finalize(request, summary)
         session.messages.extend(
             [
                 {"role": "user", "content": prompt},
@@ -262,6 +298,15 @@ class CLI:
         self._attach_last_run_id(session)
         try:
             self.session_store.save(session)
+            if (
+                session.session_role == "primary"
+                and session.cluster_id
+                and self.subagent_coordinator is not None
+            ):
+                self.subagent_coordinator.update_member_state(
+                    session,
+                    self._cluster_state_for_outcome(summary.outcome),
+                )
             if status == "closed":
                 self._print_exit_info(session)
         finally:
@@ -270,6 +315,16 @@ class CLI:
                 reset_state = getattr(tools, "reset_state", None)
                 if callable(reset_state):
                     reset_state()
+
+    @staticmethod
+    def _cluster_state_for_outcome(outcome: str) -> str:
+        if outcome == "completed":
+            return "completed"
+        if outcome in {"blocked", "stalled", "exhausted"}:
+            return "blocked"
+        if outcome in {"interrupted", "cancelled"}:
+            return "cancelled"
+        return "failed"
 
     def choose_session(self, prompt: str = "Select a session to resume") -> StoredSession | None:
         sessions = self.list_sessions()

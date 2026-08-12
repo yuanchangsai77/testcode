@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+from typing import Iterator
 
 from ..types import SessionRecord, SessionResumeState, SessionRunTrace, SessionTurnTrace, StoredSession
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 
 class SessionStore:
@@ -47,22 +55,21 @@ class SessionStore:
     def save(self, session: StoredSession) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         path = self.base_dir / f"{session.session_id}.json"
-        if path.exists() and not session.cluster_id:
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                existing = {}
-            persisted_cluster_id = existing.get("cluster_id") if isinstance(existing, dict) else ""
-            if isinstance(persisted_cluster_id, str) and persisted_cluster_id:
-                session.cluster_id = persisted_cluster_id
-                session.parent_session_id = str(existing.get("parent_session_id", session.parent_session_id))
-                session.session_role = str(existing.get("session_role", session.session_role))
-                session.launch_source = str(existing.get("launch_source", session.launch_source))
-                session.session_image_id = str(existing.get("session_image_id", session.session_image_id))
-        updated_at = self._timestamp()
-        session.updated_at = updated_at
-        session.resume_state = self._build_resume_state(session)
-        payload = {
+        with _locked(path.with_suffix(".lock")):
+            existing: dict[str, object] = {}
+            if path.exists():
+                try:
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        existing = loaded
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    existing = {}
+            self._merge_stale_session(session, existing)
+            updated_at = self._timestamp()
+            session.updated_at = updated_at
+            session.revision = int(existing.get("revision", 0)) + 1
+            session.resume_state = self._build_resume_state(session)
+            payload = {
             "session_id": session.session_id,
             "cwd": session.cwd,
             "created_at": session.created_at,
@@ -78,12 +85,13 @@ class SessionStore:
             "session_role": session.session_role,
             "launch_source": session.launch_source,
             "session_image_id": session.session_image_id,
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self._write_trace_log(session)
-        replay_path = self.base_dir / f"{session.session_id}.replay.log"
-        if replay_path.exists():
-            replay_path.unlink()
+            "revision": session.revision,
+            }
+            _atomic_text_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            self._write_trace_log(session)
+            replay_path = self.base_dir / f"{session.session_id}.replay.log"
+            if replay_path.exists():
+                replay_path.unlink()
 
     def load(self, session_id: str) -> StoredSession | None:
         if not self._valid_session_id(session_id):
@@ -113,7 +121,48 @@ class SessionStore:
             session_role=str(payload.get("session_role", "primary")),
             launch_source=str(payload.get("launch_source", "direct")),
             session_image_id=str(payload.get("session_image_id", "")),
+            revision=self._safe_int(payload.get("revision"), 0),
         )
+
+    def _merge_stale_session(self, session: StoredSession, existing: dict[str, object]) -> None:
+        if not existing:
+            return
+        existing_revision = self._safe_int(existing.get("revision"), 0)
+        if not session.cluster_id:
+            session.cluster_id = str(existing.get("cluster_id", ""))
+            session.parent_session_id = str(existing.get("parent_session_id", session.parent_session_id))
+            session.session_role = str(existing.get("session_role", session.session_role))
+            session.launch_source = str(existing.get("launch_source", session.launch_source))
+            session.session_image_id = str(existing.get("session_image_id", session.session_image_id))
+        if session.revision >= existing_revision:
+            return
+        session.cwd = str(existing.get("cwd", session.cwd))
+        session.created_at = str(existing.get("created_at", session.created_at))
+        session.cluster_id = str(existing.get("cluster_id", session.cluster_id))
+        session.parent_session_id = str(existing.get("parent_session_id", session.parent_session_id))
+        session.session_role = str(existing.get("session_role", session.session_role))
+        session.launch_source = str(existing.get("launch_source", session.launch_source))
+        session.session_image_id = str(existing.get("session_image_id", session.session_image_id))
+        persisted_status = str(existing.get("status", "active"))
+        terminal_statuses = {"blocked", "cancelled", "closed", "completed", "failed"}
+        if persisted_status in terminal_statuses:
+            session.status = persisted_status
+        persisted_messages = self._normalize_messages(existing.get("messages", []))
+        for message in persisted_messages:
+            if message not in session.messages:
+                session.messages.append(message)
+        persisted_runs = self._normalize_run_ids(existing.get("run_ids", []))
+        session.run_ids = list(dict.fromkeys([*persisted_runs, *session.run_ids]))
+        persisted_capabilities = self._string_list(existing.get("active_capability_ids", []))
+        session.active_capability_ids = list(
+            dict.fromkeys([*persisted_capabilities, *session.active_capability_ids])
+        )
+        persisted_trace = self._normalize_trace(existing.get("trace", []))
+        known_run_ids = {item.run_id for item in session.trace}
+        session.trace = [
+            *[item for item in persisted_trace if item.run_id not in known_run_ids],
+            *session.trace,
+        ]
 
     def list_sessions(self) -> list[SessionRecord]:
         if not self.base_dir.exists():
@@ -314,7 +363,7 @@ class SessionStore:
                 lines.append(f"- tools: {', '.join(trace.tool_names)}")
             lines.append(f"- final: {trace.final_message}")
             lines.append("")
-        trace_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _atomic_text_write(trace_path, "\n".join(lines) + "\n")
 
     def _build_resume_state(self, session: StoredSession) -> SessionResumeState:
         trace = session.trace[-1] if session.trace else None
@@ -380,3 +429,23 @@ class SessionStore:
             .replace(".", "")
         )
         return f"{compact}-{uuid4().hex[:8]}"
+
+
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _atomic_text_write(path: Path, content: str) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)

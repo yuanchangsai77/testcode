@@ -16,6 +16,18 @@ def _spawn_tool() -> SimpleTool:
         coordinator, _, parent, error = _runtime_state(context)
         if error is not None:
             return error("subagent_spawn")
+        warehouse = context.state.get("capability_warehouse")
+        active_capability_ids = []
+        if warehouse is not None:
+            active_capability_ids = [
+                item for item in warehouse.active_ids()
+                if not item.startswith("local:subagents:")
+            ]
+        requested_capabilities = action.arguments.get("active_capability_ids", [])
+        if isinstance(requested_capabilities, list):
+            active_capability_ids.extend(
+                item for item in requested_capabilities if isinstance(item, str) and item
+            )
         try:
             child = coordinator.launch_subagent(
                 parent,
@@ -24,6 +36,11 @@ def _spawn_tool() -> SimpleTool:
                     task_summary=str(action.arguments["task"]),
                     cwd=str(action.arguments.get("cwd", "")),
                     image_id=str(action.arguments.get("image_id", "")),
+                    active_capability_ids=list(dict.fromkeys(active_capability_ids)),
+                    allowed_effects=list(action.arguments.get("allowed_effects", [])),
+                    allowed_resources=list(action.arguments.get("allowed_resources", ["."])),
+                    required_evidence=list(action.arguments.get("required_evidence", [])),
+                    approval_policy=str(action.arguments.get("approval_policy", "block")),
                 ),
             )
         except (KeyError, RuntimeError, ValueError) as exc:
@@ -54,6 +71,11 @@ def _spawn_tool() -> SimpleTool:
             "source": "inherit, fresh, or image (default: inherit).",
             "cwd": "Optional cwd for a fresh child.",
             "image_id": "Required when source is image.",
+            "allowed_effects": "Explicit task effects: read, write, test, execute, network, destructive.",
+            "allowed_resources": "Workspace-relative resources covered by the task contract.",
+            "required_evidence": "Completion evidence: response, read, write, test, artifact.",
+            "active_capability_ids": "Optional minimum capability ids; current run capabilities are snapshotted automatically.",
+            "approval_policy": "block or parent_fallback when an effect cannot run in background.",
         },
         input_schema={
             "type": "object",
@@ -62,6 +84,17 @@ def _spawn_tool() -> SimpleTool:
                 "source": {"type": "string", "enum": ["inherit", "fresh", "image"]},
                 "cwd": {"type": "string"},
                 "image_id": {"type": "string"},
+                "allowed_effects": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["read", "write", "test", "execute", "network", "destructive"]},
+                },
+                "allowed_resources": {"type": "array", "items": {"type": "string"}},
+                "required_evidence": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["response", "read", "write", "test", "artifact"]},
+                },
+                "active_capability_ids": {"type": "array", "items": {"type": "string"}},
+                "approval_policy": {"type": "string", "enum": ["block", "parent_fallback"]},
             },
             "required": ["task"],
             "additionalProperties": False,
@@ -127,41 +160,67 @@ def _resume_tool() -> SimpleTool:
 
 def _run_tool() -> SimpleTool:
     def run(_action: ToolAction, context: ToolContext) -> ToolResult:
-        _, runner, parent, error = _runtime_state(context)
+        coordinator, runner, parent, error = _runtime_state(context)
         if error is not None:
             return error("subagent_run_ready")
         try:
             results = runner.run_ready(parent)
         except (KeyError, RuntimeError, ValueError) as exc:
             return ToolResult("subagent_run_ready", False, str(exc), "subagent_run_failed")
-        succeeded = all(result.state in {"completed", "skipped"} for result in results)
-        error_code = None
-        if not succeeded:
-            error_code = (
-                "subagent_blocked"
-                if any(result.state == "blocked" for result in results)
-                else "subagent_failed"
-            )
+        snapshot = coordinator.snapshot(parent)
+        unresolved_members = [
+            member for member in snapshot.members
+            if member.role == "subagent" and member.state in {"ready", "running", "blocked", "failed"}
+        ]
+        completed = [result for result in results if result.state in {"completed", "skipped"}]
+        blocked = [result for result in results if result.state == "blocked"]
+        failed = [result for result in results if result.state not in {"completed", "skipped", "blocked"}]
+        if completed and (blocked or failed or unresolved_members):
+            outcome = "partial"
+        elif blocked or any(member.state == "blocked" for member in unresolved_members):
+            outcome = "blocked"
+        elif failed or any(member.state == "failed" for member in unresolved_members):
+            outcome = "failed"
+        else:
+            outcome = "completed"
+        succeeded = outcome == "completed"
+        error_code = None if succeeded else f"subagent_{outcome}"
+        result_payload = [
+            {
+                "session_id": result.session_id,
+                "state": result.state,
+                "summary": _clip(result.final_message, 1000),
+                "changed_files": list(result.changed_files or []),
+                "verifications": list(result.verifications or []),
+                "artifact_refs": list(result.artifact_refs or []),
+                "blocker": dict(result.blocker or {}),
+                "unresolved_requirements": list(result.unresolved_requirements or []),
+                "output_validation": result.output_validation,
+                "next_action": (
+                    "accept_handoff_without_rereading_artifacts"
+                    if result.state == "completed"
+                    else "resume_same_session_with_feedback"
+                ),
+            }
+            for result in results
+        ]
         return ToolResult(
             "subagent_run_ready",
             succeeded,
             json.dumps(
-                [
-                    {
-                        "session_id": result.session_id,
-                        "state": result.state,
-                        "summary": _clip(result.final_message, 1000),
-                        "changed_files": list(result.changed_files or []),
-                        "verifications": list(result.verifications or []),
-                        "artifact_refs": list(result.artifact_refs or []),
-                        "next_action": (
-                            "accept_handoff_without_rereading_artifacts"
-                            if result.state == "completed"
-                            else "resume_same_session_with_feedback"
-                        ),
-                    }
-                    for result in results
-                ],
+                {
+                    "outcome": outcome,
+                    "results": result_payload,
+                    "groups": {
+                        "completed": [item["session_id"] for item in result_payload if item["state"] == "completed"],
+                        "blocked": [member.session_id for member in snapshot.members if member.role == "subagent" and member.state == "blocked"],
+                        "failed": [member.session_id for member in snapshot.members if member.role == "subagent" and member.state == "failed"],
+                    },
+                    "unresolved": [
+                        {"session_id": member.session_id, "state": member.state, "task": member.task_summary}
+                        for member in unresolved_members
+                    ],
+                },
                 ensure_ascii=False,
             ),
             error_code,
@@ -185,6 +244,12 @@ def _status_tool() -> SimpleTool:
         coordinator, _, parent, error = _runtime_state(context)
         if error is not None:
             return error("subagent_status")
+        if not parent.cluster_id:
+            return ToolResult(
+                "subagent_status",
+                True,
+                json.dumps({"cluster_id": "", "revision": 0, "members": [], "public_state": []}),
+            )
         try:
             cluster = coordinator.snapshot(parent)
         except (KeyError, RuntimeError, ValueError) as exc:
@@ -203,6 +268,9 @@ def _status_tool() -> SimpleTool:
                             "state": member.state,
                             "task": member.task_summary,
                             "attempt": member.attempt,
+                            "task_id": member.task_id,
+                            "allowed_effects": member.allowed_effects,
+                            "required_evidence": member.required_evidence,
                         }
                         for member in cluster.members
                     ],
@@ -214,6 +282,11 @@ def _status_tool() -> SimpleTool:
                             "summary": entry.summary,
                             "artifact_ref": entry.artifact_ref,
                             "metadata": entry.metadata,
+                            "task_id": entry.task_id,
+                            "attempt": entry.attempt,
+                            "trust_class": entry.trust_class,
+                            "validation_state": entry.validation_state,
+                            "supersedes": entry.supersedes,
                         }
                         for entry in cluster.shared_state[-20:]
                     ],

@@ -148,3 +148,4 @@ class StoredSession:
     session_role: str = "primary"
     launch_source: str = "direct"
     session_image_id: str = ""
+    revision: int = 0

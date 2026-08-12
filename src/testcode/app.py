@@ -78,7 +78,11 @@ def create_app(
 ) -> CLI:
     root = Path(workspace_root or os.getcwd()).resolve()
     config = load_runtime_config(mode=mode, cwd=root)
-    delegated_write = subagent_grant is not None and subagent_grant.is_runner_issued()
+    delegated_write = (
+        subagent_grant is not None
+        and subagent_grant.is_runner_issued()
+        and "write" in subagent_grant.allowed_effects
+    )
     runtime_mode = "auto" if delegated_write and config.mode == "confirm" else config.mode
     session_store = SessionStore()
     subagent_coordinator = SubagentCoordinator(
@@ -96,7 +100,10 @@ def create_app(
         ),
     )
     logger = InMemoryLogger()
-    policy = DefaultPolicy(mode=runtime_mode)
+    policy = DefaultPolicy(
+        mode=runtime_mode,
+        allowed_effects=(set(subagent_grant.allowed_effects) if subagent_grant is not None else None),
+    )
     guardrails = Guardrails(policy=policy, logger=logger)
 
     # Resolve skill registry directories
@@ -192,11 +199,7 @@ def create_app(
     model = create_model_client(
         logger,
         config=config,
-        timeout=(
-            min(config.model_timeout, config.orchestration.subagent_model_timeout)
-            if background
-            else None
-        ),
+        timeout=config.orchestration.subagent_model_timeout if background else None,
     )
     presenter_type = TUIConsolePresenter if interactive and should_use_tui() else ConsolePresenter
     presenter = presenter_type(tool_result_summarizer=tools.summarize_result)
@@ -205,7 +208,11 @@ def create_app(
         tools=tools,
         guardrails=guardrails,
         logger=logger,
-        context_loaders=[project_rules_loader, workspace_summary_loader, explicit_context_loader],
+        context_loaders=(
+            [project_rules_loader, explicit_context_loader]
+            if background
+            else [project_rules_loader, workspace_summary_loader, explicit_context_loader]
+        ),
         capability_warehouse=capability_warehouse,
         approval_callback=None if background else presenter.confirm_tool_action,
         progress_reporter=None if background else presenter,

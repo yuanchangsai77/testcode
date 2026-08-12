@@ -41,9 +41,9 @@ max_turns = 100
 # 后台子会话单次模型请求失败后的最大重试次数。
 # 默认 1，且不会超过 model.retry.max_retries。
 subagent_max_model_retries = 1
-# 后台子会话单次模型请求总截止时间，默认 30 秒，内部硬上限 300 秒；
-# 实际值不会超过 TESTCODE_MODEL_TIMEOUT。
-subagent_model_timeout = 30
+# 后台子会话单次模型请求总截止时间，默认 120 秒，内部硬上限 300 秒。
+# 该值独立于前台 TESTCODE_MODEL_TIMEOUT，避免前台交互预算隐式截断后台任务。
+subagent_model_timeout = 120
 
 [limits]
 # 每个 MCP 服务最多发现的工具数。默认 256，内部硬上限 1024。
@@ -77,6 +77,10 @@ read_timeout = 300
 `list_dir`、`find_files`、`search_text` 和 `read_file` 允许模型在单次调用中给出数量参数，但仍会被内部硬上限截断；这里的配置值决定未传参数时的默认返回量。
 
 `tool_output_bytes` 限制命令和文本搜索的保留输出；`read_file_bytes` 独立限制文件读取，避免一项配置意外放大所有上下文来源。
+
+`TESTCODE_MODEL_TIMEOUT` 只控制前台模型请求；`orchestration.subagent_model_timeout` 单独控制
+后台子会话。后台任务通常携带委派合同、工具 schema 和恢复上下文，首 token 延迟可能高于前台短对话，
+因此默认预算更长，但仍受 300 秒内部硬上限和独立重试次数约束。
 
 ## 环境变量
 

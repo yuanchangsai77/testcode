@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
+from ..intent import RequestIntentClassifier
 from ..sessions.cluster import (
     ClusterMember,
     SessionCluster,
@@ -23,6 +25,10 @@ class SubagentLaunchSpec:
     messages: list[dict[str, str]] = field(default_factory=list)
     active_capability_ids: list[str] = field(default_factory=list)
     image_id: str = ""
+    allowed_effects: list[str] = field(default_factory=list)
+    allowed_resources: list[str] = field(default_factory=lambda: ["."])
+    required_evidence: list[str] = field(default_factory=list)
+    approval_policy: str = "block"
 
 
 class SubagentCoordinator:
@@ -37,6 +43,7 @@ class SubagentCoordinator:
         self.session_store = session_store
         self.cluster_store = cluster_store
         self.image_store = image_store
+        self._intent_classifier = RequestIntentClassifier()
 
     def ensure_cluster(self, session: StoredSession) -> SessionCluster:
         if session.cluster_id:
@@ -74,6 +81,8 @@ class SubagentCoordinator:
         self.session_store.save(child)
 
         now = child.created_at
+        allowed_effects = self._allowed_effects(spec)
+        required_evidence = self._required_evidence(spec, allowed_effects)
         member = ClusterMember(
             session_id=child.session_id,
             role="subagent",
@@ -84,6 +93,11 @@ class SubagentCoordinator:
             updated_at=now,
             task_summary=spec.task_summary.strip(),
             session_image_id=image_id,
+            task_id=f"task-{uuid4().hex[:12]}",
+            allowed_effects=allowed_effects,
+            allowed_resources=self._allowed_resources(spec.allowed_resources),
+            required_evidence=required_evidence,
+            approval_policy=self._approval_policy(spec.approval_policy),
         )
         self.cluster_store.add_member(cluster.cluster_id, member)
         return child
@@ -200,8 +214,8 @@ class SubagentCoordinator:
         if spec.source == "inherit":
             return (
                 str(parent_root),
-                list(parent.messages),
-                list(parent.active_capability_ids),
+                _bounded_messages(parent.messages),
+                list(dict.fromkeys([*parent.active_capability_ids, *spec.active_capability_ids])),
                 "",
             )
         if spec.source == "fresh":
@@ -233,3 +247,78 @@ class SubagentCoordinator:
         if not candidate.is_relative_to(parent_root):
             raise ValueError("subagent cwd must remain within the parent workspace root")
         return candidate
+
+    def _allowed_effects(self, spec: SubagentLaunchSpec) -> list[str]:
+        valid = {"read", "write", "test", "execute", "network", "destructive"}
+        if spec.allowed_effects:
+            effects = list(dict.fromkeys(spec.allowed_effects))
+            unknown = sorted(set(effects) - valid)
+            if unknown:
+                raise ValueError(f"unsupported delegated effects: {', '.join(unknown)}")
+            if "read" not in effects:
+                effects.insert(0, "read")
+            return effects
+
+        task = spec.task_summary.casefold()
+        effects = ["read"]
+        intent = self._intent_classifier.classify(spec.task_summary)
+        if intent.file_changes:
+            effects.append("write")
+        if any(term in task for term in ("pytest", "run tests", "run test", "执行测试", "运行测试")):
+            effects.append("test")
+        if any(term in task for term in ("shell", "command", "脚本", "命令")):
+            effects.append("execute")
+        return list(dict.fromkeys(effects))
+
+    def _required_evidence(
+        self,
+        spec: SubagentLaunchSpec,
+        allowed_effects: list[str],
+    ) -> list[str]:
+        valid = {"response", "read", "write", "test", "artifact"}
+        if spec.required_evidence:
+            evidence = list(dict.fromkeys(spec.required_evidence))
+            unknown = sorted(set(evidence) - valid)
+            if unknown:
+                raise ValueError(f"unsupported delegated evidence: {', '.join(unknown)}")
+            return evidence
+        if "test" in allowed_effects:
+            return ["test"]
+        if "write" in allowed_effects:
+            return ["write"]
+        task = spec.task_summary.casefold()
+        if any(
+            term in task
+            for term in ("inspect", "review", "read", "summarize", "检查", "审查", "阅读", "总结")
+        ):
+            return ["read"]
+        return ["response"]
+
+    def _allowed_resources(self, resources: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in resources or ["."]:
+            path = Path(value)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("delegated resources must be safe workspace-relative paths")
+            compact = path.as_posix() or "."
+            if compact not in normalized:
+                normalized.append(compact)
+        return normalized or ["."]
+
+    def _approval_policy(self, value: str) -> str:
+        if value not in {"block", "parent_fallback"}:
+            raise ValueError(f"unsupported delegated approval policy: {value}")
+        return value
+
+
+def _bounded_messages(messages: list[dict[str, str]], limit: int = 12, chars: int = 48_000) -> list[dict[str, str]]:
+    selected: list[dict[str, str]] = []
+    remaining = chars
+    for item in reversed(messages[-limit:]):
+        content = str(item.get("content", ""))
+        if remaining <= 0:
+            break
+        clipped = content[-remaining:]
+        selected.append({"role": str(item.get("role", "user")), "content": clipped})
+        remaining -= len(clipped)
+    return list(reversed(selected))

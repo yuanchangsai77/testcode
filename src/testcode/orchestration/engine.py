@@ -24,6 +24,14 @@ from .session import SessionContext
 class ExecutionEngine:
     """Coordinates the model-think and tool-execute loop."""
 
+    non_resource_control_tools = {
+        "warehouse_list",
+        "toolbox_open",
+        "capability_activate",
+        "capability_release",
+        "capability_status",
+    }
+
     max_model_retries = 7
     model_retry_delays = (0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0)
 
@@ -33,6 +41,8 @@ class ExecutionEngine:
         "blocked_by_security_policy",
         "blocked_by_policy",
         "duplicate_tool_call",
+        "delegated_effect_not_allowed",
+        "delegated_resource_not_allowed",
         "invalid_argument_type",
         "invalid_argument_value",
         "missing_argument",
@@ -40,6 +50,7 @@ class ExecutionEngine:
         "path_not_found",
         "subagent_blocked",
         "subagent_failed",
+        "subagent_partial",
         "test_command_ambiguous",
         "test_command_not_detected",
         "unknown_argument",
@@ -112,6 +123,9 @@ class ExecutionEngine:
             reset_state()
 
     def _execute(self, request: UserRequest) -> ExecutionSummary:
+        runtime_model = getattr(self.model, "model", "")
+        if isinstance(runtime_model, str) and runtime_model:
+            request.metadata.setdefault("runtime_model", runtime_model)
         session_key = self._session_key(request)
         self.prepare_session_state(
             session_key,
@@ -122,7 +136,7 @@ class ExecutionEngine:
             attach_state("active_session_id", session_key)
         self._keep_tool_state = session_key is not None
         permissions = PermissionContext()
-        available_tools = self.tools.definitions()
+        available_tools = self._available_tool_definitions(request)
         provider_statuses = getattr(self.tools, "provider_statuses", lambda: [])()
         session = SessionContext(
             request=request,
@@ -142,11 +156,14 @@ class ExecutionEngine:
         completed_actions: dict[str, ToolResult] = {}
         duplicate_counts: dict[str, int] = {}
         progress_recovery_sent = False
-        request_intent = self.intent_classifier.classify(request.prompt, request.metadata)
+        request_intent = self.intent_classifier.classify(
+            self._intent_prompt(request),
+            request.metadata,
+        )
 
         for turn in range(1, self.max_turns + 1):
             self._raise_if_cancelled()
-            session.available_tools = self.tools.definitions()
+            session.available_tools = self._available_tool_definitions(request)
             visible_tool_names = {definition.name for definition in session.available_tools}
             expiring_turn_capabilities = (
                 self.capability_warehouse.active_ids({"turn"})
@@ -230,15 +247,18 @@ class ExecutionEngine:
             for action in reply.actions:
                 self._raise_if_cancelled()
                 if action.name not in visible_tool_names:
-                    result = ToolResult(
-                        name=action.name,
-                        success=False,
-                        output=(
-                            f"tool was not visible at the start of this model turn: {action.name}. "
-                            "A newly activated capability can be used on the next model turn."
-                        ),
-                        error_code="tool_not_visible_this_turn",
-                    )
+                    definition = self.tools.definition_for(action.name)
+                    result = self._delegated_effect_problem(definition, request)
+                    if result is None:
+                        result = ToolResult(
+                            name=action.name,
+                            success=False,
+                            output=(
+                                f"tool was not visible at the start of this model turn: {action.name}. "
+                                "A newly activated capability can be used on the next model turn."
+                            ),
+                            error_code="tool_not_visible_this_turn",
+                        )
                     self._attach_action_metadata(result, action)
                     self._record_synthetic_tool_result(result)
                     session.add_tool_result(result)
@@ -274,6 +294,18 @@ class ExecutionEngine:
                         continue
 
                 definition = self.tools.definition_for(action.name)
+                delegated_scope_problem = self._delegated_scope_problem(
+                    action,
+                    definition,
+                    request,
+                )
+                if delegated_scope_problem is not None:
+                    self._attach_action_metadata(delegated_scope_problem, action)
+                    self._record_synthetic_tool_result(delegated_scope_problem)
+                    session.add_tool_result(delegated_scope_problem)
+                    turn_results.append(delegated_scope_problem)
+                    completed_actions[action_key] = delegated_scope_problem
+                    continue
                 decision = self.guardrails.check(action, definition)
                 if decision.requires_confirmation:
                     approval_key = (action.name, decision.risk_level)
@@ -323,7 +355,7 @@ class ExecutionEngine:
                         name=action.name,
                         success=False,
                         output=decision.reason,
-                        error_code="blocked_by_policy",
+                        error_code=decision.error_code or "blocked_by_policy",
                     )
                     if self.progress_reporter:
                         self.progress_reporter.tool_skipped(action, f"blocked: {decision.reason}")
@@ -429,7 +461,7 @@ class ExecutionEngine:
 
     def _finish(self, summary: ExecutionSummary) -> ExecutionSummary:
         if summary.outcome == "completed" and summary.tool_results:
-            summary.outcome = self._terminal_outcome([summary.tool_results[-1]])
+            summary.outcome = self._aggregate_outcome(summary.tool_results)
         self.current_session = None
         if self._keep_tool_state and self.capability_warehouse is not None:
             summary.active_instructions = self.capability_warehouse.persisted_instructions()
@@ -449,6 +481,30 @@ class ExecutionEngine:
             return "completed"
         return self._blocked_outcome(results, default="stalled")
 
+    def _aggregate_outcome(self, results: list[ToolResult]) -> str:
+        """Resolve failures by later success of the same tool, not unrelated activity."""
+        later_successes: set[str] = set()
+        unresolved: list[ToolResult] = []
+        for result in reversed(results):
+            if result.success:
+                later_successes.add(self._result_identity(result))
+                continue
+            if result.error_code == "progress_required":
+                continue
+            if self._result_identity(result) in later_successes:
+                continue
+            unresolved.append(result)
+        return self._terminal_outcome(list(reversed(unresolved)))
+
+    def _result_identity(self, result: ToolResult) -> str:
+        arguments = result.metadata.get("action_arguments")
+        return json.dumps(
+            {"name": result.name, "arguments": arguments if isinstance(arguments, dict) else None},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
     def _blocked_outcome(self, results: list[ToolResult], *, default: str = "stalled") -> str:
         error_codes = {result.error_code for result in results if not result.success}
         if error_codes & {
@@ -456,19 +512,101 @@ class ExecutionEngine:
             "approval_denied",
             "blocked_by_policy",
             "blocked_by_security_policy",
+            "delegated_effect_not_allowed",
+            "delegated_resource_not_allowed",
             "path_outside_workspace",
             "subagent_blocked",
+            "subagent_partial",
         }:
             return "blocked"
         if error_codes & {"duplicate_tool_call", "progress_required"}:
             return "stalled"
         return default
 
+    def _delegated_scope_problem(self, action, definition, request: UserRequest) -> ToolResult | None:
+        contract = request.metadata.get("delegated_task")
+        if not isinstance(contract, dict) or definition is None:
+            return None
+        resources = contract.get("allowed_resources", ["."])
+        if not isinstance(resources, list) or "." in resources:
+            return None
+        candidates: list[str] = []
+        for key in ("path", "cwd"):
+            value = action.arguments.get(key)
+            if isinstance(value, str) and value:
+                candidates.append(value)
+        if action.name == "patch":
+            diff = action.arguments.get("diff")
+            if isinstance(diff, str):
+                for line in diff.splitlines():
+                    if line.startswith(("+++ b/", "--- a/")):
+                        candidates.append(line[6:].strip())
+        if not candidates and action.name in self.non_resource_control_tools:
+            return None
+        if not candidates:
+            return ToolResult(
+                action.name,
+                False,
+                "delegated action does not identify a resource covered by its task contract",
+                "delegated_resource_not_allowed",
+            )
+
+        root = Path(request.cwd).resolve()
+        allowed_roots = [(root / str(value)).resolve() for value in resources if isinstance(value, str)]
+        for candidate in candidates:
+            resolved = Path(candidate)
+            if not resolved.is_absolute():
+                resolved = root / resolved
+            resolved = resolved.resolve()
+            if not any(resolved == allowed or resolved.is_relative_to(allowed) for allowed in allowed_roots):
+                return ToolResult(
+                    action.name,
+                    False,
+                    f"resource is outside the delegated task contract: {candidate}",
+                    "delegated_resource_not_allowed",
+                    metadata={"resource": candidate, "allowed_resources": list(resources)},
+                )
+        return None
+
+    def _available_tool_definitions(self, request: UserRequest):
+        definitions = self.tools.definitions()
+        contract = request.metadata.get("delegated_task")
+        if not isinstance(contract, dict):
+            return definitions
+        effects = contract.get("allowed_effects")
+        if not isinstance(effects, list):
+            return definitions
+        allowed = {value for value in effects if isinstance(value, str)}
+        return [definition for definition in definitions if definition.risk_level in allowed]
+
+    def _delegated_effect_problem(self, definition, request: UserRequest) -> ToolResult | None:
+        contract = request.metadata.get("delegated_task")
+        if definition is None or not isinstance(contract, dict):
+            return None
+        effects = contract.get("allowed_effects")
+        if not isinstance(effects, list) or definition.risk_level in effects:
+            return None
+        return ToolResult(
+            definition.name,
+            False,
+            f"delegated task does not allow {definition.risk_level} effects",
+            "delegated_effect_not_allowed",
+        )
+
     def _session_key(self, request: UserRequest) -> str | None:
         session_id = request.metadata.get("session_id")
         if isinstance(session_id, str) and session_id:
             return session_id
         return None
+
+    def _intent_prompt(self, request: UserRequest) -> str:
+        if request.prompt.strip().casefold() not in {"继续", "continue", "go on", "接着"}:
+            return request.prompt
+        state = request.metadata.get("resume_state")
+        previous = getattr(state, "last_user_prompt", "")
+        if isinstance(state, dict):
+            previous = state.get("last_user_prompt", "")
+        return str(previous).strip() or request.prompt
 
     def prepare_session_state(
         self,

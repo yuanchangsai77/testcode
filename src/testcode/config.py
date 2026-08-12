@@ -32,7 +32,7 @@ class ModelRetryConfig:
 class OrchestrationConfig:
     max_turns: int = 100
     subagent_max_model_retries: int = 1
-    subagent_model_timeout: float = 30.0
+    subagent_model_timeout: float = 120.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +124,7 @@ def _load_tuning(cwd: str | Path | None) -> tuple[ModelRetryConfig, Orchestratio
             ),
             subagent_model_timeout=_bounded_float(
                 values.get("orchestration.subagent_model_timeout"),
-                30.0,
+                120.0,
                 1.0,
                 MAX_SUBAGENT_MODEL_TIMEOUT_SECONDS,
                 "orchestration.subagent_model_timeout",
