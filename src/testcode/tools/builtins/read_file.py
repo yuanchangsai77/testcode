@@ -31,6 +31,7 @@ def tool(default_max_bytes: int = DEFAULT_READ_BYTES) -> SimpleTool:
             },
             required=["path"],
         ),
+        evidence_kinds=["read"],
         handler=lambda action, context: run(action, context, default_max_bytes),
         summarizer=read_file_summary,
     )

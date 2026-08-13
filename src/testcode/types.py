@@ -20,6 +20,7 @@ class ToolDefinition:
     arguments: dict[str, str] = field(default_factory=dict)
     input_schema: dict[str, Any] = field(default_factory=dict)
     risk_level: str = "read"
+    evidence_kinds: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -53,6 +54,49 @@ class ToolResult:
 
 
 @dataclass(slots=True)
+class RuntimeBlocker:
+    """Runtime-owned reason why a task cannot currently complete."""
+
+    error_code: str
+    summary: str
+    source: str = "runtime"
+    tool: str = ""
+    retryability: str = "conditional"
+    required_action: str = "resume"
+
+
+@dataclass(slots=True)
+class EvidenceRecord:
+    """Runtime-owned proof tied to one task and workspace revision."""
+
+    kind: str
+    producer: str
+    task_id: str
+    workspace_revision: int
+    artifact_refs: list[str] = field(default_factory=list)
+    source_task_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TaskCheckpoint:
+    """Bounded projection of execution facts used for recovery and handoff."""
+
+    objective: str = ""
+    schema_version: int = 2
+    task_id: str = ""
+    workspace_root: str = ""
+    workspace_revision: int = 0
+    phase: str = "executing"
+    completed_actions: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+    evidence: list[EvidenceRecord] = field(default_factory=list)
+    required_evidence: list[str] = field(default_factory=list)
+    unmet_deliverables: list[str] = field(default_factory=list)
+    blockers: list[RuntimeBlocker] = field(default_factory=list)
+    runtime_state: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ResourceDescriptor:
     id: str
     name: str
@@ -82,6 +126,8 @@ class ExecutionSummary:
     active_instructions: list[InstructionContent] = field(default_factory=list)
     active_capability_ids: list[str] = field(default_factory=list)
     outcome: str = "completed"
+    blockers: list[RuntimeBlocker] = field(default_factory=list)
+    checkpoint: TaskCheckpoint = field(default_factory=TaskCheckpoint)
 
 
 
@@ -118,6 +164,8 @@ class SessionRunTrace:
     turn_count: int
     tool_names: list[str] = field(default_factory=list)
     turns: list[SessionTurnTrace] = field(default_factory=list)
+    blockers: list[RuntimeBlocker] = field(default_factory=list)
+    checkpoint: TaskCheckpoint = field(default_factory=TaskCheckpoint)
 
 
 @dataclass(slots=True)
@@ -129,6 +177,8 @@ class SessionResumeState:
     last_tool_names: list[str] = field(default_factory=list)
     open_issue: str = ""
     recovery_hint: str = ""
+    blockers: list[RuntimeBlocker] = field(default_factory=list)
+    checkpoint: TaskCheckpoint = field(default_factory=TaskCheckpoint)
 
 
 @dataclass(slots=True)

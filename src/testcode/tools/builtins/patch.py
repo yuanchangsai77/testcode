@@ -31,6 +31,7 @@ def tool() -> SimpleTool:
         arguments={"diff": "Unified diff text to apply."},
         input_schema=schema({"diff": {"type": "string"}}, required=["diff"]),
         risk_level="write",
+        evidence_kinds=["workspace_change"],
         handler=run,
         summarizer=patch_summary,
     )

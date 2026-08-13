@@ -38,6 +38,12 @@ delays = [0.5, 1, 1.5, 2, 3, 5, 8]
 # 一次任务中模型最多可继续思考或调用工具的轮数。
 # 默认 100，内部硬上限 500。
 max_turns = 100
+# 一次 run 内允许的模型请求总次数，包含 retry。默认 120，内部硬上限 2000。
+max_model_attempts = 120
+# 连续模型超时达到该值时打开熔断器。默认 8，内部硬上限 50。
+max_consecutive_model_timeouts = 8
+# 一次 run 的总墙钟预算。默认 900 秒，内部硬上限 86400 秒。
+max_run_seconds = 900
 # 后台子会话单次模型请求失败后的最大重试次数。
 # 默认 1，且不会超过 model.retry.max_retries。
 subagent_max_model_retries = 1
@@ -59,6 +65,8 @@ read_file_bytes = 64000
 list_dir_entries = 200
 # find_files/search_text 默认返回的结果数。默认 200，内部硬上限 2000。
 search_results = 200
+# 发送给模型的 messages 总字符预算。默认 120000，内部硬上限 2000000。
+prompt_context_chars = 120000
 
 [[mcp.servers]]
 name = "amap"
@@ -81,6 +89,14 @@ read_timeout = 300
 `TESTCODE_MODEL_TIMEOUT` 只控制前台模型请求；`orchestration.subagent_model_timeout` 单独控制
 后台子会话。后台任务通常携带委派合同、工具 schema 和恢复上下文，首 token 延迟可能高于前台短对话，
 因此默认预算更长，但仍受 300 秒内部硬上限和独立重试次数约束。
+
+`max_model_attempts` 统计真实 HTTP/model 调用，`max_turns` 统计取得有效模型回复后的语义轮次；一次
+请求的 retry 不会增加 semantic turn。`max_run_seconds`、attempt 总数或连续超时任一达到边界，runtime
+都会保存 partial checkpoint 并返回结构化 `exhausted`，不会继续放大相同失败。
+
+`prompt_context_chars` 约束最终 messages 包。系统规则、当前请求和 runtime checkpoint 优先保留；
+旧 conversation 从新到旧装入剩余预算，超限时写入省略标记。该值是字符层安全预算，不等同于模型
+厂商计算的 token 上限；模型 profile 会把它作为当前适配器的上下文能力投影。
 
 ## 环境变量
 

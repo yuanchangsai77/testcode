@@ -12,6 +12,7 @@ class Tool(Protocol):
     arguments: dict[str, str]
     input_schema: dict
     risk_level: str
+    evidence_kinds: list[str]
     exposed: bool
 
     def run(self, action: ToolAction, context: "ToolContext") -> ToolResult:
@@ -40,6 +41,7 @@ class SimpleTool:
     handler: Callable[[ToolAction, ToolContext], ToolResult]
     input_schema: dict = field(default_factory=dict)
     risk_level: str = "read"
+    evidence_kinds: list[str] = field(default_factory=list)
     exposed: bool = True
     # User-facing run summary only. It is local display logic and must not be
     # written into ToolResult output or metadata.
@@ -55,6 +57,7 @@ class SimpleTool:
             arguments=dict(self.arguments),
             input_schema=dict(self.input_schema),
             risk_level=self.risk_level,
+            evidence_kinds=list(self.evidence_kinds),
         )
 
     def summarize(self, result: ToolResult) -> str:

@@ -34,6 +34,7 @@ def tool(default_max_results: int = DEFAULT_SEARCH_RESULTS) -> SimpleTool:
             },
             required=["query"],
         ),
+        evidence_kinds=["read"],
         handler=lambda action, context: run(action, context, default_max_results),
         summarizer=match_count_summary,
     )

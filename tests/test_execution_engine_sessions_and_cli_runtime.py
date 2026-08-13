@@ -8,18 +8,23 @@ from testcode.interaction.presenter import ConsolePresenter
 from testcode.model.types import ModelConnectionError, ModelTimeoutError
 from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.engine import ExecutionEngine
+from testcode.orchestration.session import SessionContext
 from testcode.safety.guardrails import Guardrails
 from testcode.safety.policy import DefaultPolicy
 from testcode.sessions import SessionStore
 from testcode.tools.builtin_provider import build_builtin_registry
 from testcode.types import (
+    EvidenceRecord,
     ExecutionSummary,
     ModelReply,
     SessionRunTrace,
+    SessionResumeState,
     SessionTurnTrace,
     ToolAction,
     ToolDefinition,
     ToolResult,
+    RuntimeBlocker,
+    TaskCheckpoint,
     UserRequest,
 )
 
@@ -51,6 +56,491 @@ def test_run_returns_message_when_model_request_fails(tmp_path, monkeypatch):
     assert "Connection refused" in summary.final_message
     assert "keep this session open and try again" in summary.final_message
     assert summary.tool_results == []
+
+
+def test_runtime_failure_preserves_successful_tools_and_shell_checkpoint(tmp_path):
+    (tmp_path / "child").mkdir()
+
+    class ToolThenFailureModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="move into child",
+                    actions=[ToolAction("shell_exec", {"command": "cd child"})],
+                )
+            raise RuntimeError("model transport failed")
+
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=ToolThenFailureModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+        approval_callback=lambda *_args: True,
+    )
+
+    with pytest.raises(RuntimeError, match="model transport failed"):
+        engine.execute(UserRequest(prompt="prepare child", cwd=str(tmp_path)))
+
+    summary = engine.last_failure_summary
+    assert summary is not None
+    assert len(summary.tool_results) == 1
+    assert summary.tool_results[0].success is True
+    assert summary.checkpoint.completed_actions == ["shell_exec"]
+    assert summary.checkpoint.runtime_state["shell_cwd"] == str(tmp_path / "child")
+    assert summary.blockers[0].error_code == "runtime_error"
+
+
+def test_completion_gate_rejects_protocol_placeholder_then_accepts_replacement(tmp_path):
+    class PlaceholderThenAnswerModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(message="Dictionary", done=True)
+            return ModelReply(message="The workspace inspection is complete.", done=True)
+
+    logger = InMemoryLogger()
+    model = PlaceholderThenAnswerModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine.execute(UserRequest(prompt="inspect", cwd=str(tmp_path)))
+
+    assert model.calls == 2
+    assert summary.outcome == "completed"
+    assert summary.final_message == "The workspace inspection is complete."
+    assert [item.success for item in summary.tool_results if item.name == "completion_gate"] == [False, True]
+
+
+def test_completion_gate_requires_workspace_change_for_change_request(tmp_path):
+    class PrematureThenRepairingModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(message="done", done=True)
+            if self.calls == 2:
+                return ModelReply(
+                    message="create file",
+                    actions=[
+                        ToolAction(
+                            "patch",
+                            {"diff": "--- /dev/null\n+++ b/note.md\n@@ -0,0 +1 @@\n+ready\n"},
+                        )
+                    ],
+                )
+            return ModelReply(message="Created note.md.", done=True)
+
+    logger = InMemoryLogger()
+    model = PrematureThenRepairingModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine.execute(UserRequest(prompt="create note.md", cwd=str(tmp_path)))
+
+    assert model.calls == 3
+    assert summary.outcome == "completed"
+    assert summary.checkpoint.unmet_deliverables == []
+    assert summary.checkpoint.artifacts == []
+    assert any(item.kind == "workspace_change" for item in summary.checkpoint.evidence)
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "ready\n"
+
+
+def test_completion_gate_checks_evidence_after_done_reply_actions(tmp_path):
+    class DoneWithActionsModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelReply(
+                    message="done",
+                    actions=[ToolAction("list_dir", {"path": "."})],
+                    done=True,
+                )
+            return ModelReply(
+                message="created",
+                actions=[
+                    ToolAction(
+                        "patch",
+                        {"diff": "--- /dev/null\n+++ b/note.md\n@@ -0,0 +1 @@\n+ready\n"},
+                    )
+                ],
+                done=True,
+            )
+
+    logger = InMemoryLogger()
+    model = DoneWithActionsModel()
+    summary = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    ).execute(UserRequest(prompt="create note.md", cwd=str(tmp_path)))
+
+    assert model.calls == 2
+    assert summary.outcome == "completed"
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "ready\n"
+
+
+def test_prior_completion_rejection_does_not_hide_missing_evidence(tmp_path):
+    class StillPrematureModel:
+        def respond(self, _session):
+            return ModelReply(
+                message="done",
+                actions=[ToolAction("list_dir", {"path": "."})],
+                done=True,
+            )
+
+    logger = InMemoryLogger()
+    summary = ExecutionEngine(
+        model=StillPrematureModel(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    ).execute(UserRequest(prompt="create note.md", cwd=str(tmp_path)))
+
+    assert summary.outcome == "stalled"
+    assert summary.checkpoint.unmet_deliverables == ["workspace_change"]
+    assert not (tmp_path / "note.md").exists()
+
+
+def test_engine_stops_at_model_attempt_budget_with_recoverable_summary(tmp_path):
+    class EndlessModel:
+        calls = 0
+
+        def respond(self, _session):
+            self.calls += 1
+            return ModelReply(message="continue", done=False)
+
+    logger = InMemoryLogger()
+    model = EndlessModel()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+        max_model_attempts=2,
+        max_turns=20,
+    )
+
+    summary = engine.execute(UserRequest(prompt="inspect", cwd=str(tmp_path)))
+
+    assert model.calls == 2
+    assert summary.outcome == "exhausted"
+    assert summary.blockers[0].error_code == "model_attempt_budget_exhausted"
+    assert summary.checkpoint.runtime_state["model_attempts"] == "2"
+
+
+def test_completion_evidence_does_not_treat_git_status_observation_as_new_change(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    session = SessionContext(request=UserRequest(prompt="modify project", cwd=str(tmp_path)))
+    session.checkpoint.required_evidence = ["workspace_change"]
+    session.add_tool_result(
+        ToolResult(
+            "git_status",
+            True,
+            "existing changes",
+            metadata={"changed_files": ["already-dirty.py"]},
+        )
+    )
+
+    assert engine._unmet_evidence(session) == ["workspace_change"]
+
+
+def test_completion_evidence_does_not_infer_proof_from_completed_tool_names(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    session = SessionContext(request=UserRequest(prompt="continue", cwd=str(tmp_path)))
+    session.checkpoint.required_evidence = ["workspace_change"]
+    session.checkpoint.completed_actions = ["read_file", "patch"]
+    session.checkpoint.artifacts = ["report.md"]
+
+    assert engine._unmet_evidence(session) == ["workspace_change"]
+
+
+def test_completion_evidence_uses_semantic_records_from_any_tool(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    session = SessionContext(request=UserRequest(prompt="continue", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+    session.checkpoint.required_evidence = ["workspace_change"]
+    session.add_tool_result(
+        ToolResult(
+            "extension_writer",
+            True,
+            "updated",
+            metadata={"evidence": ["workspace_change"]},
+        )
+    )
+
+    assert engine._unmet_evidence(session) == []
+
+
+def test_new_task_does_not_inherit_incomplete_task_evidence(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    previous = TaskCheckpoint(
+        objective="update report",
+        task_id="task-1",
+        workspace_root=str(tmp_path.resolve()),
+        workspace_revision=1,
+        completed_actions=["extension_writer"],
+        evidence=[EvidenceRecord("workspace_change", "extension_writer", "task-1", 1)],
+    )
+    resume_state = SessionResumeState(last_outcome="failed", checkpoint=previous)
+
+    checkpoint = engine._initial_checkpoint(
+        UserRequest(
+            prompt="create a different service",
+            cwd=str(tmp_path),
+            metadata={"resume_state": resume_state},
+        )
+    )
+
+    assert checkpoint.task_id != "task-1"
+    assert checkpoint.completed_actions == []
+    assert checkpoint.evidence == []
+
+
+def test_explicit_continuation_inherits_same_task_evidence(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    previous = TaskCheckpoint(
+        objective="update report",
+        task_id="task-1",
+        workspace_root=str(tmp_path.resolve()),
+        workspace_revision=1,
+        evidence=[EvidenceRecord("workspace_change", "extension_writer", "task-1", 1)],
+    )
+    checkpoint = engine._initial_checkpoint(
+        UserRequest(
+            prompt="继续",
+            cwd=str(tmp_path),
+            metadata={
+                "resume_state": SessionResumeState(last_outcome="failed", checkpoint=previous),
+            },
+        )
+    )
+
+    assert checkpoint.task_id == "task-1"
+    assert [item.kind for item in checkpoint.evidence] == ["workspace_change"]
+
+
+def test_workspace_write_invalidates_older_test_evidence(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    session = SessionContext(request=UserRequest(prompt="update", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+    session.checkpoint.required_evidence = ["test"]
+    session.add_tool_result(ToolResult("writer", True, "changed", metadata={"evidence": ["workspace_change"]}))
+    session.add_tool_result(ToolResult("verifier", True, "passed", metadata={"evidence": ["test"]}))
+    assert engine._unmet_evidence(session) == []
+
+    session.add_tool_result(ToolResult("writer", True, "changed again", metadata={"evidence": ["workspace_change"]}))
+
+    assert session.checkpoint.workspace_revision == 2
+    assert engine._unmet_evidence(session) == ["test"]
+
+
+def test_failed_verification_revokes_test_evidence_for_current_revision(tmp_path):
+    session = SessionContext(request=UserRequest(prompt="verify", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+    session.checkpoint.required_evidence = ["test"]
+    session.add_tool_result(ToolResult("verifier", True, "passed", metadata={"evidence": ["test"]}))
+
+    session.add_tool_result(
+        ToolResult(
+            "verifier",
+            False,
+            "failed",
+            error_code="tests_failed",
+            metadata={"invalidates_evidence": ["test"]},
+        )
+    )
+
+    assert session.checkpoint.evidence == []
+
+
+def test_successful_execute_advances_revision_and_stales_test_evidence(tmp_path):
+    session = SessionContext(request=UserRequest(prompt="execute", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+    session.add_tool_result(ToolResult("verifier", True, "passed", metadata={"evidence": ["test"]}))
+
+    session.add_tool_result(
+        ToolResult(
+            "command",
+            True,
+            "ok",
+            metadata={"invalidates_workspace_state": True},
+        )
+    )
+
+    assert session.checkpoint.workspace_revision == 1
+    assert session.checkpoint.evidence[0].workspace_revision == 0
+
+
+def test_workspace_change_remains_task_evidence_after_later_execute(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    session = SessionContext(request=UserRequest(prompt="update", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+    session.checkpoint.required_evidence = ["workspace_change"]
+    session.add_tool_result(ToolResult("writer", True, "changed", metadata={"evidence": ["workspace_change"]}))
+    session.add_tool_result(ToolResult("command", True, "checked", metadata={"invalidates_workspace_state": True}))
+
+    assert session.checkpoint.workspace_revision == 2
+    assert engine._unmet_evidence(session) == []
+
+
+def test_failed_patch_changed_files_are_not_artifacts(tmp_path):
+    session = SessionContext(request=UserRequest(prompt="write", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+
+    session.add_tool_result(
+        ToolResult(
+            "patch",
+            False,
+            "not applied",
+            error_code="file_not_read",
+            metadata={"changed_files": ["report.md"]},
+        )
+    )
+
+    assert session.checkpoint.artifacts == []
+    assert all(item.kind != "artifact" for item in session.checkpoint.evidence)
+
+
+def test_artifact_reference_requires_explicit_delivery_evidence(tmp_path):
+    session = SessionContext(request=UserRequest(prompt="produce report", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+    session.add_tool_result(
+        ToolResult("worker", True, "partial", metadata={"artifact_refs": ["artifact:partial"]})
+    )
+
+    assert session.checkpoint.artifacts == ["artifact:partial"]
+    assert all(item.kind != "artifact" for item in session.checkpoint.evidence)
+
+    session.add_tool_result(
+        ToolResult(
+            "worker",
+            True,
+            "delivered",
+            metadata={"artifact_refs": ["artifact:report"], "evidence": ["artifact"]},
+        )
+    )
+
+    assert any(item.kind == "artifact" for item in session.checkpoint.evidence)
+
+
+def test_no_change_completion_requires_current_read_evidence(tmp_path):
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    session = SessionContext(request=UserRequest(prompt="update", cwd=str(tmp_path)))
+    session.checkpoint.task_id = "task-1"
+    session.checkpoint.unmet_deliverables = ["workspace_change"]
+    message = "No change is needed because the requested state already exists."
+
+    assert engine._completion_problem(message, session)
+
+    session.add_tool_result(ToolResult("reader", True, "observed", metadata={"evidence": ["read"]}))
+
+    assert engine._completion_problem(message, session) == ""
+
+
+def test_session_history_replaces_large_action_arguments_with_digest(tmp_path):
+    session = SessionContext(request=UserRequest(prompt="write report", cwd=str(tmp_path)))
+    large_diff = "x" * 4_000
+
+    session.add_tool_result(
+        ToolResult(
+            "patch",
+            False,
+            "invalid patch",
+            "patch_syntax_error",
+            metadata={"action_arguments": {"diff": large_diff}},
+        )
+    )
+
+    assert large_diff not in session.history[0]
+    assert "<omitted 4000 chars; sha256:" in session.history[0]
+
+
+def test_engine_attaches_cold_artifact_reference_for_large_action_arguments(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(prompt="write report", cwd=str(tmp_path))
+    logger.start_run(request)
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+    action = ToolAction("patch", {"diff": "x" * 4_000})
+    result = ToolResult("patch", False, "invalid", "patch_syntax_error")
+
+    engine._attach_action_metadata(result, action)
+    session = SessionContext(request=request)
+    session.add_tool_result(result)
+
+    assert result.metadata["action_artifact_ref"]
+    assert "args_ref=" in session.history[0]
+    assert __import__("pathlib").Path(result.metadata["action_artifact_ref"]).exists()
 
 
 def test_engine_retries_model_timeout_seven_times_before_succeeding(tmp_path):
@@ -100,7 +590,7 @@ def test_engine_retries_model_timeout_seven_times_before_succeeding(tmp_path):
     assert progress.retries == expected_retries
 
 
-def test_engine_reports_api_unavailable_after_seven_timeout_retries(tmp_path):
+def test_engine_opens_timeout_circuit_after_eight_consecutive_timeouts(tmp_path):
     class AlwaysTimingOutModel:
         calls = 0
 
@@ -118,10 +608,12 @@ def test_engine_reports_api_unavailable_after_seven_timeout_retries(tmp_path):
     )
     engine.model_retry_delays = (0.0,) * 7
 
-    with pytest.raises(RuntimeError, match="All 7 retry attempts failed"):
-        engine.execute(UserRequest(prompt="hello", cwd=str(tmp_path)))
+    summary = engine.execute(UserRequest(prompt="hello", cwd=str(tmp_path)))
 
     assert model.calls == 8
+    assert summary.outcome == "exhausted"
+    assert summary.blockers[0].error_code == "model_timeout_circuit_open"
+    assert summary.checkpoint.runtime_state["model_attempts"] == "8"
     retry_events = [event for event in logger.events if event.name == "model.retry"]
     assert [event.payload["retry"] for event in retry_events] == list(range(1, 8))
 
@@ -274,13 +766,19 @@ def test_explicit_mcp_request_without_configuration_exposes_no_mcp_toolbox(tmp_p
 
 def test_mcp_code_task_is_not_mistaken_for_external_tool_request(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    (tmp_path / "integration.py").write_text("READY = True\n", encoding="utf-8")
     app = create_app()
-    observed = {"called": False}
+    observed = {"calls": 0}
 
     def respond(session):
-        observed["called"] = True
+        observed["calls"] += 1
         observed["workspace_summary"] = session.workspace_summary
-        return ModelReply(message="reviewed MCP code", done=True)
+        if observed["calls"] == 1:
+            return ModelReply(
+                message="inspect integration",
+                actions=[ToolAction("read_file", {"path": "integration.py"})],
+            )
+        return ModelReply(message="reviewed MCP code; no change is needed for the inspected state", done=True)
 
     monkeypatch.setattr(app.engine.model, "respond", respond)
 
@@ -288,8 +786,8 @@ def test_mcp_code_task_is_not_mistaken_for_external_tool_request(tmp_path, monke
         UserRequest(prompt="检查并修复 MCP integration code", cwd=str(tmp_path))
     )
 
-    assert summary.final_message == "reviewed MCP code"
-    assert observed["called"] is True
+    assert summary.final_message.startswith("reviewed MCP code")
+    assert observed["calls"] == 2
     assert observed["workspace_summary"] is not None
 
 
@@ -1999,6 +2497,85 @@ def test_session_resume_state_uses_latest_interrupted_trace(tmp_path):
     assert session.resume_state.last_user_prompt == "second task"
     assert session.resume_state.last_assistant_message == "Interrupted"
     assert session.resume_state.last_outcome == "interrupted"
+
+
+def test_session_resume_state_prefers_runtime_blocker_over_model_final_text(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd=str(tmp_path))
+    session.trace.append(
+        SessionRunTrace(
+            run_id="run-structured-blocker",
+            started_at="2026-08-12T01:00:00Z",
+            completed_at="2026-08-12T01:00:01Z",
+            prompt="create project",
+            final_message="Dictionary",
+            outcome="stalled",
+            event_count=2,
+            turn_count=1,
+            blockers=[
+                RuntimeBlocker(
+                    error_code="patch_syntax_error",
+                    summary="The requested document was not created because the patch protocol was invalid.",
+                    source="tool",
+                    tool="patch",
+                    retryability="non_retryable",
+                    required_action="change_strategy",
+                )
+            ],
+            checkpoint=TaskCheckpoint(
+                objective="create project",
+                task_id="task-create-project",
+                workspace_root=str(tmp_path.resolve()),
+                workspace_revision=1,
+                phase="incomplete",
+                completed_actions=["read_file", "patch"],
+                artifacts=["partial.md"],
+                evidence=[
+                    EvidenceRecord(
+                        "workspace_change",
+                        "patch",
+                        "task-create-project",
+                        1,
+                        ["partial.md"],
+                    )
+                ],
+                required_evidence=["workspace_change", "test"],
+                unmet_deliverables=["test"],
+                runtime_state={"shell_cwd": str(tmp_path)},
+            ),
+        )
+    )
+
+    store.save(session)
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert loaded.resume_state.open_issue.startswith("The requested document was not created")
+    assert loaded.resume_state.open_issue != "Dictionary"
+    assert loaded.resume_state.blockers[0].error_code == "patch_syntax_error"
+    assert loaded.resume_state.checkpoint.completed_actions == ["read_file", "patch"]
+    assert loaded.resume_state.checkpoint.task_id == "task-create-project"
+    assert loaded.resume_state.checkpoint.workspace_revision == 1
+    assert loaded.resume_state.checkpoint.evidence[0].kind == "workspace_change"
+    assert loaded.resume_state.checkpoint.required_evidence == ["workspace_change", "test"]
+    assert loaded.resume_state.checkpoint.unmet_deliverables == ["test"]
+
+
+def test_session_store_migrates_legacy_checkpoint_without_treating_actions_as_evidence(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+
+    checkpoint = store._normalize_checkpoint(
+        {
+            "objective": "legacy task",
+            "completed_actions": ["patch", "run_tests"],
+            "artifacts": ["report.md"],
+        }
+    )
+
+    assert checkpoint.schema_version == 2
+    assert checkpoint.task_id == ""
+    assert checkpoint.workspace_revision == 0
+    assert checkpoint.evidence == []
 
 
 def test_chat_persists_session_trace_from_logger_summary(tmp_path, monkeypatch):

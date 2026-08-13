@@ -23,7 +23,7 @@
 | `ToolDefinition.arguments` | 是 | 否 | 否 | 人类可读的参数说明。 |
 | `ToolDefinition.input_schema` | 是 | 否 | 否 | API tool schema 和本地参数校验。 |
 | `ToolDefinition.risk_level` | 是 | 否 | 否 | policy/approval 判断，也提示模型风险。 |
-| `ToolAction.arguments` | 是，作为 history args | 审批时可见 | 是 | 模型请求工具时给出的参数。 |
+| `ToolAction.arguments` | 是，作为有界 history args | 审批时可见 | 是 | 短参数原样投影；长字符串只保留长度和摘要哈希。 |
 | `ToolResult.output` | 是；经统一结果包装后进入 history | fallback 可见 | 是 | 给模型继续推理的有界结果。 |
 | `ToolResult.success` | 是，转成 status | 是 | 是 | 表示工具是否成功。 |
 | `ToolResult.error_code` | 是，转成 status | 是 | 是 | 稳定错误恢复、policy 判断和展示。 |
@@ -87,9 +87,20 @@ ToolResult(
 
 字段流向：
 
-- `output` 放文件内容，因为模型可能需要继续基于文件内容推理；当前实现会进入
-  session history。未来引入 `ContextPackager` 后，它才成为可摘要或裁剪的候选内容。
+- `output` 放文件内容，因为模型可能需要继续基于文件内容推理；当前实现会进入 session history，
+  随后由 `ContextPackager` 纳入统一预算并成为可裁剪候选内容。
 - `metadata.path`、`metadata.bytes`、`metadata.truncated` 给 runtime、日志和 summarizer 使用；普通 metadata 不会进入模型上下文。
+- `metadata.evidence` 是成功执行后发布给 runtime 的通用证据类型列表。工具声明自身可能产生的证据，
+  registry 只在成功结果上附加声明值；聚合型工具也可以为已确认的部分结果显式发布证据。完成门禁只能
+  消费这些语义类型，不能按工具名推断交付事实。
+- 当前通用类型有四种：`read` 表示观察了当前工作区状态，`workspace_change` 表示本任务确实完成过
+  工作区修改，`test` 表示当前 revision 的验证成功，`artifact` 表示某个引用已被明确确认为交付物。
+  `read` 和 `test` 只在产生它们的 revision 有效；`workspace_change` 和 immutable `artifact` 是任务级
+  累积事实，不因后续普通观察 revision 自动消失。
+- `metadata.invalidates_evidence` 撤销当前 revision 上指定类型的旧证据；测试工具失败时 registry 自动
+  撤销 `test`。成功的 write、execute、destructive 动作会保守推进观察 revision，即使它没有声明
+  `workspace_change`。`changed_files` 和 `artifact_refs` 仅用于摘要、恢复与回查，不能自动产生 artifact
+  或完成证据；交付物必须显式发布 `artifact` evidence。
 - `read_file_summary()` 基于 metadata 生成用户 run summary，例如 `read /home/changsai/testcode/README.md (4096 bytes truncated)`；这个摘要不写回 `ToolResult.output`。
 - 如果读取的是二进制文件，工具返回 `success=False`、`error_code="binary_file"`，`output` 放模型可见的失败原因，`metadata` 保留路径和文件大小供日志/摘要使用。
 
@@ -100,23 +111,33 @@ ToolResult(
 1. 模型是否需要看到这个信息？
    - 是：短结果放 `ToolResult.output`，大结果放摘要或截断内容，并在 `metadata` 提供可回查 source reference。
    - 否：不要放 `output`。
-2. runtime、测试或日志是否需要结构化字段？
+2. 工具成功时能证明哪类事实：`read`、`workspace_change`、`test` 或 `artifact`？不要把动作名称当证据。
+3. 如果工具会写工作区，是否只在真实写入成功后发布 `workspace_change`？
+4. runtime、测试或日志是否需要结构化字段？
    - 是：放 `ToolResult.metadata`。
    - 否：不要放 `metadata`。
-3. 用户 run summary 是否需要更短展示？
+5. 用户 run summary 是否需要更短展示？
    - 是：给 `SimpleTool` 配 `summarizer`。
    - 否：presenter fallback 到 `output` 截断。
-4. 这个工具的风险是什么？
+6. 这个工具的风险是什么？
    - 设置 `risk_level`：`read`、`write`、`execute`、`test`、`network` 或 `destructive`。
-5. 参数是否必须严格校验？
+7. 参数是否必须严格校验？
    - 写 `input_schema`，通常使用 `additionalProperties: false`。
 
 ## 当前边界
 
 当前实现中，`ToolRegistry` 先统一包装结果；`SessionContext.add_tool_result()` 只把有界
 `output`、状态、`error_code` 和特殊的 `metadata["action_arguments"]` 写入 session history。
+其中长 action argument 不会重复内联，避免失败的大型 diff 或文档在每轮 prompt 中倍增；完整参数
+写入当前 run 的 artifact，history 和事件日志只保留字符数、哈希与 `action_artifact_ref`。checkpoint
+保存任务身份、工作区 revision、类型化证据和实际交付 artifact，不把动作输入误当成任务产物。
 `ModelPromptBuilder` 再把 session history 放进模型输入。
 
-目标架构中，session history 和 tool result 会先进入 `ContextPackager`，由 packager 生成预算内 `PromptContextPackage`。因此新增 tool 不应假设 `output` 必然完整进入最终 prompt。
+事件日志中的超长字符串使用带 `$type: artifact_ref` 和 `schema_version` 的显式 envelope 替换，消费者
+不能把它当作原字符串。相同内容在一个 run 内按 SHA-256 复用同一 artifact，避免 execute、result 和
+finish 事件重复落盘。
+
+session history 和 tool result 随后进入 `ContextPackager`，由 packager 生成预算内上下文。因此新增 tool
+不应假设 `output` 必然完整进入最终 prompt。
 
 `ConsolePresenter` 展示 run summary 时，通过 `ToolRegistry.summarize_result()` 调用 tool 本地 summarizer。这个 summarizer 不属于 tool schema，不进入 model prompt，不进入 `ToolResult.metadata`。

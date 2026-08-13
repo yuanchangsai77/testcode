@@ -37,6 +37,7 @@ def tool(
             required=[],
         ),
         risk_level="test",
+        evidence_kinds=["test"],
         handler=lambda action, context: run(
             action,
             context,

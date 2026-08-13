@@ -604,10 +604,8 @@ class CLI:
                 self.logger.finalize(request, interrupted_summary)
             raise KeyboardInterrupt
         except RuntimeError as error:
-            self.presenter.clear_running_status_bar(0)
-            if self.logger is not None:
-                self.logger.record("run.error", {"message": str(error)})
-            summary = ExecutionSummary(
+            partial = getattr(self.engine, "last_failure_summary", None)
+            summary = partial if isinstance(partial, ExecutionSummary) else ExecutionSummary(
                 final_message=(
                     "Model API is unavailable right now. "
                     f"{error}. You can keep this session open and try again later."
@@ -615,6 +613,9 @@ class CLI:
                 tool_results=[],
                 outcome="runtime_error",
             )
+            self.presenter.clear_running_status_bar(len(summary.tool_results))
+            if self.logger is not None:
+                self.logger.record("run.error", {"message": str(error)})
         self.presenter.show_summary(summary)
         if self.logger is not None:
             self.logger.finalize(request, summary)

@@ -1,7 +1,7 @@
 import json
 
 from testcode.observability.logger import InMemoryLogger
-from testcode.types import ExecutionSummary, ToolResult, UserRequest
+from testcode.types import ExecutionSummary, RuntimeBlocker, TaskCheckpoint, ToolResult, UserRequest
 
 
 def test_logger_finalize_starts_run_and_writes_details_without_model_turns(tmp_path):
@@ -36,6 +36,54 @@ def test_logger_details_falls_back_to_repr_for_unserializable_payload(tmp_path):
     assert logger.last_run_id is not None
     details = (tmp_path / "runs" / logger.last_run_id / "details.log").read_text(encoding="utf-8")
     assert "'bad':" in details
+
+
+def test_logger_counts_model_retries_as_one_semantic_turn(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(prompt="inspect", cwd=str(tmp_path))
+    logger.start_run(request)
+    logger.record("model.request", {"attempt": 1})
+    logger.record("model.retry", {"retry": 1})
+    logger.record("model.request", {"attempt": 2})
+    logger.record("model.response", {"content": "done"})
+    logger.record("model.reply", {"turn": 1, "message": "done", "done": True, "actions": []})
+
+    logger.finalize(request, ExecutionSummary(final_message="done", tool_results=[]))
+
+    assert logger.last_run_summary is not None
+    assert logger.last_run_summary.turn_count == 1
+
+
+def test_logger_externalizes_large_event_values_to_run_artifact(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(prompt="write report", cwd=str(tmp_path))
+    logger.start_run(request)
+    large_diff = "x" * 20_000
+
+    logger.record("tool.execute", {"name": "patch", "arguments": {"diff": large_diff}})
+
+    event = logger.events[-1]
+    reference = event.payload["arguments"]["diff"]
+    assert reference["$type"] == "artifact_ref"
+    assert reference["schema_version"] == 1
+    assert reference["chars"] == 20_000
+    assert reference["sha256"]
+    assert large_diff not in json.dumps(event.payload)
+    assert __import__("pathlib").Path(reference["artifact_ref"]).exists()
+
+
+def test_logger_reuses_content_addressed_artifact_for_repeated_large_values(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    logger.start_run(UserRequest(prompt="write report", cwd=str(tmp_path)))
+    large_value = "x" * 20_000
+
+    logger.record("tool.execute", {"value": large_value})
+    first = logger.events[-1].payload["value"]
+    logger.record("tool.result", {"value": large_value})
+    second = logger.events[-1].payload["value"]
+
+    assert first["artifact_ref"] == second["artifact_ref"]
+    assert len(list((logger.run_dir / "artifacts").iterdir())) == 1
 
 
 def test_logger_does_not_copy_session_trace_into_run_events(tmp_path):
@@ -115,3 +163,27 @@ def test_logger_redacts_service_key_names(tmp_path):
     )
     assert "1234567890abcdef" not in combined
     assert "[REDACTED]" in combined
+
+
+def test_logger_redacts_checkpoint_and_blocker_before_session_trace(tmp_path):
+    secret = "sk-test123456789abcdef"
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(prompt="continue", cwd=str(tmp_path))
+    summary = ExecutionSummary(
+        final_message="blocked",
+        tool_results=[],
+        outcome="runtime_error",
+        blockers=[RuntimeBlocker("runtime_error", f"token={secret}")],
+        checkpoint=TaskCheckpoint(
+            objective=f"use token={secret}",
+            blockers=[RuntimeBlocker("runtime_error", f"token={secret}")],
+        ),
+    )
+
+    logger.finalize(request, summary)
+
+    trace = logger.last_run_summary
+    assert trace is not None
+    assert secret not in trace.checkpoint.objective
+    assert secret not in trace.blockers[0].summary
+    assert "[REDACTED]" in trace.checkpoint.objective

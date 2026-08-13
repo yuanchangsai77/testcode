@@ -15,6 +15,7 @@ def tool() -> SimpleTool:
         description="Return the working tree git diff.",
         arguments={"path": "Optional workspace-relative path to diff."},
         input_schema=schema({"path": {"type": "string"}}),
+        evidence_kinds=["read"],
         handler=run,
         summarizer=git_diff_summary,
     )

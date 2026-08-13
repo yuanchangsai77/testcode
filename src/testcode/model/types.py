@@ -35,6 +35,17 @@ class ModelClientConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelCapabilityProfile:
+    model: str
+    structured_output_mode: str = "prompt_json"
+    native_tool_calls: bool = True
+    parallel_tool_calls: bool = False
+    context_budget_chars: int = 120_000
+    provenance: str = "configured_default"
+    verified: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class CleanedContent:
     message: str
     thinking: str = ""

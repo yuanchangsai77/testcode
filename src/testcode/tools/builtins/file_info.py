@@ -12,6 +12,7 @@ def tool() -> SimpleTool:
         description="Return file type, size, and mtime for a workspace path.",
         arguments={"path": "Workspace-relative or absolute path."},
         input_schema=schema({"path": {"type": "string"}}, required=["path"]),
+        evidence_kinds=["read"],
         handler=run,
         summarizer=file_info_summary,
     )

@@ -116,11 +116,13 @@ Core files:
 
 - `src/testcode/orchestration/session.py`
 - `src/testcode/orchestration/engine.py`
+- `src/testcode/orchestration/control.py`
 
 Orchestration structure:
 
 - `session.py` owns the in-memory context passed to the model during one run.
 - `engine.py` owns the model/tool loop, policy checks, approvals, and duplicate action skipping.
+- `control.py` owns run budget/circuit-breaker policy and completion evidence evaluation.
 - `progress.py` defines optional progress events so terminal rendering stays outside the execution engine.
 - Long-lived conversation persistence is not part of this layer; it is handled by `sessions/store.py`.
 
@@ -142,13 +144,14 @@ Core files:
 - `src/testcode/context/project_rules.py`
 - `src/testcode/context/workspace.py`
 - `src/testcode/context/explicit.py`
+- `src/testcode/context/packager.py`
 
 Context structure:
 
 - `ProjectRulesLoader` loads `AGENTS.md` from the current path up to the nearest project boundary. Project boundaries are detected from `.git`, `pyproject.toml`, `package.json`, `Cargo.toml`, or `go.mod`.
 - `WorkspaceSummaryLoader` first decides whether workspace context is relevant, then detects common project markers, suggested test commands, git branch/status/latest commit, and a bounded workspace tree. Explicit enablement, selected context paths, clear repository terms, code-action plus code-target intent (including mixed Chinese/English prompts), or an explicit code path enable the summary. Ambiguous words such as `code`, `test`, or `project` alone do not.
 - `ExplicitContextLoader` expands CLI-provided `--context` files, directories, and globs under the workspace. It refuses out-of-workspace paths and binary files, clips individual reads defensively, and records source metadata for packaging.
-- A future `ContextPackager` sits after loaders and before prompt rendering. It selects, orders, clips, summarizes, and annotates candidate context into a `PromptContextPackage`.
+- `ContextPackager` sits after loaders and before provider transport. It accepts labeled context segments with explicit priority and required/truncatable policy, preserves protocol, security, project-rule, current-request and checkpoint segments first, selects recent conversation within a character budget, clips oversized sections at line boundaries where possible, and reports package statistics.
 
 The orchestration layer treats these as ordinary `ContextLoader` implementations. It does not know how rules, summaries, or explicit files are discovered.
 
@@ -158,16 +161,35 @@ The target long-task design uses a three-tier memory model:
 - Warm summary: compressed history of decisions, completed work, investigated paths, and resolved errors.
 - Cold archive: full events, tool outputs, patches, test logs, and read-state records stored on disk and referenced by id, path, hash, or run id.
 
-When that packaging layer is implemented, prompt construction should consume hot context and warm summaries by default, while cold archive content is loaded only on demand.
+The current packaging layer consumes checkpoint facts and recent history within a hard character budget. A later semantic summarizer should turn older history into warm summaries, while cold archive content remains loaded only on demand.
 
 Packaging boundaries:
 
-- `SessionStore` currently persists conversation/session metadata. A future checkpoint/archive store should hold full tool history, artifacts, read-state hashes, recovery summaries, and stable references.
+- `SessionStore` persists conversation/session metadata and bounded runtime checkpoint projections. A future archive store should hold full tool history, read-state hashes and stable content-addressed references.
 - `ContextLoader` implementations discover candidate context and source metadata.
-- A future `ContextPackager` will own pre-injection pruning, prioritization, source references, and budget accounting.
-- `ModelPromptBuilder` currently renders session context directly; after packaging is introduced it should render the packaged result.
+- `ContextPackager` owns pre-injection pruning, recent-message selection and character budget accounting.
+- `ModelPromptBuilder` groups candidate context, then delegates final message bounding to `ContextPackager`.
 
-The first `ContextPackager` implementation can be deliberately simple: pass through existing context with stable grouping, source labels, and character counts. More aggressive pruning and summarization should be added behind the same interface.
+More aggressive semantic pruning, content-addressed source references and token-aware accounting should be added behind the same interface.
+
+### Task identity and evidence ledger
+
+Recovery is scoped to a runtime task, not merely to the latest incomplete session run. Every checkpoint carries a
+stable `task_id`, its workspace root, a monotonic workspace revision, and a bounded typed evidence ledger. A new
+user request starts a new task unless the caller explicitly supplies the previous task id (or marks the request as a
+continuation); an incomplete outcome alone is never sufficient authority to inherit completion evidence.
+
+Tools publish semantic evidence kinds such as `workspace_change`, `test`, `read`, and `artifact` through the common
+`ToolResult` contract. Completion policy consumes those evidence kinds and does not depend on concrete tool names.
+Every confirmed workspace mutation advances the checkpoint revision. Observation and verification evidence is valid
+only for the revision at which it was produced, so a later write automatically makes an earlier test or read stale.
+Successful write/execute/destructive effects conservatively advance the observation revision even when they do not
+claim a completed workspace change, and a failed verification revokes test evidence for the current revision.
+Workspace-change and explicitly confirmed immutable-artifact evidence are cumulative task facts; only read and test
+evidence require an exact current-revision match. A no-change completion requires both a clear explanation and current
+read evidence.
+Subagent handoff evidence follows the same contract and is rebound to the parent task only when the runner accepts the
+child's bounded terminal result.
 
 Context assembly and packaging are described here only as architecture boundaries. The reusable extension hooks themselves belong to `docs/extensions/runtime-interfaces.md`.
 项目相关性判断、规则加载、项目探测和测试命令解析的当前行为见
@@ -196,6 +218,7 @@ Model structure:
 - `prompt.py` owns message and native tool schema construction. Complex context budgeting belongs in the context packaging layer, not directly in provider-specific prompt rendering.
 - `parser.py` owns native tool call parsing, JSON fallback parsing, and protocol-noise cleanup.
 - `types.py` owns model-specific configuration and parser helper types.
+- `ModelCapabilityProfile` declares the adapter's structured-output mode, native/parallel tool behavior and context budget. It also records whether the values are configured assumptions or verified capabilities; HTTP compatibility alone does not imply these semantic capabilities.
 
 Important boundaries:
 
@@ -320,7 +343,7 @@ Persistence structure:
 - Stored sessions currently include cwd, timestamps, status, messages, run ids, active Skill/capability ids, bounded trace records, and derived resume state.
 - Subagent session clusters add explicit parent/child launch provenance. Session images are immutable launch inputs, while the cluster public state stores only bounded member status, findings, verification results, blockers, and artifact references. Members do not gain direct access to each other's conversation or tool history; see [Subagent 会话集群](core/subagent-session-clusters.md).
 - `SubagentRunner` atomically claims ready members and executes them concurrently through separately composed runtimes. Model-visible spawn, run-ready, and status tools expose this lifecycle without turning the public state into a direct message bus.
-- Future checkpoint/archive records should store task state, summaries, archive references, full tool history, read-state hashes, and latest verification status.
+- Stored checkpoint records include schema version, task identity, workspace root/revision, objective, phase, completed actions, typed evidence, artifact references, required evidence, unmet deliverables, blockers and bounded runtime-state projections. Full tool history and content hashes remain archive concerns.
 - Corrupt session files are skipped when listing sessions.
 
 ## 4. Runtime Flow
@@ -330,7 +353,7 @@ Persistence structure:
 3. The interaction layer creates a `UserRequest`.
 4. The orchestration layer creates a `SessionContext` with available tool definitions and prior conversation metadata.
 5. Registered context loaders add candidate project rules, relevant workspace summaries, explicit context, and source metadata to the session. The capability warehouse restores explicitly active Skill guidance and tool capabilities. Non-project external or general-knowledge requests skip the workspace tree, Git status, and test signals unless explicitly enabled.
-6. `ModelPromptBuilder` currently renders session context directly into provider messages. A separate budgeted `ContextPackager` remains a planned boundary, not an active runtime stage.
+6. `ModelPromptBuilder` groups the current context and `ContextPackager` produces bounded provider messages according to the active model profile.
 7. `OpenAICompatibleModelClient` invokes the provider, or `StubModelClient` is used when no model base URL is configured.
 8. `ModelReplyParser` normalizes the provider response into either:
    - a final answer
@@ -340,7 +363,7 @@ Persistence structure:
 11. Allowed or approved actions are executed by the tool layer.
 12. Tool results are logged by the observability layer and added back into session state.
 13. Successful duplicate tool actions in the same run are skipped to avoid repeated side effects.
-14. The orchestration loop continues until a final answer is produced or a stop condition is reached.
+14. The completion gate checks required evidence; the loop continues until delivery is supported, a blocker is reached, or wall-clock/attempt/timeout budgets open the circuit.
 15. The interaction layer renders the answer and execution summary.
 16. In chat mode, `SessionStore` persists the updated conversation and last run id.
 
@@ -357,7 +380,7 @@ The code is intentionally minimal. It establishes the system boundaries and the 
 ## 6. 后续扩展点
 
 - additional model providers behind `ModelClient`
-- more robust prompt budgeting, checkpoint recovery, and context assembly
+- semantic context summarization, token-aware budgeting, and content-addressed archive retrieval
 - richer terminal UI with streaming updates
 - resource-aware context selection and budgeted packaging
 - additional capability warehouse sources, Skill assets, and automatic TTL/LRU release policies (see [能力仓库](extensions/capability-warehouse.md))

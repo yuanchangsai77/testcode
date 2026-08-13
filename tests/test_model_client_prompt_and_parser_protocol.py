@@ -9,6 +9,7 @@ from testcode.app import create_model_client
 from testcode.model.client import OpenAICompatibleModelClient, StubModelClient
 from testcode.model.parser import ModelReplyParser
 from testcode.model.prompt import ModelPromptBuilder
+from testcode.context.packager import ContextPackager, ContextSegment
 from testcode.model.types import (
     ModelClientConfig,
     ModelConnectionError,
@@ -238,9 +239,92 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
     assert first_history == {"role": "user", "content": "previous turn"}
     assert second_history == {"role": "assistant", "content": "previous answer"}
     assert "User request: inspect tools" in user
-    assert "Session history:" in user
+    assert "Recent current-run history:" in user
     assert "Available tools:" not in user
     assert "- read_file: Read a workspace file." not in user
+
+
+def test_context_packager_preserves_current_request_and_latest_conversation_within_budget():
+    packager = ContextPackager(max_chars=4_000)
+    conversation = [
+        {"role": "user", "content": f"old-{index}-" + ("x" * 700)}
+        for index in range(8)
+    ]
+
+    messages = packager.package(
+        "system rules\n" + ("s" * 1_000),
+        conversation,
+        "Current working directory: /repo\nUser request: create report\n" + ("h" * 2_000),
+    )
+
+    total = sum(len(str(item["content"])) for item in messages)
+    assert total <= 4_000
+    assert "User request: create report" in messages[-1]["content"]
+    assert any("old-7-" in str(item["content"]) for item in messages)
+    assert packager.last_stats.omitted_messages > 0
+
+
+def test_context_packager_prioritizes_required_atomic_sections_over_large_optional_context():
+    packager = ContextPackager(max_chars=4_000)
+
+    messages = packager.package_segments(
+        [
+            ContextSegment("MANDATORY PROTOCOL", "protocol", priority=100, required=True),
+            ContextSegment("MANDATORY SECURITY", "security", priority=100, required=True),
+            ContextSegment("optional\n" * 2_000, "optional instructions", priority=10),
+        ],
+        [],
+        [ContextSegment("User request: repair runtime", "current request", priority=100, required=True)],
+    )
+
+    system = str(messages[0]["content"])
+    assert "MANDATORY PROTOCOL" in system
+    assert "MANDATORY SECURITY" in system
+    assert "User request: repair runtime" in str(messages[-1]["content"])
+    assert sum(len(str(item["content"])) for item in messages) <= 4_000
+
+
+def test_context_packager_reserves_space_for_each_required_segment_when_they_overflow():
+    packager = ContextPackager(max_chars=4_000)
+
+    messages = packager.package_segments(
+        [ContextSegment("PROTOCOL\n" + ("p\n" * 2_000), "protocol", required=True)],
+        [],
+        [
+            ContextSegment("REQUEST\n" + ("r\n" * 2_000), "request", required=True),
+            ContextSegment("CHECKPOINT\n" + ("c\n" * 2_000), "checkpoint", required=True),
+        ],
+    )
+
+    assert "PROTOCOL" in str(messages[0]["content"])
+    assert "REQUEST" in str(messages[-1]["content"])
+    assert "CHECKPOINT" in str(messages[-1]["content"])
+    assert sum(len(str(item["content"])) for item in messages) <= 4_000
+
+
+def test_model_client_projects_capability_profile_and_context_stats(monkeypatch):
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        logger=logger,
+        context_budget_chars=4_000,
+    )
+    monkeypatch.setattr(
+        client,
+        "_post_json",
+        lambda *_args, **_kwargs: {
+            "choices": [{"message": {"content": '{"message":"done","done":true,"actions":[]}'}}]
+        },
+    )
+    session = SessionContext(request=UserRequest(prompt="hello", cwd="/repo"))
+
+    client.respond(session)
+
+    profile = session.request.metadata["model_capability_profile"]
+    request_event = next(event for event in logger.events if event.name == "model.request")
+    assert profile["structured_output_mode"] == "prompt_json"
+    assert profile["context_budget_chars"] == 4_000
+    assert request_event.payload["context_package"]["budget_chars"] == 4_000
 
 
 def test_build_messages_marks_delegated_subagent_and_prioritizes_current_task():

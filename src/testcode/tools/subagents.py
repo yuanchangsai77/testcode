@@ -185,14 +185,17 @@ def _run_tool() -> SimpleTool:
             outcome = "completed"
         succeeded = outcome == "completed"
         error_code = None if succeeded else f"subagent_{outcome}"
+        task_ids = {member.session_id: member.task_id for member in snapshot.members}
         result_payload = [
             {
                 "session_id": result.session_id,
+                "task_id": task_ids.get(result.session_id, ""),
                 "state": result.state,
                 "summary": _clip(result.final_message, 1000),
                 "changed_files": list(result.changed_files or []),
                 "verifications": list(result.verifications or []),
                 "artifact_refs": list(result.artifact_refs or []),
+                "evidence_kinds": list(getattr(result, "evidence_kinds", None) or []),
                 "blocker": dict(result.blocker or {}),
                 "unresolved_requirements": list(result.unresolved_requirements or []),
                 "output_validation": result.output_validation,
@@ -204,6 +207,54 @@ def _run_tool() -> SimpleTool:
             }
             for result in results
         ]
+        changed_files = sorted({
+            path
+            for item in result_payload
+            for path in item["changed_files"]
+            if isinstance(path, str) and path
+        })[:50]
+        artifact_refs = sorted({
+            ref
+            for item in result_payload
+            for ref in item["artifact_refs"]
+            if isinstance(ref, str) and ref
+        })[:50]
+        changed_task_ids = {
+            item["task_id"]
+            for item in result_payload
+            if "workspace_change" in item["evidence_kinds"] and item["task_id"]
+        }
+        verified_task_ids = {
+            item["task_id"]
+            for item in result_payload
+            if item["task_id"] and "test" in item["evidence_kinds"]
+        }
+        artifact_task_ids = {
+            item["task_id"]
+            for item in result_payload
+            if item["task_id"] and "artifact" in item["evidence_kinds"]
+        }
+        test_covers_final_revision = bool(verified_task_ids) and (
+            not changed_task_ids
+            or (len(changed_task_ids) == 1 and changed_task_ids <= verified_task_ids)
+        )
+        evidence = sorted({
+            kind
+            for item in result_payload
+            for kind in item["evidence_kinds"]
+            if kind not in {"workspace_change", "test", "artifact"}
+        })
+        if changed_task_ids:
+            evidence.append("workspace_change")
+        if artifact_task_ids:
+            evidence.append("artifact")
+        if test_covers_final_revision:
+            evidence.append("test")
+        evidence_sources = {
+            "workspace_change": sorted(changed_task_ids),
+            "artifact": sorted(artifact_task_ids),
+            "test": sorted(verified_task_ids) if test_covers_final_revision else [],
+        }
         return ToolResult(
             "subagent_run_ready",
             succeeded,
@@ -224,6 +275,13 @@ def _run_tool() -> SimpleTool:
                 ensure_ascii=False,
             ),
             error_code,
+            metadata={
+                "changed_files": changed_files,
+                "artifact_refs": artifact_refs,
+                "workspace_changed": bool(changed_task_ids),
+                "evidence": evidence,
+                "evidence_sources": evidence_sources,
+            },
         )
 
     return SimpleTool(

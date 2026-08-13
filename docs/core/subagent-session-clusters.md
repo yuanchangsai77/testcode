@@ -62,6 +62,8 @@ cluster、child session、attempt、工作区和上述合同。单独设置后�
 
 - 条目标识、作者会话和类型。
 - 有界摘要与可选 artifact 引用。
+- task id、成员身份和产生证据时的 workspace revision；父任务只接收 runner 已验证并重新绑定的证据。
+- runner 直接投影子任务的类型化 evidence；`changed_files` 仅用于展示，不能重新推断完成事实。
 - 创建时间、attempt、集群 revision、信任类别和校验状态。
 
 成员生命周期单独维护为 `ready`、`running`、`blocked`、`completed`、`failed` 或 `cancelled`。
@@ -91,6 +93,9 @@ cluster、child session、attempt、工作区和上述合同。单独设置后�
 校验，形成唯一终态结果，再把它投影到 run、session、cluster、public state 和 resume state。
 模型超时、连接异常和其他 runtime 异常也必须走同一收尾路径：关闭 logger run，写入失败 trace、
 结构化 blocker、未满足证据和可续跑状态，不能只更新 cluster 成员状态。
+若 engine 在多个成功工具之后异常，runner 必须复用 engine 已生成的 failure summary；其中的部分
+ToolResult、artifact、Shell cwd 和 runtime blocker 一并进入子会话 trace。公共空间只发布这份终态
+的有界投影，不复制子会话原始 history。
 `subagent_run_ready` 的直接结果与 `subagent_status` 读取的公共状态使用同一组有界字段；批量运行按
 completed、blocked、failed 分组，部分成功返回 `partial`，不能用空集合真值掩盖未解决成员。
 

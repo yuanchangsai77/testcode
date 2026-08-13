@@ -6,7 +6,8 @@ from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Callable, Protocol
 
-from ..types import ExecutionSummary, SessionRunTrace, StoredSession, UserRequest
+from ..types import ExecutionSummary, RuntimeBlocker, SessionRunTrace, StoredSession, UserRequest
+from .control import valid_evidence_kinds
 from .subagents import SubagentCoordinator
 
 
@@ -35,6 +36,7 @@ class SubagentRunResult:
     changed_files: list[str] | None = None
     verifications: list[dict[str, object]] | None = None
     artifact_refs: list[str] | None = None
+    evidence_kinds: list[str] | None = None
     blocker: dict[str, object] | None = None
     unresolved_requirements: list[str] | None = None
     output_validation: str = "validated"
@@ -258,7 +260,7 @@ class SubagentRunner:
                 cancelled = session_id in self._cancelled_sessions
             if cancelled:
                 return SubagentRunResult(child.session_id, "cancelled", "Subagent run was interrupted.")
-            changed_files, verifications, artifact_refs = self._handoff_evidence(summary)
+            changed_files, verifications, artifact_refs, evidence_kinds = self._handoff_evidence(summary)
             output_validation, output_problem = self._validate_output(summary.final_message)
             unresolved = self._unresolved_requirements(
                 member.required_evidence,
@@ -297,6 +299,7 @@ class SubagentRunner:
                     "changed_files": changed_files,
                     "verifications": verifications,
                     "artifact_refs": artifact_refs,
+                    "evidence_kinds": evidence_kinds,
                     "task_id": member.task_id,
                     "allowed_effects": list(member.allowed_effects),
                     "required_evidence": list(member.required_evidence),
@@ -331,6 +334,7 @@ class SubagentRunner:
                 changed_files=changed_files,
                 verifications=verifications,
                 artifact_refs=artifact_refs,
+                evidence_kinds=evidence_kinds,
                 blocker=blocker or None,
                 unresolved_requirements=unresolved,
                 output_validation=output_validation,
@@ -446,16 +450,15 @@ class SubagentRunner:
         artifact_refs: list[str],
         output_validation: str,
     ) -> list[str]:
-        successful_names = {result.name for result in summary.tool_results if result.success}
+        checkpoint = summary.checkpoint
+        evidence = valid_evidence_kinds(checkpoint)
         satisfied = {
             "response": bool(summary.final_message.strip()) and output_validation == "validated",
-            "read": bool(
-                successful_names
-                & {"read_file", "file_info", "find_files", "search_text", "list_dir", "git_show", "git_diff"}
-            ),
-            "write": bool(changed_files) or "patch" in successful_names,
-            "test": any(item.get("success") is True for item in verifications),
-            "artifact": bool(artifact_refs),
+            "read": "read" in evidence,
+            "write": "workspace_change" in evidence,
+            "workspace_change": "workspace_change" in evidence,
+            "test": "test" in evidence,
+            "artifact": "artifact" in evidence,
         }
         return [f"missing required evidence: {item}" for item in required if not satisfied.get(item, False)]
 
@@ -468,6 +471,15 @@ class SubagentRunner:
     ) -> dict[str, object]:
         if outcome == "completed":
             return {}
+        runtime_blockers = getattr(summary, "blockers", [])
+        if runtime_blockers:
+            blocker = runtime_blockers[-1]
+            return {
+                "error_code": blocker.error_code,
+                "tool": blocker.tool,
+                "summary": _bounded_summary(blocker.summary),
+                "action": blocker.required_action,
+            }
         failed = next((result for result in reversed(summary.tool_results) if not result.success), None)
         error_code = "model_output_invalid" if output_problem else ""
         tool_name = ""
@@ -505,10 +517,19 @@ class SubagentRunner:
     def _handoff_evidence(
         self,
         summary: ExecutionSummary,
-    ) -> tuple[list[str], list[dict[str, object]], list[str]]:
+    ) -> tuple[list[str], list[dict[str, object]], list[str], list[str]]:
         changed_files: set[str] = set()
         artifact_refs: set[str] = set()
         verifications: list[dict[str, object]] = []
+        current_revision = summary.checkpoint.workspace_revision
+        valid_test_producers = {
+            record.producer
+            for record in summary.checkpoint.evidence
+            if record.kind == "test"
+            and record.task_id == summary.checkpoint.task_id
+            and record.workspace_revision == current_revision
+        }
+        evidence_kinds = sorted(valid_evidence_kinds(summary.checkpoint))
         for result in summary.tool_results:
             metadata = result.metadata if isinstance(result.metadata, dict) else {}
             if result.success:
@@ -523,7 +544,12 @@ class SubagentRunner:
                 artifact_refs.update(
                     item for item in refs if isinstance(item, str) and self._safe_artifact_ref(item)
                 )
-            if result.name == "run_tests":
+            evidence = metadata.get("evidence", [])
+            if (
+                isinstance(evidence, list)
+                and "test" in evidence
+                and result.name in valid_test_producers
+            ):
                 verifications.append(
                     {
                         "tool": result.name,
@@ -533,7 +559,12 @@ class SubagentRunner:
                         "duration_seconds": metadata.get("duration_seconds"),
                     }
                 )
-        return sorted(changed_files)[:20], verifications[-10:], sorted(artifact_refs)[:20]
+        return (
+            sorted(changed_files)[:20],
+            verifications[-10:],
+            sorted(artifact_refs)[:20],
+            evidence_kinds,
+        )
 
     def _safe_artifact_ref(self, value: str) -> bool:
         if not value or len(value) > 500:
@@ -574,6 +605,14 @@ class SubagentRunner:
         expected_states: frozenset[str] = frozenset({"running"}),
     ) -> SubagentRunResult:
         summary_text = _bounded_summary(message)
+        partial_summary = None
+        if runtime is not None:
+            engine = getattr(runtime, "engine", None)
+            candidate = getattr(engine, "last_failure_summary", None)
+            if isinstance(candidate, ExecutionSummary):
+                partial_summary = candidate
+        summary = partial_summary or ExecutionSummary(summary_text, [], outcome="failed")
+        changed_files, verifications, artifact_refs, evidence_kinds = self._handoff_evidence(summary)
         blocker = {
             "error_code": self._runtime_error_code(error),
             "tool": "",
@@ -588,11 +627,16 @@ class SubagentRunner:
             "blocker",
             summary_text,
             expected_states=expected_states,
+            artifact_ref=artifact_refs[0] if artifact_refs else "",
             metadata={
                 "outcome": "failed",
                 "attempt": attempt,
                 "task_id": member.task_id if member is not None else "",
                 "blocker": blocker,
+                "changed_files": changed_files,
+                "verifications": verifications,
+                "artifact_refs": artifact_refs,
+                "evidence_kinds": evidence_kinds,
                 "unresolved_requirements": unresolved,
                 "validation_state": "not_run",
                 "trust_class": "runtime_result",
@@ -607,10 +651,25 @@ class SubagentRunner:
                 member.state,
                 message,
                 blocker=blocker,
+                changed_files=changed_files,
+                verifications=verifications,
+                artifact_refs=artifact_refs,
+                evidence_kinds=evidence_kinds,
                 unresolved_requirements=unresolved,
                 output_validation="not_run",
             )
-        summary = ExecutionSummary(summary_text, [], outcome="failed")
+        summary.outcome = "failed"
+        summary.final_message = summary_text
+        runtime_blocker = RuntimeBlocker(
+            error_code=str(blocker["error_code"]),
+            summary=summary_text,
+            source="runtime",
+            retryability="retryable",
+            required_action="resume",
+        )
+        summary.blockers = [runtime_blocker]
+        summary.checkpoint.phase = "incomplete"
+        summary.checkpoint.blockers = [runtime_blocker]
         persisted = False
         if runtime is not None:
             try:
@@ -636,6 +695,8 @@ class SubagentRunner:
                     outcome="failed",
                     event_count=0,
                     turn_count=0,
+                    blockers=list(summary.blockers),
+                    checkpoint=summary.checkpoint,
                 )
             )
             self.coordinator.session_store.save(child)
@@ -643,6 +704,10 @@ class SubagentRunner:
             child.session_id,
             "failed",
             summary_text,
+            changed_files=changed_files,
+            verifications=verifications,
+            artifact_refs=artifact_refs,
+            evidence_kinds=evidence_kinds,
             blocker=blocker,
             unresolved_requirements=unresolved,
             output_validation="not_run",

@@ -14,6 +14,10 @@ from .mcp.config import MCPServerConfig, load_mcp_server_configs
 MAX_MODEL_RETRIES = 20
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_MODEL_TURNS = 500
+MAX_MODEL_ATTEMPTS = 2_000
+MAX_CONSECUTIVE_MODEL_TIMEOUTS = 50
+MAX_RUN_SECONDS = 86_400.0
+MAX_PROMPT_CONTEXT_CHARS = 2_000_000
 MAX_SUBAGENT_MODEL_TIMEOUT_SECONDS = 300.0
 MAX_MCP_TOOLS_PER_SERVER = 1_024
 MAX_ACTIVE_CAPABILITIES = 32
@@ -31,6 +35,9 @@ class ModelRetryConfig:
 @dataclass(frozen=True, slots=True)
 class OrchestrationConfig:
     max_turns: int = 100
+    max_model_attempts: int = 120
+    max_consecutive_model_timeouts: int = 8
+    max_run_seconds: float = 900.0
     subagent_max_model_retries: int = 1
     subagent_model_timeout: float = 120.0
 
@@ -43,6 +50,7 @@ class RuntimeLimits:
     read_file_bytes: int = 64_000
     list_dir_entries: int = 200
     search_results: int = 200
+    prompt_context_chars: int = 120_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +123,27 @@ def _load_tuning(cwd: str | Path | None) -> tuple[ModelRetryConfig, Orchestratio
         ModelRetryConfig(max_retries=max_retries, delays=delays),
         OrchestrationConfig(
             max_turns=_bounded_int(values.get("orchestration.max_turns"), 100, 1, MAX_MODEL_TURNS, "orchestration.max_turns"),
+            max_model_attempts=_bounded_int(
+                values.get("orchestration.max_model_attempts"),
+                120,
+                1,
+                MAX_MODEL_ATTEMPTS,
+                "orchestration.max_model_attempts",
+            ),
+            max_consecutive_model_timeouts=_bounded_int(
+                values.get("orchestration.max_consecutive_model_timeouts"),
+                8,
+                1,
+                MAX_CONSECUTIVE_MODEL_TIMEOUTS,
+                "orchestration.max_consecutive_model_timeouts",
+            ),
+            max_run_seconds=_bounded_float(
+                values.get("orchestration.max_run_seconds"),
+                900.0,
+                1.0,
+                MAX_RUN_SECONDS,
+                "orchestration.max_run_seconds",
+            ),
             subagent_max_model_retries=_bounded_int(
                 values.get("orchestration.subagent_max_model_retries"),
                 1,
@@ -137,6 +166,13 @@ def _load_tuning(cwd: str | Path | None) -> tuple[ModelRetryConfig, Orchestratio
             read_file_bytes=_bounded_int(values.get("limits.read_file_bytes"), 64_000, 1, MAX_READ_FILE_BYTES, "limits.read_file_bytes"),
             list_dir_entries=_bounded_int(values.get("limits.list_dir_entries"), 200, 1, MAX_TOOL_RESULTS, "limits.list_dir_entries"),
             search_results=_bounded_int(values.get("limits.search_results"), 200, 1, MAX_TOOL_RESULTS, "limits.search_results"),
+            prompt_context_chars=_bounded_int(
+                values.get("limits.prompt_context_chars"),
+                120_000,
+                4_000,
+                MAX_PROMPT_CONTEXT_CHARS,
+                "limits.prompt_context_chars",
+            ),
         ),
     )
 

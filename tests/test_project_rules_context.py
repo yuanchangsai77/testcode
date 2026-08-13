@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from testcode.app import create_app
-from testcode.context import ProjectRulesLoader
+from testcode.context import ContextPackager, ProjectRulesLoader
 from testcode.model.prompt import ModelPromptBuilder
 from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.session import SessionContext
-from testcode.types import UserRequest
+from testcode.types import ToolDefinition, UserRequest
 
 
 def test_project_rules_loader_reads_agents_from_root_to_cwd(tmp_path):
@@ -88,6 +88,20 @@ def test_prompt_includes_project_rules_before_tools(tmp_path):
     assert "### Project Rules:" in system
     assert "prefer rg" in system
     assert system.index("### Project Rules:") < system.index("Available tools:")
+
+
+def test_prompt_keeps_project_rules_in_small_context_budget(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("MANDATORY PROJECT RULE\n", encoding="utf-8")
+    session = SessionContext(request=UserRequest(prompt="inspect", cwd=str(tmp_path)))
+    ProjectRulesLoader().load_context(session.request, session)
+    session.available_tools = [
+        ToolDefinition(name=f"tool_{index}", description="x" * 500)
+        for index in range(20)
+    ]
+
+    messages = ModelPromptBuilder(ContextPackager(4_000)).build_messages(session)
+
+    assert "MANDATORY PROJECT RULE" in str(messages[0]["content"])
 
 
 def test_create_app_registers_context_loaders(tmp_path, monkeypatch):

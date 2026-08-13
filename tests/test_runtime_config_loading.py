@@ -138,12 +138,16 @@ max_retries = 4
 
 [orchestration]
 max_turns = 12
+max_model_attempts = 30
+max_consecutive_model_timeouts = 4
+max_run_seconds = 45
 subagent_max_model_retries = 1
 subagent_model_timeout = 15
 
 [limits]
 active_capabilities = 5
 search_results = 300
+prompt_context_chars = 24000
         """.strip(), encoding="utf-8"
     )
     monkeypatch.setattr("testcode.config.Path.home", lambda: global_dir)
@@ -153,10 +157,14 @@ search_results = 300
     assert config.model_retry.max_retries == 4
     assert config.model_retry.delays == (0.1,)
     assert config.orchestration.max_turns == 12
+    assert config.orchestration.max_model_attempts == 30
+    assert config.orchestration.max_consecutive_model_timeouts == 4
+    assert config.orchestration.max_run_seconds == 45.0
     assert config.orchestration.subagent_max_model_retries == 1
     assert config.orchestration.subagent_model_timeout == 15.0
     assert config.limits.active_capabilities == 5
     assert config.limits.search_results == 300
+    assert config.limits.prompt_context_chars == 24000
 
 
 @pytest.mark.parametrize(

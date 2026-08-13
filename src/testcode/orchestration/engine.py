@@ -5,10 +5,11 @@ import threading
 import time
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
 from ..intent import RequestIntentClassifier
 from ..model.types import ModelRetryableError
-from ..types import ExecutionSummary, ToolAction, ToolResult, UserRequest
+from ..types import EvidenceRecord, ExecutionSummary, RuntimeBlocker, TaskCheckpoint, ToolAction, ToolResult, UserRequest
 from .ext import ContextLoader
 from .permissions import PermissionContext
 from .progress import (
@@ -19,6 +20,7 @@ from .progress import (
     ProgressSignal,
 )
 from .session import SessionContext
+from .control import CompletionPolicy, RunBudgetPolicy
 
 
 class ExecutionEngine:
@@ -45,7 +47,9 @@ class ExecutionEngine:
         "delegated_resource_not_allowed",
         "invalid_argument_type",
         "invalid_argument_value",
+        "invalid_patch",
         "missing_argument",
+        "patch_syntax_error",
         "path_outside_workspace",
         "path_not_found",
         "subagent_blocked",
@@ -70,6 +74,9 @@ class ExecutionEngine:
         max_model_retries: int = 7,
         model_retry_delays: tuple[float, ...] | None = None,
         max_turns: int = 100,
+        max_model_attempts: int = 120,
+        max_consecutive_model_timeouts: int = 8,
+        max_run_seconds: float = 900.0,
         mcp_server_count: int = 0,
         intent_classifier: RequestIntentClassifier | None = None,
         progress_policy: ProgressPolicy | None = None,
@@ -85,6 +92,15 @@ class ExecutionEngine:
         self.max_model_retries = max(0, int(max_model_retries))
         self.model_retry_delays = tuple(model_retry_delays or self.model_retry_delays)
         self.max_turns = max(1, int(max_turns))
+        self.max_model_attempts = max(1, int(max_model_attempts))
+        self.max_consecutive_model_timeouts = max(1, int(max_consecutive_model_timeouts))
+        self.max_run_seconds = max(1.0, float(max_run_seconds))
+        self.run_budget_policy = RunBudgetPolicy(
+            max_model_attempts=self.max_model_attempts,
+            max_consecutive_model_timeouts=self.max_consecutive_model_timeouts,
+            max_run_seconds=self.max_run_seconds,
+        )
+        self.completion_policy = CompletionPolicy()
         self.mcp_server_count = max(0, int(mcp_server_count))
         self.intent_classifier = intent_classifier or RequestIntentClassifier()
         self.progress_policy = progress_policy or DefaultProgressPolicy()
@@ -93,16 +109,20 @@ class ExecutionEngine:
         self._keep_tool_state = False
         self._runtime_cancelled = False
         self._cancel_event = threading.Event()
+        self.last_failure_summary: ExecutionSummary | None = None
+        self.current_session: SessionContext | None = None
 
     def execute(self, request: UserRequest) -> ExecutionSummary:
         self._runtime_cancelled = False
         self._cancel_event.clear()
+        self.last_failure_summary = None
         try:
             return self._execute(request)
         except KeyboardInterrupt:
             self.cancel_current_run()
             raise
-        except Exception:
+        except Exception as error:
+            self.last_failure_summary = self._runtime_failure_summary(error)
             self.current_session = None
             raise
 
@@ -138,10 +158,12 @@ class ExecutionEngine:
         permissions = PermissionContext()
         available_tools = self._available_tool_definitions(request)
         provider_statuses = getattr(self.tools, "provider_statuses", lambda: [])()
+        checkpoint = self._initial_checkpoint(request)
         session = SessionContext(
             request=request,
             available_tools=available_tools,
             external_tool_statuses=provider_statuses,
+            checkpoint=checkpoint,
         )
         self.current_session = session
 
@@ -160,9 +182,23 @@ class ExecutionEngine:
             self._intent_prompt(request),
             request.metadata,
         )
+        session.checkpoint.required_evidence = self._required_evidence(request, request_intent)
+        session.checkpoint.unmet_deliverables = self._unmet_evidence(session)
+        invalid_completion_count = 0
+        run_started = time.monotonic()
+        model_attempts = 0
+        consecutive_model_timeouts = 0
 
         for turn in range(1, self.max_turns + 1):
             self._raise_if_cancelled()
+            budget_problem = self._run_budget_problem(
+                run_started,
+                model_attempts,
+                consecutive_model_timeouts,
+            )
+            if budget_problem is not None:
+                return self._finish(self._budget_summary(session, budget_problem))
+            self._sync_checkpoint_blockers(session)
             session.available_tools = self._available_tool_definitions(request)
             visible_tool_names = {definition.name for definition in session.available_tools}
             expiring_turn_capabilities = (
@@ -177,6 +213,7 @@ class ExecutionEngine:
                 progress_handle = self.progress_reporter.model_started()
             try:
                 retry_count = 0
+                budget_problem = None
                 while True:
                     if retry_count > 0:
                         retry_reporter = getattr(self.progress_reporter, "model_retrying", None)
@@ -189,10 +226,35 @@ class ExecutionEngine:
                                 0.0,
                             )
                     try:
+                        budget_problem = self._run_budget_problem(
+                            run_started,
+                            model_attempts,
+                            consecutive_model_timeouts,
+                        )
+                        if budget_problem is not None:
+                            break
+                        model_attempts += 1
+                        session.checkpoint.runtime_state["model_attempts"] = str(model_attempts)
                         reply = self.model.respond(session)
+                        consecutive_model_timeouts = 0
                         self._raise_if_cancelled()
                         break
                     except (ModelRetryableError, TimeoutError) as error:
+                        if self._is_timeout_error(error):
+                            consecutive_model_timeouts += 1
+                            session.checkpoint.runtime_state["consecutive_model_timeouts"] = str(
+                                consecutive_model_timeouts
+                            )
+                        else:
+                            consecutive_model_timeouts = 0
+                            session.checkpoint.runtime_state["consecutive_model_timeouts"] = "0"
+                        budget_problem = self._run_budget_problem(
+                            run_started,
+                            model_attempts,
+                            consecutive_model_timeouts,
+                        )
+                        if budget_problem is not None:
+                            break
                         if retry_count >= self.max_model_retries:
                             raise RuntimeError(
                                 f"All {self.max_model_retries} retry attempts failed "
@@ -223,6 +285,8 @@ class ExecutionEngine:
             finally:
                 if progress_handle is not None:
                     self.progress_reporter.model_finished(progress_handle)
+            if budget_problem is not None:
+                return self._finish(self._budget_summary(session, budget_problem))
             session.add_model_message(reply.message)
             self.logger.record(
                 "model.reply",
@@ -233,15 +297,6 @@ class ExecutionEngine:
                     "actions": [action.name for action in reply.actions],
                 },
             )
-
-            if reply.done and not reply.actions:
-                return self._finish(
-                    ExecutionSummary(
-                        final_message=reply.message,
-                        tool_results=session.tool_results,
-                        active_instructions=session.active_instructions,
-                    )
-                )
 
             turn_results: list[ToolResult] = []
             for action in reply.actions:
@@ -388,6 +443,40 @@ class ExecutionEngine:
                 for result in turn_results
             )
             if reply.done and not recovery_required:
+                session.checkpoint.unmet_deliverables = self._unmet_evidence(session)
+                completion_problem = self._completion_problem(reply.message, session)
+                if completion_problem:
+                    invalid_completion_count += 1
+                    result = ToolResult(
+                        name="completion_gate",
+                        success=False,
+                        output=completion_problem,
+                        error_code="model_output_invalid",
+                        metadata={
+                            "retryability": "conditional",
+                            "required_action": "provide_meaningful_final_answer",
+                        },
+                    )
+                    self._record_synthetic_tool_result(result)
+                    session.add_tool_result(result)
+                    if invalid_completion_count >= 2:
+                        return self._finish(
+                            ExecutionSummary(
+                                final_message=completion_problem,
+                                tool_results=session.tool_results,
+                                outcome="stalled",
+                                active_instructions=session.active_instructions,
+                            )
+                        )
+                    continue
+                if invalid_completion_count:
+                    result = ToolResult(
+                        name="completion_gate",
+                        success=True,
+                        output="Model supplied a valid replacement completion.",
+                    )
+                    self._record_synthetic_tool_result(result)
+                    session.add_tool_result(result)
                 return self._finish(
                     ExecutionSummary(
                         final_message=reply.message,
@@ -462,6 +551,21 @@ class ExecutionEngine:
     def _finish(self, summary: ExecutionSummary) -> ExecutionSummary:
         if summary.outcome == "completed" and summary.tool_results:
             summary.outcome = self._aggregate_outcome(summary.tool_results)
+        if self.current_session is not None:
+            summary.checkpoint = self.current_session.checkpoint
+        unresolved = self._unresolved_results(summary.tool_results)
+        if summary.outcome == "completed":
+            summary.blockers = []
+            summary.checkpoint.blockers = []
+            summary.checkpoint.phase = "completed"
+        else:
+            summary.blockers = (
+                list(summary.blockers)
+                if summary.blockers and not unresolved
+                else self._runtime_blockers(unresolved, summary)
+            )
+            summary.checkpoint.blockers = list(summary.blockers)
+            summary.checkpoint.phase = "blocked" if summary.outcome == "blocked" else "incomplete"
         self.current_session = None
         if self._keep_tool_state and self.capability_warehouse is not None:
             summary.active_instructions = self.capability_warehouse.persisted_instructions()
@@ -473,16 +577,229 @@ class ExecutionEngine:
                 close_state()
         return summary
 
-    def _may_mutate_workspace(self, risk_level: str) -> bool:
-        return risk_level in {"write", "execute", "test", "destructive"}
+    def _initial_checkpoint(self, request: UserRequest) -> TaskCheckpoint:
+        workspace_root = str(Path(request.cwd).resolve())
+        resume_state = request.metadata.get("resume_state")
+        previous = getattr(resume_state, "checkpoint", None)
+        previous_outcome = getattr(resume_state, "last_outcome", "")
+        if previous is None and isinstance(resume_state, dict):
+            previous = resume_state.get("checkpoint")
+            previous_outcome = str(resume_state.get("last_outcome", ""))
+        resumable_outcomes = {
+            "blocked",
+            "stalled",
+            "runtime_error",
+            "interrupted",
+            "exhausted",
+            "failed",
+            "model_output_invalid",
+        }
+        delegated = request.metadata.get("delegated_task")
+        delegated_task_id = delegated.get("task_id") if isinstance(delegated, dict) else ""
+        requested_task_id = request.metadata.get("task_id") or delegated_task_id
+        previous_task_id = (
+            previous.task_id if isinstance(previous, TaskCheckpoint)
+            else str(previous.get("task_id", "")) if isinstance(previous, dict)
+            else ""
+        )
+        previous_root = (
+            previous.workspace_root if isinstance(previous, TaskCheckpoint)
+            else str(previous.get("workspace_root", "")) if isinstance(previous, dict)
+            else ""
+        )
+        previous_objective = (
+            previous.objective if isinstance(previous, TaskCheckpoint)
+            else str(previous.get("objective", "")) if isinstance(previous, dict)
+            else ""
+        )
+        explicit_resume_id = request.metadata.get("resume_task_id")
+        normalized_prompt = " ".join(request.prompt.split()).casefold()
+        explicit_continuation_prompts = {
+            "continue",
+            "resume",
+            "继续",
+            "这里继续",
+            "接着",
+            "继续处理",
+            "接着做",
+            "接着处理",
+        }
+        resume_requested = request.metadata.get("continue_task") is True or (
+            isinstance(explicit_resume_id, str) and explicit_resume_id == previous_task_id
+        ) or (
+            isinstance(requested_task_id, str) and requested_task_id == previous_task_id
+        ) or (
+            normalized_prompt in explicit_continuation_prompts
+        ) or (
+            previous_objective
+            and " ".join(previous_objective.split()).casefold()
+            == normalized_prompt
+        )
+        can_resume = (
+            previous_outcome in resumable_outcomes
+            and bool(previous_task_id)
+            and resume_requested
+            and previous_root == workspace_root
+        )
+        task_id = previous_task_id if can_resume else (
+            str(requested_task_id) if requested_task_id else uuid4().hex
+        )
+        checkpoint = TaskCheckpoint(
+            objective=previous_objective if can_resume else request.prompt,
+            task_id=task_id,
+            workspace_root=workspace_root,
+        )
+        if isinstance(previous, TaskCheckpoint) and can_resume:
+            checkpoint.completed_actions = list(previous.completed_actions[-50:])
+            checkpoint.artifacts = list(previous.artifacts[-50:])
+            checkpoint.workspace_revision = previous.workspace_revision
+            checkpoint.evidence = list(previous.evidence[-100:])
+            checkpoint.runtime_state = dict(previous.runtime_state)
+        elif isinstance(previous, dict) and can_resume:
+            completed = previous.get("completed_actions", [])
+            artifacts = previous.get("artifacts", [])
+            evidence = previous.get("evidence", [])
+            runtime_state = previous.get("runtime_state", {})
+            try:
+                checkpoint.workspace_revision = max(0, int(previous.get("workspace_revision", 0)))
+            except (TypeError, ValueError):
+                checkpoint.workspace_revision = 0
+            if isinstance(completed, list):
+                checkpoint.completed_actions = [str(item) for item in completed[-50:]]
+            if isinstance(artifacts, list):
+                checkpoint.artifacts = [str(item) for item in artifacts[-50:]]
+            if isinstance(evidence, list):
+                for item in evidence[-100:]:
+                    if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
+                        continue
+                    try:
+                        revision = max(0, int(item.get("workspace_revision", 0)))
+                    except (TypeError, ValueError):
+                        revision = 0
+                    checkpoint.evidence.append(
+                        EvidenceRecord(
+                            kind=item["kind"],
+                            producer=str(item.get("producer", "unknown")),
+                            task_id=str(item.get("task_id", task_id)),
+                            workspace_revision=revision,
+                            artifact_refs=[
+                                str(ref) for ref in item.get("artifact_refs", [])
+                                if isinstance(ref, str) and ref
+                            ] if isinstance(item.get("artifact_refs", []), list) else [],
+                            source_task_ids=[
+                                str(value) for value in item.get("source_task_ids", [])
+                                if isinstance(value, str) and value
+                            ] if isinstance(item.get("source_task_ids", []), list) else [],
+                        )
+                    )
+            if isinstance(runtime_state, dict):
+                checkpoint.runtime_state = {
+                    str(key): str(value) for key, value in runtime_state.items()
+                }
+        shell = getattr(self.tools, "state_for", lambda *_args: None)("shell_session")
+        shell_cwd = getattr(shell, "cwd", None)
+        if shell_cwd is not None:
+            checkpoint.runtime_state["shell_cwd"] = str(shell_cwd)
+        else:
+            checkpoint.runtime_state["shell_cwd"] = request.cwd
+        checkpoint.phase = "executing"
+        checkpoint.blockers = []
+        return checkpoint
 
-    def _terminal_outcome(self, results: list[ToolResult]) -> str:
-        if not any(not result.success for result in results):
-            return "completed"
-        return self._blocked_outcome(results, default="stalled")
+    def _completion_problem(self, message: str, session: SessionContext | None = None) -> str:
+        unresolved = (
+            [
+                result
+                for result in self._unresolved_results(session.tool_results)
+                if result.name != "completion_gate"
+            ]
+            if session is not None
+            else []
+        )
+        return self.completion_policy.completion_problem(message, session, unresolved)
 
-    def _aggregate_outcome(self, results: list[ToolResult]) -> str:
-        """Resolve failures by later success of the same tool, not unrelated activity."""
+    def _required_evidence(self, request: UserRequest, request_intent) -> list[str]:
+        return self.completion_policy.required_evidence(request, request_intent)
+
+    def _unmet_evidence(self, session: SessionContext) -> list[str]:
+        return self.completion_policy.unmet_evidence(session)
+
+    def _sync_checkpoint_blockers(self, session: SessionContext) -> None:
+        unresolved = self._unresolved_results(session.tool_results)
+        if not unresolved:
+            session.checkpoint.blockers = []
+            return
+        placeholder = ExecutionSummary("", session.tool_results, outcome="stalled")
+        session.checkpoint.blockers = self._runtime_blockers(unresolved, placeholder)
+
+    def _runtime_failure_summary(self, error: BaseException) -> ExecutionSummary:
+        session = self.current_session
+        results = list(session.tool_results) if session is not None else []
+        checkpoint = session.checkpoint if session is not None else TaskCheckpoint()
+        message = (
+            "Model API is unavailable right now. "
+            f"{error}. You can keep this session open and try again later."
+        )
+        blocker = RuntimeBlocker(
+            error_code=self._runtime_error_code(error),
+            summary=str(error) or type(error).__name__,
+            source="runtime",
+            retryability="retryable",
+            required_action="resume",
+        )
+        checkpoint.phase = "incomplete"
+        checkpoint.blockers = [blocker]
+        return ExecutionSummary(
+            final_message=message,
+            tool_results=results,
+            outcome="runtime_error",
+            blockers=[blocker],
+            checkpoint=checkpoint,
+        )
+
+    def _run_budget_problem(
+        self,
+        run_started: float,
+        model_attempts: int,
+        consecutive_model_timeouts: int,
+    ) -> RuntimeBlocker | None:
+        return self.run_budget_policy.problem(
+            run_started,
+            model_attempts,
+            consecutive_model_timeouts,
+        )
+
+    def _budget_summary(
+        self,
+        session: SessionContext,
+        blocker: RuntimeBlocker,
+    ) -> ExecutionSummary:
+        return ExecutionSummary(
+            final_message=blocker.summary,
+            tool_results=session.tool_results,
+            outcome="exhausted",
+            active_instructions=session.active_instructions,
+            blockers=[blocker],
+            checkpoint=session.checkpoint,
+        )
+
+    def _is_timeout_error(self, error: BaseException) -> bool:
+        return self.run_budget_policy.is_timeout(error)
+
+    def _runtime_error_code(self, error: BaseException) -> str:
+        current: BaseException | None = error
+        while current is not None:
+            name = type(current).__name__
+            if name == "ModelTimeoutError" or isinstance(current, TimeoutError):
+                return "model_timeout"
+            if name == "ModelConnectionError":
+                return "model_connection_error"
+            if name == "ModelServiceError":
+                return "model_service_error"
+            current = current.__cause__
+        return "runtime_error"
+
+    def _unresolved_results(self, results: list[ToolResult]) -> list[ToolResult]:
         later_successes: set[str] = set()
         unresolved: list[ToolResult] = []
         for result in reversed(results):
@@ -494,7 +811,56 @@ class ExecutionEngine:
             if self._result_identity(result) in later_successes:
                 continue
             unresolved.append(result)
-        return self._terminal_outcome(list(reversed(unresolved)))
+        return list(reversed(unresolved))
+
+    def _runtime_blockers(
+        self,
+        unresolved: list[ToolResult],
+        summary: ExecutionSummary,
+    ) -> list[RuntimeBlocker]:
+        blockers = [
+            RuntimeBlocker(
+                error_code=result.error_code or "tool_failed",
+                summary=self._bounded_blocker_summary(result.output),
+                source="tool",
+                tool=result.name,
+                retryability=(
+                    "non_retryable"
+                    if result.error_code in self.non_retryable_error_codes
+                    else "conditional"
+                ),
+                required_action="change_strategy",
+            )
+            for result in unresolved
+        ]
+        if blockers:
+            return blockers[-10:]
+        return [
+            RuntimeBlocker(
+                error_code=summary.outcome,
+                summary=summary.final_message,
+                source="runtime",
+                retryability="conditional",
+                required_action="resume",
+            )
+        ]
+
+    def _bounded_blocker_summary(self, value: str, limit: int = 1_000) -> str:
+        if len(value) <= limit:
+            return value
+        return f"{value[: limit - 3]}..."
+
+    def _may_mutate_workspace(self, risk_level: str) -> bool:
+        return risk_level in {"write", "execute", "test", "destructive"}
+
+    def _terminal_outcome(self, results: list[ToolResult]) -> str:
+        if not any(not result.success for result in results):
+            return "completed"
+        return self._blocked_outcome(results, default="stalled")
+
+    def _aggregate_outcome(self, results: list[ToolResult]) -> str:
+        """Resolve failures by later success of the same tool, not unrelated activity."""
+        return self._terminal_outcome(self._unresolved_results(results))
 
     def _result_identity(self, result: ToolResult) -> str:
         arguments = result.metadata.get("action_arguments")
@@ -637,7 +1003,12 @@ class ExecutionEngine:
         )
 
     def _has_failed_test_result(self, results: list[ToolResult]) -> bool:
-        return any(result.name == "run_tests" and not result.success for result in results)
+        definition_for = getattr(self.tools, "definition_for", lambda _name: None)
+        return any(
+            not result.success
+            and getattr(definition_for(result.name), "risk_level", "") == "test"
+            for result in results
+        )
 
     def _approval_remembered(self, approval_key: tuple[str, str], approved_risk_groups: set[tuple[str, str]]) -> bool:
         return approval_key[1] != "destructive" and approval_key in approved_risk_groups
@@ -755,6 +1126,19 @@ class ExecutionEngine:
         if result.error_code == "blocked_by_security_policy":
             return
         result.metadata.setdefault("action_arguments", dict(action.arguments))
+        try:
+            serialized = json.dumps(action.arguments, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            serialized = repr(action.arguments)
+        if len(serialized) > 2_000:
+            write_artifact = getattr(self.logger, "write_artifact", None)
+            if callable(write_artifact):
+                artifact_ref = write_artifact(
+                    "tool-action",
+                    {"name": action.name, "arguments": action.arguments},
+                )
+                if artifact_ref:
+                    result.metadata.setdefault("action_artifact_ref", artifact_ref)
 
     def _record_synthetic_tool_result(self, result: ToolResult) -> None:
         self.logger.record(

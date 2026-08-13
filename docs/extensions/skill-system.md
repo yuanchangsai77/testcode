@@ -164,7 +164,8 @@ The active application path is:
     When writing or running Python unit tests:
     - Prefer using `pytest` over standard `unittest` unless specified...
     ```
-- A future `ContextPackager` will own Skill-specific budgets, source references, clipping, and summaries. This behavior is a target, not part of the current request path.
+- `ContextPackager` now owns the shared prompt budget, prioritized segments and clipping for active Skill content.
+  Skill-specific semantic summaries and on-demand source references remain future work behind that boundary.
 
 ### 4. Skill References and Artifacts
 - `references/`, `assets/`, and `scripts/` must be indexed separately from prompt content.

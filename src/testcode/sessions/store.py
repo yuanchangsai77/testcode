@@ -8,7 +8,16 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Iterator
 
-from ..types import SessionRecord, SessionResumeState, SessionRunTrace, SessionTurnTrace, StoredSession
+from ..types import (
+    EvidenceRecord,
+    RuntimeBlocker,
+    SessionRecord,
+    SessionResumeState,
+    SessionRunTrace,
+    SessionTurnTrace,
+    StoredSession,
+    TaskCheckpoint,
+)
 
 try:
     import fcntl
@@ -260,6 +269,8 @@ class SessionStore:
                     turn_count=self._safe_int(item.get("turn_count"), len(turns)),
                     tool_names=self._string_list(item.get("tool_names")),
                     turns=turns,
+                    blockers=self._normalize_blockers(item.get("blockers", [])),
+                    checkpoint=self._normalize_checkpoint(item.get("checkpoint", {})),
                 )
             )
         return normalized
@@ -275,7 +286,75 @@ class SessionStore:
             last_tool_names=self._string_list(payload.get("last_tool_names")),
             open_issue=str(payload.get("open_issue", "")),
             recovery_hint=str(payload.get("recovery_hint", "")),
+            blockers=self._normalize_blockers(payload.get("blockers", [])),
+            checkpoint=self._normalize_checkpoint(payload.get("checkpoint", {})),
         )
+
+    def _normalize_blockers(self, value: object) -> list[RuntimeBlocker]:
+        if not isinstance(value, list):
+            return []
+        blockers: list[RuntimeBlocker] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            error_code = item.get("error_code")
+            summary = item.get("summary")
+            if not isinstance(error_code, str) or not isinstance(summary, str):
+                continue
+            blockers.append(
+                RuntimeBlocker(
+                    error_code=error_code,
+                    summary=summary,
+                    source=str(item.get("source", "runtime")),
+                    tool=str(item.get("tool", "")),
+                    retryability=str(item.get("retryability", "conditional")),
+                    required_action=str(item.get("required_action", "resume")),
+                )
+            )
+        return blockers
+
+    def _normalize_checkpoint(self, value: object) -> TaskCheckpoint:
+        if not isinstance(value, dict):
+            return TaskCheckpoint()
+        runtime_state = value.get("runtime_state", {})
+        return TaskCheckpoint(
+            objective=str(value.get("objective", "")),
+            schema_version=max(2, self._safe_int(value.get("schema_version"), 1)),
+            task_id=str(value.get("task_id", "")),
+            workspace_root=str(value.get("workspace_root", "")),
+            workspace_revision=max(0, self._safe_int(value.get("workspace_revision"), 0)),
+            phase=str(value.get("phase", "executing")),
+            completed_actions=self._string_list(value.get("completed_actions", [])),
+            artifacts=self._string_list(value.get("artifacts", [])),
+            evidence=self._normalize_evidence(value.get("evidence", [])),
+            required_evidence=self._string_list(value.get("required_evidence", [])),
+            unmet_deliverables=self._string_list(value.get("unmet_deliverables", [])),
+            blockers=self._normalize_blockers(value.get("blockers", [])),
+            runtime_state={
+                str(key): str(item)
+                for key, item in runtime_state.items()
+                if isinstance(key, str) and isinstance(item, str)
+            } if isinstance(runtime_state, dict) else {},
+        )
+
+    def _normalize_evidence(self, value: object) -> list[EvidenceRecord]:
+        if not isinstance(value, list):
+            return []
+        records: list[EvidenceRecord] = []
+        for item in value[-100:]:
+            if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
+                continue
+            records.append(
+                EvidenceRecord(
+                    kind=item["kind"],
+                    producer=str(item.get("producer", "unknown")),
+                    task_id=str(item.get("task_id", "")),
+                    workspace_revision=max(0, self._safe_int(item.get("workspace_revision"), 0)),
+                    artifact_refs=self._string_list(item.get("artifact_refs", [])),
+                    source_task_ids=self._string_list(item.get("source_task_ids", [])),
+                )
+            )
+        return records
 
     def _string_list(self, value: object) -> list[str]:
         if not isinstance(value, list):
@@ -312,6 +391,8 @@ class SessionStore:
                 }
                 for turn in trace.turns
             ],
+            "blockers": [self._blocker_to_payload(item) for item in trace.blockers],
+            "checkpoint": self._checkpoint_to_payload(trace.checkpoint),
         }
 
     def _resume_state_to_payload(self, state: SessionResumeState) -> dict[str, object]:
@@ -323,6 +404,45 @@ class SessionStore:
             "last_tool_names": list(state.last_tool_names),
             "open_issue": state.open_issue,
             "recovery_hint": state.recovery_hint,
+            "blockers": [self._blocker_to_payload(item) for item in state.blockers],
+            "checkpoint": self._checkpoint_to_payload(state.checkpoint),
+        }
+
+    def _blocker_to_payload(self, blocker: RuntimeBlocker) -> dict[str, str]:
+        return {
+            "error_code": blocker.error_code,
+            "summary": blocker.summary,
+            "source": blocker.source,
+            "tool": blocker.tool,
+            "retryability": blocker.retryability,
+            "required_action": blocker.required_action,
+        }
+
+    def _checkpoint_to_payload(self, checkpoint: TaskCheckpoint) -> dict[str, object]:
+        return {
+            "objective": checkpoint.objective,
+            "schema_version": checkpoint.schema_version,
+            "task_id": checkpoint.task_id,
+            "workspace_root": checkpoint.workspace_root,
+            "workspace_revision": checkpoint.workspace_revision,
+            "phase": checkpoint.phase,
+            "completed_actions": list(checkpoint.completed_actions),
+            "artifacts": list(checkpoint.artifacts),
+            "evidence": [
+                {
+                    "kind": item.kind,
+                    "producer": item.producer,
+                    "task_id": item.task_id,
+                    "workspace_revision": item.workspace_revision,
+                    "artifact_refs": list(item.artifact_refs),
+                    "source_task_ids": list(item.source_task_ids),
+                }
+                for item in checkpoint.evidence
+            ],
+            "required_evidence": list(checkpoint.required_evidence),
+            "unmet_deliverables": list(checkpoint.unmet_deliverables),
+            "blockers": [self._blocker_to_payload(item) for item in checkpoint.blockers],
+            "runtime_state": dict(checkpoint.runtime_state),
         }
 
     def _write_trace_log(self, session: StoredSession) -> None:
@@ -386,7 +506,10 @@ class SessionStore:
         open_issue = ""
         recovery_hint = ""
         if trace.outcome != "completed":
-            open_issue = trace.final_message
+            if trace.blockers:
+                open_issue = trace.blockers[-1].summary
+            else:
+                open_issue = trace.final_message
 
         if open_issue:
             recovery_hint = (
@@ -404,6 +527,12 @@ class SessionStore:
             last_tool_names=list(trace.tool_names),
             open_issue=open_issue,
             recovery_hint=recovery_hint,
+            blockers=self._normalize_blockers(
+                [self._blocker_to_payload(item) for item in trace.blockers]
+            ),
+            checkpoint=self._normalize_checkpoint(
+                self._checkpoint_to_payload(trace.checkpoint)
+            ),
         )
 
     def _valid_session_id(self, session_id: str) -> bool:

@@ -188,7 +188,8 @@ Expected boundary:
 
 - `ResourceProvider` exposes metadata and fetch primitives only.
 - `ContextLoader` or a future resource-aware selector may choose which descriptors become candidate context.
-- A future `ContextPackager` will own prompt budget, clipping, summaries, and omission markers.
+- `ContextPackager` owns prompt budget, prioritized segments, clipping, and omission markers. A future
+  resource-aware selector and semantic summarizer may extend the same boundary without moving storage into the prompt.
 - Full resource bodies remain outside the prompt until explicitly selected.
 
 ---

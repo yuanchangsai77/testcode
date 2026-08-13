@@ -15,6 +15,7 @@ def tool() -> SimpleTool:
         description="Show a git revision or revision:path value.",
         arguments={"revision": "Revision expression to show."},
         input_schema=schema({"revision": {"type": "string"}}, required=["revision"]),
+        evidence_kinds=["read"],
         handler=run,
         summarizer=git_show_summary,
     )

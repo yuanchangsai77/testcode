@@ -24,6 +24,7 @@ def tool(default_max_entries: int = DEFAULT_LIST_ENTRIES) -> SimpleTool:
                 "max_entries": {"type": "integer"},
             }
         ),
+        evidence_kinds=["read"],
         handler=lambda action, context: run(action, context, default_max_entries),
         summarizer=list_dir_summary,
     )

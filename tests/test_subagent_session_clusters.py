@@ -10,7 +10,7 @@ from testcode.interaction.presenter import ConsolePresenter
 from testcode.orchestration.subagents import SubagentCoordinator, SubagentLaunchSpec
 from testcode.orchestration.subagent_runner import SubagentRunner, _issue_subagent_grant
 from testcode.sessions import SessionClusterStore, SessionImageStore, SessionStore
-from testcode.types import ExecutionSummary, ModelReply, SessionRunTrace, ToolResult, UserRequest
+from testcode.types import EvidenceRecord, ExecutionSummary, ModelReply, SessionRunTrace, TaskCheckpoint, ToolResult, UserRequest
 from testcode.tools.base import ToolContext
 from testcode.tools.subagents import build_subagent_tools
 from testcode.types import ToolAction
@@ -228,9 +228,14 @@ def test_runner_executes_ready_children_and_reports_results_to_public_state(tmp_
     class Runtime:
         def run_background(self, request):
             seen_requests.append(request)
+            task_id = request.metadata["delegated_task"]["task_id"]
             return ExecutionSummary(
                 final_message=f"completed {request.prompt}",
-                tool_results=[ToolResult("read_file", True, "ok")],
+                tool_results=[ToolResult("read_file", True, "ok", metadata={"evidence": ["read"]})],
+                checkpoint=TaskCheckpoint(
+                    task_id=task_id,
+                    evidence=[EvidenceRecord("read", "read_file", task_id, 0)],
+                ),
             )
 
         def persist_run(self, session, prompt, summary, **_kwargs):
@@ -265,6 +270,24 @@ def test_runner_marks_failed_execution_and_publishes_blocker(tmp_path):
     persisted = []
 
     class FailingRuntime:
+        def __init__(self):
+            self.engine = type("Engine", (), {})()
+            self.engine.last_failure_summary = ExecutionSummary(
+                "model unavailable",
+                [
+                    ToolResult(
+                        "patch",
+                        True,
+                        "created partial.txt",
+                        metadata={
+                            "changed_files": ["partial.txt"],
+                            "artifact_ref": "artifact:partial-result",
+                        },
+                    )
+                ],
+                outcome="runtime_error",
+            )
+
         def run_background(self, _request):
             raise RuntimeError("model unavailable")
 
@@ -294,10 +317,14 @@ def test_runner_marks_failed_execution_and_publishes_blocker(tmp_path):
     assert snapshot.members[1].state == "failed"
     assert snapshot.shared_state[0].kind == "blocker"
     assert snapshot.shared_state[0].summary == "model unavailable"
+    assert snapshot.shared_state[0].artifact_ref == "artifact:partial-result"
+    assert snapshot.shared_state[0].metadata["changed_files"] == ["partial.txt"]
     loaded = sessions.load(child.session_id)
     assert persisted == [{"status": "failed", "close_runtime": True}]
     assert result.blocker["error_code"] == "subagent_runtime_error"
     assert result.output_validation == "not_run"
+    assert result.changed_files == ["partial.txt"]
+    assert result.artifact_refs == ["artifact:partial-result"]
     assert loaded.status == "failed"
     assert loaded.trace[-1].outcome == "failed"
     assert loaded.resume_state.last_outcome == "failed"
@@ -489,9 +516,14 @@ def test_model_visible_tools_complete_spawn_run_and_status_flow(tmp_path):
 
     class Runtime:
         def run_background(self, request):
+            task_id = request.metadata["delegated_task"]["task_id"]
             return ExecutionSummary(
                 f"result for {request.prompt}",
-                [ToolResult("read_file", True, "reviewed")],
+                [ToolResult("read_file", True, "reviewed", metadata={"evidence": ["read"]})],
+                checkpoint=TaskCheckpoint(
+                    task_id=task_id,
+                    evidence=[EvidenceRecord("read", "read_file", task_id, 0)],
+                ),
             )
 
         def persist_run(self, session, prompt, summary, **_kwargs):
@@ -542,18 +574,32 @@ def test_runner_publishes_structured_handoff_evidence(tmp_path):
     coordinator.launch_subagent(parent, SubagentLaunchSpec(task_summary="update report"))
 
     class Runtime:
-        def run_background(self, _request):
+        def run_background(self, request):
+            task_id = request.metadata["delegated_task"]["task_id"]
             return ExecutionSummary(
                 "updated and verified",
                 [
-                    ToolResult("patch", True, "applied", metadata={"changed_files": ["report.md"]}),
+                    ToolResult(
+                        "patch",
+                        True,
+                        "applied",
+                        metadata={"changed_files": ["report.md"], "evidence": ["workspace_change"]},
+                    ),
                     ToolResult(
                         "run_tests",
                         True,
                         "passed",
-                        metadata={"command": "pytest -q", "duration_seconds": 1.25},
+                        metadata={"command": "pytest -q", "duration_seconds": 1.25, "evidence": ["test"]},
                     ),
                 ],
+                checkpoint=TaskCheckpoint(
+                    task_id=task_id,
+                    workspace_revision=1,
+                    evidence=[
+                        EvidenceRecord("workspace_change", "patch", task_id, 1),
+                        EvidenceRecord("test", "run_tests", task_id, 1),
+                    ],
+                ),
             )
 
         def persist_run(self, session, _prompt, _summary, *, status, **_kwargs):
@@ -575,6 +621,144 @@ def test_runner_publishes_structured_handoff_evidence(tmp_path):
     ]
     assert entry.metadata["changed_files"] == ["report.md"]
     assert entry.metadata["verifications"] == result.verifications
+
+
+def test_runner_preserves_workspace_change_after_later_revision(tmp_path):
+    sessions, _, _, coordinator = build_coordinator(tmp_path)
+    parent = sessions.create(cwd=str(tmp_path))
+    coordinator.launch_subagent(
+        parent,
+        SubagentLaunchSpec(task_summary="update report", required_evidence=["write"]),
+    )
+
+    class Runtime:
+        def run_background(self, request):
+            task_id = request.metadata["delegated_task"]["task_id"]
+            return ExecutionSummary(
+                "updated report",
+                [ToolResult("patch", True, "applied", metadata={"changed_files": ["report.md"]})],
+                checkpoint=TaskCheckpoint(
+                    task_id=task_id,
+                    workspace_revision=2,
+                    evidence=[EvidenceRecord("workspace_change", "patch", task_id, 1)],
+                ),
+            )
+
+        def persist_run(self, session, _prompt, _summary, *, status, **_kwargs):
+            session.status = status
+            sessions.save(session)
+
+    result = SubagentRunner(coordinator, lambda _session, _grant: Runtime()).run_ready(parent)[0]
+
+    assert result.state == "completed"
+    assert result.evidence_kinds == ["workspace_change"]
+    assert result.unresolved_requirements == []
+
+
+def test_subagent_aggregate_does_not_claim_test_when_different_child_wrote_after_verification(tmp_path):
+    sessions, _, _, coordinator = build_coordinator(tmp_path)
+    parent = sessions.create(cwd=str(tmp_path))
+    verifier = coordinator.launch_subagent(parent, SubagentLaunchSpec(task_summary="verify project"))
+    writer = coordinator.launch_subagent(parent, SubagentLaunchSpec(task_summary="update report"))
+
+    class Runner:
+        def run_ready(self, _parent):
+            return [
+                type(
+                    "Result",
+                    (),
+                    {
+                        "session_id": verifier.session_id,
+                        "state": "completed",
+                        "final_message": "verified",
+                        "changed_files": [],
+                        "verifications": [{"success": True}],
+                        "artifact_refs": [],
+                        "evidence_kinds": ["test"],
+                        "blocker": {},
+                        "unresolved_requirements": [],
+                        "output_validation": "validated",
+                    },
+                )(),
+                type(
+                    "Result",
+                    (),
+                    {
+                        "session_id": writer.session_id,
+                        "state": "completed",
+                        "final_message": "updated",
+                        "changed_files": ["report.md"],
+                        "verifications": [],
+                        "artifact_refs": [],
+                        "evidence_kinds": ["workspace_change"],
+                        "blocker": {},
+                        "unresolved_requirements": [],
+                        "output_validation": "validated",
+                    },
+                )(),
+            ]
+
+    tool = {item.name: item for item in build_subagent_tools()}["subagent_run_ready"]
+    result = tool.run(
+        ToolAction("subagent_run_ready", {}),
+        ToolContext(
+            cwd=str(tmp_path),
+            state={
+                "active_session_id": parent.session_id,
+                "subagent_coordinator": coordinator,
+                "subagent_runner": Runner(),
+            },
+        ),
+    )
+
+    assert "workspace_change" in result.metadata["evidence"]
+    assert "test" not in result.metadata["evidence"]
+    writer_member = next(
+        item for item in coordinator.snapshot(parent).members if item.session_id == writer.session_id
+    )
+    assert result.metadata["evidence_sources"]["workspace_change"] == [writer_member.task_id]
+
+
+def test_subagent_aggregate_preserves_workspace_evidence_without_changed_file_list(tmp_path):
+    sessions, _, _, coordinator = build_coordinator(tmp_path)
+    parent = sessions.create(cwd=str(tmp_path))
+    child = coordinator.launch_subagent(parent, SubagentLaunchSpec(task_summary="extension write"))
+
+    class Runner:
+        def run_ready(self, _parent):
+            return [
+                type(
+                    "Result",
+                    (),
+                    {
+                        "session_id": child.session_id,
+                        "state": "completed",
+                        "final_message": "updated",
+                        "changed_files": [],
+                        "verifications": [],
+                        "artifact_refs": [],
+                        "evidence_kinds": ["workspace_change"],
+                        "blocker": {},
+                        "unresolved_requirements": [],
+                        "output_validation": "validated",
+                    },
+                )()
+            ]
+
+    result = {item.name: item for item in build_subagent_tools()}["subagent_run_ready"].run(
+        ToolAction("subagent_run_ready", {}),
+        ToolContext(
+            cwd=str(tmp_path),
+            state={
+                "active_session_id": parent.session_id,
+                "subagent_coordinator": coordinator,
+                "subagent_runner": Runner(),
+            },
+        ),
+    )
+
+    assert result.metadata["evidence"] == ["workspace_change"]
+    assert result.metadata["workspace_changed"] is True
 
 
 def test_application_exposes_subagent_lifecycle_tools_on_demand(tmp_path, monkeypatch):

@@ -123,6 +123,16 @@ class ToolRegistry:
         self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
         result = tool.run(action, context)
         result = self._result_packager.package(result)
+        definition = tool.definition()
+        if result.success:
+            declared = definition.evidence_kinds
+            existing = result.metadata.get("evidence", [])
+            evidence = [item for item in existing if isinstance(item, str)] if isinstance(existing, list) else []
+            result.metadata["evidence"] = list(dict.fromkeys([*evidence, *declared]))
+            if definition.risk_level in {"write", "execute", "destructive"}:
+                result.metadata["invalidates_workspace_state"] = True
+        elif definition.risk_level == "test":
+            result.metadata["invalidates_evidence"] = ["test"]
         self._record_result(result)
         return result
 

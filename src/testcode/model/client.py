@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 
 from ..orchestration.session import SessionContext
+from ..context.packager import ContextPackager
 from ..types import ModelReply, ToolAction
 from . import types as model_types
 from .parser import ModelReplyParser
@@ -53,6 +54,8 @@ class OpenAICompatibleModelClient:
         config: model_types.ModelClientConfig | None = None,
         prompt_builder: ModelPromptBuilder | None = None,
         parser: ModelReplyParser | None = None,
+        capability_profile: model_types.ModelCapabilityProfile | None = None,
+        context_budget_chars: int = 120_000,
     ) -> None:
         if config is not None:
             base_url = config.base_url
@@ -65,11 +68,28 @@ class OpenAICompatibleModelClient:
         self.model = model
         self.timeout = timeout
         self.logger = logger
-        self.prompt_builder = prompt_builder or ModelPromptBuilder()
+        self.capability_profile = capability_profile or model_types.ModelCapabilityProfile(
+            model=model,
+            context_budget_chars=context_budget_chars,
+        )
+        self.prompt_builder = prompt_builder or ModelPromptBuilder(
+            ContextPackager(self.capability_profile.context_budget_chars)
+        )
         self.parser = parser or ModelReplyParser(logger=logger)
         self._direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def respond(self, session: SessionContext) -> ModelReply:
+        session.request.metadata.setdefault(
+            "model_capability_profile",
+            {
+                "structured_output_mode": self.capability_profile.structured_output_mode,
+                "native_tool_calls": self.capability_profile.native_tool_calls,
+                "parallel_tool_calls": self.capability_profile.parallel_tool_calls,
+                "context_budget_chars": self.capability_profile.context_budget_chars,
+                "provenance": self.capability_profile.provenance,
+                "verified": self.capability_profile.verified,
+            },
+        )
         messages = self.prompt_builder.build_messages(session)
         payload = {
             "model": self.model,
@@ -81,6 +101,11 @@ class OpenAICompatibleModelClient:
             payload["tools"] = tools
         url = f"{self.base_url}/v1/chat/completions"
         if self.logger is not None:
+            package_stats = getattr(
+                getattr(self.prompt_builder, "context_packager", None),
+                "last_stats",
+                None,
+            )
             self.logger.record(
                 "model.request",
                 {
@@ -88,6 +113,11 @@ class OpenAICompatibleModelClient:
                     "model": self.model,
                     "messages": messages,
                     "tools": [tool["function"]["name"] for tool in tools],
+                    "context_package": {
+                        "budget_chars": getattr(package_stats, "budget_chars", 0),
+                        "included_chars": getattr(package_stats, "included_chars", 0),
+                        "omitted_messages": getattr(package_stats, "omitted_messages", 0),
+                    },
                 },
             )
         data = self._post_json(url, payload)

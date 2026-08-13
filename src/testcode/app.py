@@ -65,7 +65,11 @@ def create_model_client(
         model=config.model_name,
         timeout=config.model_timeout if timeout is None else timeout,
     )
-    return OpenAICompatibleModelClient(config=model_config, logger=logger)
+    return OpenAICompatibleModelClient(
+        config=model_config,
+        logger=logger,
+        context_budget_chars=config.limits.prompt_context_chars,
+    )
 
 
 def create_app(
@@ -226,6 +230,9 @@ def create_app(
         ),
         model_retry_delays=config.model_retry.delays,
         max_turns=config.orchestration.max_turns,
+        max_model_attempts=config.orchestration.max_model_attempts,
+        max_consecutive_model_timeouts=config.orchestration.max_consecutive_model_timeouts,
+        max_run_seconds=config.orchestration.max_run_seconds,
         mcp_server_count=sum(server.enabled for server in config.mcp_servers),
         intent_classifier=intent_classifier,
     )

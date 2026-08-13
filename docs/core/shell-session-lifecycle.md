@@ -34,6 +34,17 @@ Shell 协议出错时，会立即替换为新的干净 Bash；其他关闭情形
 一个 `ToolRegistry` 只维护一个 Shell 会话，命令按顺序执行。不同 testcode 进程或
 不同注册表可各自拥有独立 Bash；后续若引入多会话并发，应设置全局进程数和资源上限。
 
+## 恢复投影
+
+Shell 状态可以跨同一 session 的多个 run 保留，因此 cwd 不能作为工具内部的隐藏事实。每次命令
+完成后，runtime 把 Shell 返回的真实 cwd 写入 task checkpoint；run 结束后该投影随 trace 和
+resume state 持久化。恢复运行构造模型上下文时优先读取仍存活 Shell 的 cwd；如果 Shell 已被关闭，
+则把投影确定性重置为请求工作区，因为下一次调用会从该目录创建新进程。
+
+结构化文件工具仍以请求工作区为路径基准。模型需要操作 Shell 当前目录时应使用 checkpoint 中的
+`shell_cwd`，需要回到工作区基准时应显式传入 `shell_exec.cwd`。环境变量目前仍随 Shell 进程保留，
+但不会把值写入 checkpoint，避免把潜在凭据复制进会话记录。
+
 ## 安全边界
 
 进程组只能解决中断和清理，不能阻止命令访问宿主机文件、网络或系统服务。需要安全

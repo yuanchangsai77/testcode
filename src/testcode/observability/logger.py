@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 from ..safety.redaction import redact, redact_text
-from ..types import SessionRunTrace, SessionTurnTrace
+from ..types import EvidenceRecord, RuntimeBlocker, SessionRunTrace, SessionTurnTrace, TaskCheckpoint
 from .events import Event
 
 
@@ -17,6 +18,7 @@ class InMemoryLogger:
         self.last_run_id: str | None = None
         self.last_run_summary: SessionRunTrace | None = None
         self._artifact_count = 0
+        self._large_value_artifacts: dict[str, str] = {}
 
     def _compact_text(self, text: str, limit: int = 240) -> str:
         compact = " ".join(text.split())
@@ -25,9 +27,37 @@ class InMemoryLogger:
         return f"{compact[: limit - 3]}..."
 
     def record(self, name: str, payload: dict) -> None:
-        event = Event(name=name, payload=redact(payload))
+        event = Event(name=name, payload=redact(self._externalize_large_values(payload, name)))
         self.events.append(event)
         self._append_event(event)
+
+    def _externalize_large_values(self, value: object, event_name: str) -> object:
+        if isinstance(value, dict):
+            return {
+                str(key): self._externalize_large_values(item, event_name)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._externalize_large_values(item, event_name) for item in value]
+        if isinstance(value, str) and len(value) > 16_000 and self.run_dir is not None:
+            digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+            artifact_ref = self._large_value_artifacts.get(digest)
+            if artifact_ref is None:
+                artifact_ref = self.write_artifact(
+                    f"{event_name}-large-value",
+                    {"content": value},
+                )
+                if artifact_ref:
+                    self._large_value_artifacts[digest] = artifact_ref
+            if artifact_ref:
+                return {
+                    "$type": "artifact_ref",
+                    "schema_version": 1,
+                    "artifact_ref": artifact_ref,
+                    "chars": len(value),
+                    "sha256": digest,
+                }
+        return value
 
     def start_run(self, request, registered_skills: list[str] | None = None) -> None:
         if self.run_dir is not None:
@@ -36,6 +66,7 @@ class InMemoryLogger:
         self.events = []
         self.last_run_summary = None
         self._artifact_count = 0
+        self._large_value_artifacts = {}
         timestamp = Event(name="run.init", payload={}).timestamp
         safe_timestamp = timestamp.replace(":", "-")
         self.run_id = safe_timestamp
@@ -94,6 +125,9 @@ class InMemoryLogger:
                     }
                     for result in summary.tool_results
                 ],
+                "outcome": getattr(summary, "outcome", "completed"),
+                "blockers": [self._blocker_payload(item) for item in getattr(summary, "blockers", [])],
+                "checkpoint": self._checkpoint_payload(getattr(summary, "checkpoint", None)),
             },
         )
         self.last_run_summary = self._build_run_summary(request, summary)
@@ -223,11 +257,17 @@ class InMemoryLogger:
 
         for event in self.events:
             if event.name == "model.request":
-                if current is not None:
+                if current is not None and current["reply"] is not None:
                     turns.append(current)
+                    current = None
+                if current is not None:
+                    current["request"] = event.payload
+                    current["attempt_count"] += 1
+                    continue
                 current = {
                     "turn": len(turns) + 1,
                     "request": event.payload,
+                    "attempt_count": 1,
                     "raw_response": None,
                     "parsed_reply": None,
                     "safety_checks": [],
@@ -330,4 +370,91 @@ class InMemoryLogger:
             turn_count=len(turns),
             tool_names=tool_names,
             turns=turn_summaries,
+            blockers=self._safe_blockers(getattr(summary, "blockers", [])),
+            checkpoint=self._safe_checkpoint(getattr(summary, "checkpoint", None)),
         )
+
+    def _safe_blockers(self, blockers) -> list[RuntimeBlocker]:
+        return [
+            RuntimeBlocker(
+                error_code=str(getattr(item, "error_code", "")),
+                summary=redact_text(str(getattr(item, "summary", ""))),
+                source=str(getattr(item, "source", "runtime")),
+                tool=str(getattr(item, "tool", "")),
+                retryability=str(getattr(item, "retryability", "conditional")),
+                required_action=str(getattr(item, "required_action", "resume")),
+            )
+            for item in blockers
+        ]
+
+    def _safe_checkpoint(self, checkpoint) -> TaskCheckpoint:
+        if checkpoint is None:
+            return TaskCheckpoint()
+        return TaskCheckpoint(
+            objective=redact_text(str(getattr(checkpoint, "objective", ""))),
+            schema_version=int(getattr(checkpoint, "schema_version", 2)),
+            task_id=str(getattr(checkpoint, "task_id", "")),
+            workspace_root=str(getattr(checkpoint, "workspace_root", "")),
+            workspace_revision=int(getattr(checkpoint, "workspace_revision", 0)),
+            phase=str(getattr(checkpoint, "phase", "executing")),
+            completed_actions=[str(item) for item in getattr(checkpoint, "completed_actions", [])],
+            artifacts=[str(item) for item in getattr(checkpoint, "artifacts", [])],
+            evidence=[
+                EvidenceRecord(
+                    kind=str(getattr(item, "kind", "")),
+                    producer=str(getattr(item, "producer", "")),
+                    task_id=str(getattr(item, "task_id", "")),
+                    workspace_revision=int(getattr(item, "workspace_revision", 0)),
+                    artifact_refs=[str(ref) for ref in getattr(item, "artifact_refs", [])],
+                    source_task_ids=[str(value) for value in getattr(item, "source_task_ids", [])],
+                )
+                for item in getattr(checkpoint, "evidence", [])
+                if getattr(item, "kind", "")
+            ],
+            required_evidence=[str(item) for item in getattr(checkpoint, "required_evidence", [])],
+            unmet_deliverables=[str(item) for item in getattr(checkpoint, "unmet_deliverables", [])],
+            blockers=self._safe_blockers(getattr(checkpoint, "blockers", [])),
+            runtime_state={
+                str(key): str(value)
+                for key, value in dict(getattr(checkpoint, "runtime_state", {})).items()
+            },
+        )
+
+    def _blocker_payload(self, blocker) -> dict[str, object]:
+        return {
+            "error_code": getattr(blocker, "error_code", ""),
+            "summary": redact_text(getattr(blocker, "summary", "")),
+            "source": getattr(blocker, "source", "runtime"),
+            "tool": getattr(blocker, "tool", ""),
+            "retryability": getattr(blocker, "retryability", "conditional"),
+            "required_action": getattr(blocker, "required_action", "resume"),
+        }
+
+    def _checkpoint_payload(self, checkpoint) -> dict[str, object]:
+        if checkpoint is None:
+            return {}
+        return {
+            "objective": redact_text(getattr(checkpoint, "objective", "")),
+            "schema_version": getattr(checkpoint, "schema_version", 2),
+            "task_id": getattr(checkpoint, "task_id", ""),
+            "workspace_root": getattr(checkpoint, "workspace_root", ""),
+            "workspace_revision": getattr(checkpoint, "workspace_revision", 0),
+            "phase": getattr(checkpoint, "phase", ""),
+            "completed_actions": list(getattr(checkpoint, "completed_actions", [])),
+            "artifacts": list(getattr(checkpoint, "artifacts", [])),
+            "evidence": [
+                {
+                    "kind": getattr(item, "kind", ""),
+                    "producer": getattr(item, "producer", ""),
+                    "task_id": getattr(item, "task_id", ""),
+                    "workspace_revision": getattr(item, "workspace_revision", 0),
+                    "artifact_refs": list(getattr(item, "artifact_refs", [])),
+                    "source_task_ids": list(getattr(item, "source_task_ids", [])),
+                }
+                for item in getattr(checkpoint, "evidence", [])
+            ],
+            "required_evidence": list(getattr(checkpoint, "required_evidence", [])),
+            "unmet_deliverables": list(getattr(checkpoint, "unmet_deliverables", [])),
+            "blockers": [self._blocker_payload(item) for item in getattr(checkpoint, "blockers", [])],
+            "runtime_state": dict(getattr(checkpoint, "runtime_state", {})),
+        }
