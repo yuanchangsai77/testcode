@@ -133,9 +133,12 @@ ToolResult(
 保存任务身份、工作区 revision、类型化证据和实际交付 artifact，不把动作输入误当成任务产物。
 `ModelPromptBuilder` 再把 session history 放进模型输入。
 
-事件日志中的超长字符串使用带 `$type: artifact_ref` 和 `schema_version` 的显式 envelope 替换，消费者
-不能把它当作原字符串。相同内容在一个 run 内按 SHA-256 复用同一 artifact，避免 execute、result 和
-finish 事件重复落盘。
+事件日志是轻量索引，不直接承载完整参数或输出。每个 run 只归档首个完整模型请求，后续正常请求与
+响应只记录大小、用量和 SHA-256 指纹；小型工具参数和结果直接内联，大型正文经脱敏后内容寻址，
+只在当前 run 的 artifact archive 中保存一次。action reference 由统一日志入口生成，Engine、history 和
+ToolResult 复用该引用，不能各自重复创建 artifact。事件通过带 `$type: artifact_ref`、
+`schema_version`、字符数和哈希的 envelope 引用正文。`run.finish` 只保存终态、统计、blocker 和
+checkpoint，不再次复制全部 ToolResult。
 
 session history 和 tool result 随后进入 `ContextPackager`，由 packager 生成预算内上下文。因此新增 tool
 不应假设 `output` 必然完整进入最终 prompt。

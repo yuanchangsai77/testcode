@@ -296,9 +296,17 @@ Core files:
 
 Responsibilities:
 
-- record model calls, tool invocations, and errors
+- record a compact event index for model calls, tool invocations, and errors
 - provide traceability for debugging and auditing
 - emit execution summaries for the CLI and future telemetry backends
+
+`events.jsonl` is the only ordered run event source. Events contain identities, outcomes, sizes, hashes and artifact
+references, not repeated raw model messages or tool payloads. A run archives its initial redacted model request once;
+later request and successful response events keep fingerprints and usage only. Small tool arguments and results stay
+inline in their compact event; larger bodies are stored once in the run artifact archive using content-addressed
+deduplication, and the same action reference is reused by tool history and results. Error bodies remain diagnosable through bounded
+error events or artifacts. `details.log` is a human-readable index derived from compact events; it must not replay every
+event payload or duplicate terminal tool outputs.
 
 Core files:
 
@@ -340,10 +348,15 @@ Persistence structure:
 - `SessionStore` derives its storage root from the package/source checkout and
   writes JSON files under that root's `.testcode/sessions/`; it does not derive
   this path from the active target workspace.
-- Stored sessions currently include cwd, timestamps, status, messages, run ids, active Skill/capability ids, bounded trace records, and derived resume state.
+- Stored sessions are bounded recovery snapshots, not transcript archives. They include recent conversation, recent
+  lightweight run summaries, the complete lightweight run-id index, active Skill/capability ids and one authoritative derived resume checkpoint.
+  Older raw process detail remains addressable through run ids and artifacts rather than being copied into the snapshot.
 - Subagent session clusters add explicit parent/child launch provenance. Session images are immutable launch inputs, while the cluster public state stores only bounded member status, findings, verification results, blockers, and artifact references. Members do not gain direct access to each other's conversation or tool history; see [Subagent 会话集群](core/subagent-session-clusters.md).
 - `SubagentRunner` atomically claims ready members and executes them concurrently through separately composed runtimes. Model-visible spawn, run-ready, and status tools expose this lifecycle without turning the public state into a direct message bus.
-- Stored checkpoint records include schema version, task identity, workspace root/revision, objective, phase, completed actions, typed evidence, artifact references, required evidence, unmet deliverables, blockers and bounded runtime-state projections. Full tool history and content hashes remain archive concerns.
+- The latest resume checkpoint includes schema version, task identity, workspace root/revision, objective, phase,
+  completed actions, typed evidence, artifact references, required evidence, unmet deliverables, blockers and bounded
+  runtime-state projections. Historical trace entries do not copy checkpoints. Full tool history and content hashes
+  remain run archive concerns.
 - Corrupt session files are skipped when listing sessions.
 
 ## 4. Runtime Flow

@@ -19,6 +19,7 @@ class InMemoryLogger:
         self.last_run_summary: SessionRunTrace | None = None
         self._artifact_count = 0
         self._large_value_artifacts: dict[str, str] = {}
+        self._model_request_count = 0
 
     def _compact_text(self, text: str, limit: int = 240) -> str:
         compact = " ".join(text.split())
@@ -26,10 +27,160 @@ class InMemoryLogger:
             return compact
         return f"{compact[: limit - 3]}..."
 
-    def record(self, name: str, payload: dict) -> None:
-        event = Event(name=name, payload=redact(self._externalize_large_values(payload, name)))
+    def record(self, name: str, payload: dict) -> Event:
+        compact = self._compact_event_payload(name, payload)
+        event = Event(name=name, payload=redact(self._externalize_large_values(compact, name)))
         self.events.append(event)
         self._append_event(event)
+        return event
+
+    def _compact_event_payload(self, name: str, payload: dict) -> dict:
+        if name == "model.request":
+            messages = payload.get("messages", [])
+            messages_ref = self._artifact_envelope(
+                "model-request-initial",
+                messages,
+                persist=self._model_request_count == 0,
+            )
+            self._model_request_count += 1
+            return {
+                "url": payload.get("url", ""),
+                "model": payload.get("model", ""),
+                "message_count": len(messages) if isinstance(messages, list) else 0,
+                "tools": list(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else [],
+                "context_package": dict(payload.get("context_package", {}))
+                if isinstance(payload.get("context_package"), dict) else {},
+                "messages_ref": messages_ref,
+            }
+        if name == "model.response":
+            usage = payload.get("usage", {})
+            choices = payload.get("choices", [])
+            return {
+                "response_fingerprint": self._artifact_envelope(
+                    "model-response", payload, persist=False
+                ),
+                "choice_count": len(choices) if isinstance(choices, list) else 0,
+                "usage": dict(usage) if isinstance(usage, dict) else {},
+            }
+        if name == "model.parsed_reply":
+            actions = payload.get("actions", [])
+            return {
+                "message": self._compact_text(str(payload.get("message", "")), 320),
+                "done": bool(payload.get("done", False)),
+                "actions": [
+                    str(item.get("name", "")) for item in actions
+                    if isinstance(item, dict) and item.get("name")
+                ] if isinstance(actions, list) else [],
+                "reply_fingerprint": self._artifact_envelope(
+                    "parsed-reply", payload, persist=False
+                ),
+            }
+        if name == "model.reply":
+            message = str(payload.get("message", ""))
+            return {
+                "turn": payload.get("turn", 0),
+                "message": self._compact_text(message, 320),
+                "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+                "message_chars": len(message),
+                "done": bool(payload.get("done", False)),
+                "actions": list(payload.get("actions", []))
+                if isinstance(payload.get("actions"), list) else [],
+            }
+        if name == "tool.execute":
+            arguments = payload.get("arguments", {})
+            return {
+                "name": payload.get("name", ""),
+                "argument_keys": sorted(str(key) for key in arguments)
+                if isinstance(arguments, dict) else [],
+                "arguments_ref": self._artifact_envelope(
+                    "tool-arguments", arguments, inline_limit=2_000
+                ),
+            }
+        if name == "tool.result":
+            output = str(payload.get("output", ""))
+            metadata = payload.get("metadata", {})
+            archived_metadata = {
+                str(key): value for key, value in metadata.items()
+                if key not in {
+                    "action_arguments", "action_artifact_ref", "previous_output",
+                    "stdout", "stderr", "content", "body", "raw_response",
+                }
+            } if isinstance(metadata, dict) else {}
+            body = {"output": output, "metadata": archived_metadata}
+            summary_keys = {
+                "bytes", "cwd", "duplicate", "duplicate_count", "duration_seconds",
+                "evidence", "invalidates_evidence", "invalidates_workspace_state", "truncated",
+            }
+            return {
+                "name": payload.get("name", ""),
+                "success": bool(payload.get("success", False)),
+                "error_code": payload.get("error_code"),
+                "output_preview": self._compact_text(output, 320),
+                "metadata": {
+                    str(key): value for key, value in metadata.items() if key in summary_keys
+                } if isinstance(metadata, dict) else {},
+                "arguments_ref": self._artifact_envelope(
+                    "tool-arguments",
+                    metadata.get("action_arguments", {}),
+                    inline_limit=2_000,
+                ) if isinstance(metadata, dict) and "action_arguments" in metadata else {},
+                "result_ref": self._artifact_envelope(
+                    "tool-result", body, inline_limit=4_000
+                ),
+            }
+        if name == "run.finish":
+            checkpoint = payload.get("checkpoint", {})
+            return {
+                "run_id": payload.get("run_id"),
+                "final_message": self._compact_text(str(payload.get("final_message", "")), 1000),
+                "outcome": payload.get("outcome", "completed"),
+                "tool_count": payload.get("tool_count", 0),
+                "successful_tool_count": payload.get("successful_tool_count", 0),
+                "tool_names": list(payload.get("tool_names", []))
+                if isinstance(payload.get("tool_names"), list) else [],
+                "blockers": payload.get("blockers", []),
+                "checkpoint": {
+                    "task_id": checkpoint.get("task_id", ""),
+                    "workspace_revision": checkpoint.get("workspace_revision", 0),
+                    "phase": checkpoint.get("phase", ""),
+                    "required_evidence": checkpoint.get("required_evidence", []),
+                    "unmet_deliverables": checkpoint.get("unmet_deliverables", []),
+                } if isinstance(checkpoint, dict) else {},
+                "checkpoint_ref": self._artifact_envelope("terminal-checkpoint", checkpoint),
+            }
+        return payload
+
+    def _artifact_envelope(
+        self,
+        kind: str,
+        payload: object,
+        *,
+        persist: bool = True,
+        inline_limit: int = 0,
+    ) -> dict[str, object]:
+        safe_payload = redact(payload)
+        serialized = json.dumps(safe_payload, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        if persist and inline_limit > 0 and len(serialized) <= inline_limit:
+            return {
+                "$type": "inline_payload",
+                "schema_version": 1,
+                "value": safe_payload,
+                "chars": len(serialized),
+                "sha256": digest,
+            }
+        artifact_ref = self._large_value_artifacts.get(digest) if persist else None
+        if persist and artifact_ref is None:
+            artifact_ref = self.write_artifact(kind, safe_payload)
+            if artifact_ref:
+                self._large_value_artifacts[digest] = artifact_ref
+        return {
+            "$type": "artifact_ref",
+            "schema_version": 1,
+            "artifact_ref": artifact_ref or "",
+            "chars": len(serialized),
+            "sha256": digest,
+        }
 
     def _externalize_large_values(self, value: object, event_name: str) -> object:
         if isinstance(value, dict):
@@ -40,23 +191,7 @@ class InMemoryLogger:
         if isinstance(value, list):
             return [self._externalize_large_values(item, event_name) for item in value]
         if isinstance(value, str) and len(value) > 16_000 and self.run_dir is not None:
-            digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-            artifact_ref = self._large_value_artifacts.get(digest)
-            if artifact_ref is None:
-                artifact_ref = self.write_artifact(
-                    f"{event_name}-large-value",
-                    {"content": value},
-                )
-                if artifact_ref:
-                    self._large_value_artifacts[digest] = artifact_ref
-            if artifact_ref:
-                return {
-                    "$type": "artifact_ref",
-                    "schema_version": 1,
-                    "artifact_ref": artifact_ref,
-                    "chars": len(value),
-                    "sha256": digest,
-                }
+            return self._artifact_envelope(f"{event_name}-large-value", {"content": value})
         return value
 
     def start_run(self, request, registered_skills: list[str] | None = None) -> None:
@@ -67,6 +202,7 @@ class InMemoryLogger:
         self.last_run_summary = None
         self._artifact_count = 0
         self._large_value_artifacts = {}
+        self._model_request_count = 0
         timestamp = Event(name="run.init", payload={}).timestamp
         safe_timestamp = timestamp.replace(":", "-")
         self.run_id = safe_timestamp
@@ -74,9 +210,10 @@ class InMemoryLogger:
         self.run_dir = self.base_dir / safe_timestamp
         self.run_dir.mkdir(parents=True, exist_ok=True)
         metadata = dict(request.metadata)
-        # Session traces are persisted by SessionStore. Logging them again on
-        # every run would copy the full history into each subsequent run log.
-        metadata.pop("session_trace", None)
+        # Conversation and recovery state are owned by SessionStore. Copying
+        # them into every run start would multiply the same history per run.
+        for key in ("conversation", "session_trace", "resume_state"):
+            metadata.pop(key, None)
         self.record(
             "run.start",
             {
@@ -115,16 +252,9 @@ class InMemoryLogger:
             {
                 "run_id": self.run_id,
                 "final_message": redact_text(summary.final_message),
-                "tool_results": [
-                    {
-                        "name": result.name,
-                        "success": result.success,
-                        "output": redact_text(result.output),
-                        "error_code": result.error_code,
-                        "metadata": redact(result.metadata),
-                    }
-                    for result in summary.tool_results
-                ],
+                "tool_count": len(summary.tool_results),
+                "successful_tool_count": sum(result.success for result in summary.tool_results),
+                "tool_names": list(dict.fromkeys(result.name for result in summary.tool_results)),
                 "outcome": getattr(summary, "outcome", "completed"),
                 "blockers": [self._blocker_payload(item) for item in getattr(summary, "blockers", [])],
                 "checkpoint": self._checkpoint_payload(getattr(summary, "checkpoint", None)),
@@ -186,43 +316,29 @@ class InMemoryLogger:
             lines.append("Turns")
             for turn in turns:
                 lines.append(f"- turn {turn['turn']}")
-                if turn["request"] is not None:
-                    lines.append("  model request:")
-                    for line in self._format_payload(turn["request"]).splitlines():
-                        lines.append(f"    {line}")
-                if turn["raw_response"] is not None:
-                    lines.append("  model raw response:")
-                    for line in self._format_payload(turn["raw_response"]).splitlines():
-                        lines.append(f"    {line}")
-                if turn["parsed_reply"] is not None:
-                    lines.append("  model parsed reply:")
-                    for line in self._format_payload(turn["parsed_reply"]).splitlines():
-                        lines.append(f"    {line}")
-                for check in turn["safety_checks"]:
-                    lines.append("  safety check:")
-                    for line in self._format_payload(check).splitlines():
-                        lines.append(f"    {line}")
-                for action in turn["tool_executes"]:
-                    lines.append("  tool execute:")
-                    for line in self._format_payload(action).splitlines():
-                        lines.append(f"    {line}")
+                request_payload = turn.get("request") or {}
+                lines.append(
+                    "  request: "
+                    f"messages={request_payload.get('message_count', 0)} "
+                    f"ref={self._artifact_ref_text(request_payload.get('messages_ref'))}"
+                )
+                parsed = turn.get("parsed_reply") or turn.get("reply") or {}
+                if parsed.get("message"):
+                    lines.append(f"  model: {parsed['message']}")
+                if turn["tool_executes"]:
+                    names = [str(item.get("name", "")) for item in turn["tool_executes"]]
+                    lines.append(f"  actions: {', '.join(name for name in names if name)}")
                 for result in turn["tool_results"]:
-                    lines.append("  tool result:")
-                    for line in self._format_payload(result).splitlines():
-                        lines.append(f"    {line}")
-                if turn["reply"] is not None:
-                    lines.append("  turn decision:")
-                    for line in self._format_payload(turn["reply"]).splitlines():
-                        lines.append(f"    {line}")
+                    status = "ok" if result.get("success") else result.get("error_code") or "failed"
+                    lines.append(
+                        f"  result: {result.get('name', 'tool')} [{status}] "
+                        f"{result.get('output_preview', '')}"
+                    )
                 lines.append("")
 
         lines.append("Timeline")
         for event in self.events:
             lines.append(f"- {event.timestamp} {event.name}")
-            payload_text = self._format_payload(event.payload)
-            if payload_text:
-                for line in payload_text.splitlines():
-                    lines.append(f"  {line}")
 
         lines.extend(
             [
@@ -233,23 +349,15 @@ class InMemoryLogger:
         )
 
         if summary.tool_results:
-            lines.append("- tool results:")
-            for result in summary.tool_results:
-                lines.append(f"  - {result.name}: {'ok' if result.success else 'blocked'}")
-                for line in redact_text(str(result.output)).splitlines():
-                    lines.append(f"    {line}")
+            lines.append(f"- tool results: {len(summary.tool_results)}")
 
         details_path = self.run_dir / "details.log"
         details_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    def _format_payload(self, payload: dict) -> str:
-        if not payload:
-            return ""
-
-        try:
-            return json.dumps(payload, ensure_ascii=False, indent=2)
-        except TypeError:
-            return repr(payload)
+    def _artifact_ref_text(self, value: object) -> str:
+        if not isinstance(value, dict):
+            return "-"
+        return str(value.get("artifact_ref", "") or "-")
 
     def _group_turns(self) -> list[dict]:
         turns: list[dict] = []
@@ -321,31 +429,28 @@ class InMemoryLogger:
             if not isinstance(requested_actions, list):
                 requested_actions = turn.get("tool_executes", [])
             for action in requested_actions:
-                if not isinstance(action, dict):
+                if isinstance(action, str):
+                    action_details.append(action)
                     continue
                 name = action.get("name", "tool")
-                arguments = action.get("arguments", {})
-                try:
-                    args_text = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-                except TypeError:
-                    args_text = repr(arguments)
-                action_details.append(f"{name} args={self._compact_text(args_text, 180)}")
+                keys = action.get("argument_keys", [])
+                key_text = ",".join(str(item) for item in keys) if isinstance(keys, list) else ""
+                action_details.append(f"{name} args=[{key_text}]")
             tool_result_details = []
             for result in turn.get("tool_results", []):
                 name = result.get("name", "tool")
                 status = "ok" if result.get("success") else result.get("error_code") or "failed"
-                output = self._compact_text(str(result.get("output", "")), 320)
+                output = self._compact_text(str(result.get("output_preview", "")), 320)
                 tool_result_details.append(f"{name} [{status}] {output}")
             turn_summaries.append(
                 SessionTurnTrace(
                     turn=turn["turn"],
                     message=message,
                     actions=[
-                        action.get("name", "")
+                        action if isinstance(action, str) else action.get("name", "")
                         for action in requested_actions
-                        if isinstance(action, dict)
-                        and isinstance(action.get("name"), str)
-                        and action.get("name")
+                        if (isinstance(action, str) and action)
+                        or (isinstance(action, dict) and action.get("name"))
                     ],
                     tool_results=tool_results,
                     action_details=action_details,

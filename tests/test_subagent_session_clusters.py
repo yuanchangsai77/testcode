@@ -173,9 +173,25 @@ def test_concurrent_public_state_updates_do_not_overwrite_each_other(tmp_path):
         )
 
     snapshot = coordinator.snapshot(parent)
-    assert len(snapshot.shared_state) == 12
-    assert len({entry.entry_id for entry in snapshot.shared_state}) == 12
-    assert sorted(entry.revision for entry in snapshot.shared_state) == list(range(2, 14))
+    assert len(snapshot.shared_state) == 1
+    assert snapshot.shared_state[0].summary.startswith("update ")
+    assert snapshot.shared_state[0].revision == 13
+
+
+def test_public_state_retains_independent_findings_and_artifacts(tmp_path):
+    sessions, _, _, coordinator = build_coordinator(tmp_path)
+    parent = sessions.create(cwd=str(tmp_path))
+    child = coordinator.launch_subagent(parent, SubagentLaunchSpec())
+
+    coordinator.publish_state(child, "finding", "finding one")
+    coordinator.publish_state(child, "finding", "finding two")
+    coordinator.publish_state(child, "artifact", "report one", artifact_ref="report-1.md")
+    coordinator.publish_state(child, "artifact", "report two", artifact_ref="report-2.md")
+
+    snapshot = coordinator.snapshot(parent)
+    assert [entry.summary for entry in snapshot.shared_state] == [
+        "finding one", "finding two", "report one", "report two"
+    ]
 
 
 def test_legacy_session_loads_with_primary_direct_defaults(tmp_path):

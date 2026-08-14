@@ -1126,22 +1126,9 @@ class ExecutionEngine:
         if result.error_code == "blocked_by_security_policy":
             return
         result.metadata.setdefault("action_arguments", dict(action.arguments))
-        try:
-            serialized = json.dumps(action.arguments, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            serialized = repr(action.arguments)
-        if len(serialized) > 2_000:
-            write_artifact = getattr(self.logger, "write_artifact", None)
-            if callable(write_artifact):
-                artifact_ref = write_artifact(
-                    "tool-action",
-                    {"name": action.name, "arguments": action.arguments},
-                )
-                if artifact_ref:
-                    result.metadata.setdefault("action_artifact_ref", artifact_ref)
 
     def _record_synthetic_tool_result(self, result: ToolResult) -> None:
-        self.logger.record(
+        event = self.logger.record(
             "tool.result",
             {
                 "name": result.name,
@@ -1151,6 +1138,9 @@ class ExecutionEngine:
                 "metadata": result.metadata,
             },
         )
+        action_ref = getattr(event, "payload", {}).get("arguments_ref", {})
+        if isinstance(action_ref, dict) and action_ref.get("artifact_ref"):
+            result.metadata.setdefault("action_artifact_ref", action_ref["artifact_ref"])
 
     def _duplicate_result(self, action, previous: ToolResult, count: int) -> ToolResult:
         blocked = not previous.success or count > self.max_duplicate_skips

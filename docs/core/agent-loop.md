@@ -78,6 +78,11 @@ runtime 计算的 outcome、结构化 blocker、task checkpoint、artifact 和�
 包装、session trace、resume state 与 subagent handoff 都消费这份 summary，不能重新从模型最后
 一句文本推断控制面状态。
 
+持久化时，terminal summary 只在最新 resume state 中保存一份完整 checkpoint。历史 run trace 仅保留
+有界的 prompt/final、outcome、工具名和逐轮摘要，并通过 run id 关联轻量事件索引与 artifact archive；
+它不复制 checkpoint、完整工具结果或 provider payload。会话快照只保留近期消息与近期 run，恢复所需
+事实以最新 checkpoint 为准，而不是依赖无限增长的 transcript。
+
 ## 当前边界
 
 - 动作去重仍只在当前 run 和写入世代内维护；未完成任务的 checkpoint 跨 run 保存确认进度，但尚未恢复完整

@@ -25,6 +25,12 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 
+MAX_SESSION_MESSAGES = 40
+MAX_SESSION_MESSAGE_CHARS = 120_000
+MAX_SESSION_TRACES = 24
+MAX_TRACE_TURNS = 20
+
+
 class SessionStore:
     def __init__(self, base_dir: str | Path | None = None) -> None:
         root = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[3]
@@ -77,7 +83,12 @@ class SessionStore:
             updated_at = self._timestamp()
             session.updated_at = updated_at
             session.revision = int(existing.get("revision", 0)) + 1
-            session.resume_state = self._build_resume_state(session)
+            session.messages = self._bounded_messages(session.messages)
+            session.run_ids = list(dict.fromkeys(session.run_ids))
+            session.trace = list(session.trace[-MAX_SESSION_TRACES:])
+            latest_trace = session.trace[-1] if session.trace else None
+            if latest_trace is not None and latest_trace.run_id != session.resume_state.last_run_id:
+                session.resume_state = self._build_resume_state(session)
             payload = {
             "session_id": session.session_id,
             "cwd": session.cwd,
@@ -167,11 +178,12 @@ class SessionStore:
             dict.fromkeys([*persisted_capabilities, *session.active_capability_ids])
         )
         persisted_trace = self._normalize_trace(existing.get("trace", []))
-        known_run_ids = {item.run_id for item in session.trace}
+        persisted_run_ids = {item.run_id for item in persisted_trace}
         session.trace = [
-            *[item for item in persisted_trace if item.run_id not in known_run_ids],
-            *session.trace,
+            *persisted_trace,
+            *[item for item in session.trace if item.run_id not in persisted_run_ids],
         ]
+        session.resume_state = self._normalize_resume_state(existing.get("resume_state", {}))
 
     def list_sessions(self) -> list[SessionRecord]:
         if not self.base_dir.exists():
@@ -226,7 +238,20 @@ class SessionStore:
             content = item.get("content")
             if isinstance(role, str) and isinstance(content, str):
                 normalized.append({"role": role, "content": content})
-        return normalized
+        return self._bounded_messages(normalized)
+
+    def _bounded_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        selected: list[dict[str, str]] = []
+        remaining = MAX_SESSION_MESSAGE_CHARS
+        for item in reversed(messages[-MAX_SESSION_MESSAGES:]):
+            if remaining <= 0:
+                break
+            content = str(item.get("content", ""))
+            if len(content) > remaining:
+                content = content[-remaining:]
+            selected.append({"role": str(item.get("role", "user")), "content": content})
+            remaining -= len(content)
+        return list(reversed(selected))
 
     def _normalize_run_ids(self, run_ids: object) -> list[str]:
         if not isinstance(run_ids, list):
@@ -238,13 +263,13 @@ class SessionStore:
             return []
 
         normalized: list[SessionRunTrace] = []
-        for item in trace:
+        for item in trace[-MAX_SESSION_TRACES:]:
             if not isinstance(item, dict):
                 continue
             turns_payload = item.get("turns", [])
             turns: list[SessionTurnTrace] = []
             if isinstance(turns_payload, list):
-                for turn in turns_payload:
+                for turn in turns_payload[-MAX_TRACE_TURNS:]:
                     if not isinstance(turn, dict):
                         continue
                     turns.append(
@@ -389,10 +414,8 @@ class SessionStore:
                     "action_details": list(turn.action_details),
                     "tool_result_details": list(turn.tool_result_details),
                 }
-                for turn in trace.turns
+                for turn in trace.turns[-MAX_TRACE_TURNS:]
             ],
-            "blockers": [self._blocker_to_payload(item) for item in trace.blockers],
-            "checkpoint": self._checkpoint_to_payload(trace.checkpoint),
         }
 
     def _resume_state_to_payload(self, state: SessionResumeState) -> dict[str, object]:

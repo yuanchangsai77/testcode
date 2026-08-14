@@ -535,12 +535,14 @@ def test_engine_attaches_cold_artifact_reference_for_large_action_arguments(tmp_
     result = ToolResult("patch", False, "invalid", "patch_syntax_error")
 
     engine._attach_action_metadata(result, action)
+    engine._record_synthetic_tool_result(result)
     session = SessionContext(request=request)
     session.add_tool_result(result)
 
     assert result.metadata["action_artifact_ref"]
     assert "args_ref=" in session.history[0]
     assert __import__("pathlib").Path(result.metadata["action_artifact_ref"]).exists()
+    assert len(list((logger.run_dir / "artifacts").iterdir())) == 1
 
 
 def test_engine_retries_model_timeout_seven_times_before_succeeding(tmp_path):
@@ -2124,6 +2126,39 @@ def test_session_store_stale_snapshot_does_not_reopen_terminal_session(tmp_path)
     assert loaded.messages[-1]["content"] == "late writer"
 
 
+def test_session_store_stale_snapshot_preserves_latest_resume_checkpoint(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd=str(tmp_path))
+    stale = store.load(session.session_id)
+    current = store.load(session.session_id)
+    assert stale is not None
+    assert current is not None
+
+    current.trace.append(
+        SessionRunTrace(
+            run_id="run-current",
+            started_at="start",
+            completed_at="end",
+            prompt="continue",
+            final_message="blocked",
+            outcome="blocked",
+            event_count=1,
+            turn_count=0,
+            checkpoint=TaskCheckpoint(task_id="task-current", workspace_revision=7),
+        )
+    )
+    store.save(current)
+
+    stale.messages.append({"role": "assistant", "content": "late writer"})
+    store.save(stale)
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert loaded.resume_state.last_run_id == "run-current"
+    assert loaded.resume_state.checkpoint.task_id == "task-current"
+    assert loaded.resume_state.checkpoint.workspace_revision == 7
+
+
 def test_session_store_loads_legacy_session_without_run_ids(tmp_path):
     store = SessionStore(base_dir=tmp_path)
     session = store.create(cwd="/repo", messages=[{"role": "user", "content": "hello"}])
@@ -2773,8 +2808,7 @@ def test_logger_summary_captures_action_and_result_details(tmp_path):
 
     run_summary = logger.last_run_summary
     assert run_summary is not None
-    assert run_summary.turns[0].action_details[0].startswith('read_file args=')
-    assert "README.md" in run_summary.turns[0].action_details[0]
+    assert run_summary.turns[0].action_details == ["read_file args=[path]"]
     assert run_summary.turns[0].tool_result_details[0].startswith("read_file [ok]")
 
 
@@ -2808,8 +2842,45 @@ def test_logger_summary_keeps_requested_action_when_preflight_skips_execution(tm
 
     turn = logger.last_run_summary.turns[0]
     assert turn.actions == ["read_file"]
-    assert turn.action_details == ['read_file args={"path": "missing.md"}']
+    assert turn.action_details == ["read_file"]
     assert turn.tool_results == ["read_file:path_not_found"]
+
+
+def test_session_store_persists_bounded_recovery_snapshot(tmp_path):
+    store = SessionStore(base_dir=tmp_path)
+    session = store.create(cwd=str(tmp_path))
+    session.messages = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": f"message-{index}"}
+        for index in range(60)
+    ]
+    session.run_ids = [f"run-{index}" for index in range(30)]
+    session.trace = [
+        SessionRunTrace(
+            run_id=f"run-{index}",
+            started_at="start",
+            completed_at="end",
+            prompt=f"prompt-{index}",
+            final_message=f"final-{index}",
+            outcome="completed" if index < 29 else "stalled",
+            event_count=2,
+            turn_count=0,
+            checkpoint=TaskCheckpoint(task_id=f"task-{index}", workspace_revision=index),
+        )
+        for index in range(30)
+    ]
+
+    store.save(session)
+    payload = json.loads((store.base_dir / f"{session.session_id}.json").read_text(encoding="utf-8"))
+    loaded = store.load(session.session_id)
+
+    assert loaded is not None
+    assert len(loaded.messages) == 40
+    assert len(loaded.run_ids) == 30
+    assert len(loaded.trace) == 24
+    assert "checkpoint" not in payload["trace"][-1]
+    assert "blockers" not in payload["trace"][-1]
+    assert loaded.resume_state.checkpoint.task_id == "task-29"
+    assert loaded.resume_state.checkpoint.workspace_revision == 29
 
 
 def test_completed_trace_does_not_keep_intermediate_duplicate_as_open_issue(tmp_path):

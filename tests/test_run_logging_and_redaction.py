@@ -22,10 +22,10 @@ def test_logger_finalize_starts_run_and_writes_details_without_model_turns(tmp_p
     assert "- prompt: summarize" in details
     assert "- turns: 0" in details
     assert "- message: done" in details
-    assert "read_file: ok" in details
+    assert "- tool results: 1" in details
 
 
-def test_logger_details_falls_back_to_repr_for_unserializable_payload(tmp_path):
+def test_logger_archives_unserializable_model_payload_without_expanding_details(tmp_path):
     logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
     request = UserRequest(prompt="inspect", cwd=str(tmp_path))
     logger.start_run(request)
@@ -35,7 +35,9 @@ def test_logger_details_falls_back_to_repr_for_unserializable_payload(tmp_path):
 
     assert logger.last_run_id is not None
     details = (tmp_path / "runs" / logger.last_run_id / "details.log").read_text(encoding="utf-8")
-    assert "'bad':" in details
+    assert "'bad':" not in details
+    request_event = next(event for event in logger.events if event.name == "model.request")
+    assert request_event.payload["messages_ref"]["artifact_ref"]
 
 
 def test_logger_counts_model_retries_as_one_semantic_turn(tmp_path):
@@ -54,6 +56,24 @@ def test_logger_counts_model_retries_as_one_semantic_turn(tmp_path):
     assert logger.last_run_summary.turn_count == 1
 
 
+def test_logger_compacts_runtime_model_reply_without_archiving_body(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    logger.start_run(UserRequest(prompt="inspect", cwd=str(tmp_path)))
+    message = "result " * 1_000
+
+    logger.record(
+        "model.reply",
+        {"turn": 1, "message": message, "done": True, "actions": ["read_file"]},
+    )
+
+    payload = logger.events[-1].payload
+    assert len(payload["message"]) <= 320
+    assert payload["message_chars"] == len(message)
+    assert payload["message_sha256"]
+    assert message not in json.dumps(payload)
+    assert not (logger.run_dir / "artifacts").exists()
+
+
 def test_logger_externalizes_large_event_values_to_run_artifact(tmp_path):
     logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
     request = UserRequest(prompt="write report", cwd=str(tmp_path))
@@ -63,10 +83,10 @@ def test_logger_externalizes_large_event_values_to_run_artifact(tmp_path):
     logger.record("tool.execute", {"name": "patch", "arguments": {"diff": large_diff}})
 
     event = logger.events[-1]
-    reference = event.payload["arguments"]["diff"]
+    reference = event.payload["arguments_ref"]
     assert reference["$type"] == "artifact_ref"
     assert reference["schema_version"] == 1
-    assert reference["chars"] == 20_000
+    assert reference["chars"] >= 20_000
     assert reference["sha256"]
     assert large_diff not in json.dumps(event.payload)
     assert __import__("pathlib").Path(reference["artifact_ref"]).exists()
@@ -77,12 +97,49 @@ def test_logger_reuses_content_addressed_artifact_for_repeated_large_values(tmp_
     logger.start_run(UserRequest(prompt="write report", cwd=str(tmp_path)))
     large_value = "x" * 20_000
 
-    logger.record("tool.execute", {"value": large_value})
-    first = logger.events[-1].payload["value"]
-    logger.record("tool.result", {"value": large_value})
-    second = logger.events[-1].payload["value"]
+    logger.record("tool.execute", {"name": "one", "arguments": {"value": large_value}})
+    first = logger.events[-1].payload["arguments_ref"]
+    logger.record("tool.execute", {"name": "two", "arguments": {"value": large_value}})
+    second = logger.events[-1].payload["arguments_ref"]
 
     assert first["artifact_ref"] == second["artifact_ref"]
+    assert len(list((logger.run_dir / "artifacts").iterdir())) == 1
+
+
+def test_logger_inlines_small_tool_payloads_without_creating_files(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    logger.start_run(UserRequest(prompt="inspect", cwd=str(tmp_path)))
+
+    logger.record("tool.execute", {"name": "read_file", "arguments": {"path": "README.md"}})
+    logger.record(
+        "tool.result",
+        {"name": "read_file", "success": True, "output": "hello", "metadata": {}},
+    )
+
+    assert logger.events[-2].payload["arguments_ref"]["$type"] == "inline_payload"
+    assert logger.events[-1].payload["result_ref"]["$type"] == "inline_payload"
+    assert not (logger.run_dir / "artifacts").exists()
+
+
+def test_logger_stores_large_action_once_across_execute_and_result(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    logger.start_run(UserRequest(prompt="write", cwd=str(tmp_path)))
+    arguments = {"diff": "x" * 4_000}
+
+    execute = logger.record("tool.execute", {"name": "patch", "arguments": arguments})
+    result = logger.record(
+        "tool.result",
+        {
+            "name": "patch",
+            "success": False,
+            "output": "invalid patch",
+            "metadata": {"action_arguments": arguments},
+        },
+    )
+
+    assert execute.payload["arguments_ref"]["artifact_ref"]
+    assert result.payload["arguments_ref"]["artifact_ref"] == execute.payload["arguments_ref"]["artifact_ref"]
+    assert result.payload["result_ref"]["$type"] == "inline_payload"
     assert len(list((logger.run_dir / "artifacts").iterdir())) == 1
 
 
@@ -101,6 +158,52 @@ def test_logger_does_not_copy_session_trace_into_run_events(tmp_path):
     start = next(event for event in events if event["name"] == "run.start")
     assert start["payload"]["metadata"] == {"source": "test"}
     assert "historical-trace-sentinel" not in events_path.read_text(encoding="utf-8")
+
+
+def test_logger_indexes_model_payloads_and_terminal_state_by_reference(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    request = UserRequest(
+        prompt="continue",
+        cwd=str(tmp_path),
+        metadata={
+            "session_id": "session-1",
+            "conversation": [{"role": "user", "content": "old context"}],
+            "resume_state": {"open_issue": "old blocker"},
+        },
+    )
+    logger.start_run(request)
+    logger.record("model.request", {"model": "local", "messages": [{"role": "user", "content": "prompt"}]})
+    logger.record("model.request", {"model": "local", "messages": [{"role": "user", "content": "later"}]})
+    logger.record("model.response", {"choices": [{"message": {"content": "done"}}]})
+    logger.finalize(
+        request,
+        ExecutionSummary(
+            "done",
+            [ToolResult("read_file", True, "content")],
+            checkpoint=TaskCheckpoint(task_id="task-1", workspace_revision=2),
+        ),
+    )
+
+    start = next(event for event in logger.events if event.name == "run.start")
+    model_requests = [event for event in logger.events if event.name == "model.request"]
+    model_response = next(event for event in logger.events if event.name == "model.response")
+    finish = next(event for event in logger.events if event.name == "run.finish")
+    assert start.payload["metadata"] == {"session_id": "session-1"}
+    assert "messages" not in model_requests[0].payload
+    assert model_requests[0].payload["messages_ref"]["artifact_ref"]
+    assert model_requests[1].payload["messages_ref"]["artifact_ref"] == ""
+    assert model_requests[1].payload["messages_ref"]["sha256"]
+    assert model_response.payload["response_fingerprint"]["artifact_ref"] == ""
+    assert "tool_results" not in finish.payload
+    assert finish.payload["tool_count"] == 1
+    assert finish.payload["checkpoint"] == {
+        "task_id": "task-1",
+        "workspace_revision": 2,
+        "phase": "executing",
+        "required_evidence": [],
+        "unmet_deliverables": [],
+    }
+    assert finish.payload["checkpoint_ref"]["artifact_ref"]
 
 
 def test_logger_redacts_sensitive_keys_and_token_like_values(tmp_path):

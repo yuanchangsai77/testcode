@@ -116,13 +116,20 @@ class ToolRegistry:
         blocked = self.preflight(action, cwd=cwd, allowed_roots=allowed_roots)
         if blocked is not None:
             blocked = self._result_packager.package(blocked)
-            self._record_result(blocked)
+            if blocked.error_code != "blocked_by_security_policy":
+                blocked.metadata.setdefault("action_arguments", dict(action.arguments))
+            result_event = self._record_result(blocked)
+            self._attach_action_artifact_ref(blocked, result_event)
             return blocked
         tool = self._tools[action.name]
         context = self._context(cwd, allowed_roots)
-        self._logger.record("tool.execute", {"name": action.name, "arguments": action.arguments})
+        action_event = self._logger.record(
+            "tool.execute", {"name": action.name, "arguments": action.arguments}
+        )
         result = tool.run(action, context)
         result = self._result_packager.package(result)
+        result.metadata.setdefault("action_arguments", dict(action.arguments))
+        self._attach_action_artifact_ref(result, action_event)
         definition = tool.definition()
         if result.success:
             declared = definition.evidence_kinds
@@ -133,7 +140,8 @@ class ToolRegistry:
                 result.metadata["invalidates_workspace_state"] = True
         elif definition.risk_level == "test":
             result.metadata["invalidates_evidence"] = ["test"]
-        self._record_result(result)
+        result_event = self._record_result(result)
+        self._attach_action_artifact_ref(result, result_event)
         return result
 
     def preflight(
@@ -218,8 +226,8 @@ class ToolRegistry:
             },
         )
 
-    def _record_result(self, result: ToolResult) -> None:
-        self._logger.record(
+    def _record_result(self, result: ToolResult):
+        return self._logger.record(
             "tool.result",
             {
                 "name": result.name,
@@ -229,3 +237,8 @@ class ToolRegistry:
                 "metadata": result.metadata,
             },
         )
+
+    def _attach_action_artifact_ref(self, result: ToolResult, event) -> None:
+        action_ref = getattr(event, "payload", {}).get("arguments_ref", {})
+        if isinstance(action_ref, dict) and action_ref.get("artifact_ref"):
+            result.metadata.setdefault("action_artifact_ref", action_ref["artifact_ref"])

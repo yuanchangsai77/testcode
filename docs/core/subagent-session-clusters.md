@@ -58,7 +58,7 @@ cluster、child session、attempt、工作区和上述合同。单独设置后�
 
 ## 3. 公共状态空间
 
-公共状态空间是 append-only 协作面，不是聊天记录。条目包含：
+公共状态空间是有界的当前协作投影，不是聊天记录或永久事件流。条目包含：
 
 - 条目标识、作者会话和类型。
 - 有界摘要与可选 artifact 引用。
@@ -69,8 +69,10 @@ cluster、child session、attempt、工作区和上述合同。单独设置后�
 成员生命周期单独维护为 `ready`、`running`、`blocked`、`completed`、`failed` 或 `cancelled`。
 只有委派目标正常完成才能进入 `completed`；等待审批、权限不足和进度耗尽进入 `blocked`，
 运行时异常进入 `failed`；用户中断进入 `cancelled`。每次续跑增加 attempt，历史 run 不被覆盖。
-公共状态写入使用文件锁和原子替换，避免多个本地 worker 覆盖彼此更新。消费者应按条目标识幂等
-处理，并按作者、attempt 和 supersedes 折叠到最新有效投影。模型生成的摘要属于不可信观察，只能以
+公共状态写入使用文件锁和原子替换，避免多个本地 worker 覆盖彼此更新。同一成员与 task 的 status、
+blocker 和旧终态由新投影替代；彼此独立的 finding、artifact 和 verification 按条目标识保留，再由公共
+空间硬条数上限统一裁剪。完整过程留在成员自己的 run archive。
+消费者按条目标识幂等处理。模型生成的摘要属于不可信观察，只能以
 明确标注的 user/tool 数据进入其他成员上下文，不得转换为 system 指令；当前成员自己的旧终态和
 未通过输出校验的原始文本不进入提示。终态和最终公共状态在同一次带 attempt 条件的原子更新中提交；
 取消或续跑已经改变 attempt 后，迟到 worker 不能再提交旧结果。

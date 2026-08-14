@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-import time
 import subprocess
+import time
+from pathlib import Path
 
 from testcode.observability.logger import InMemoryLogger
 from testcode.tools.builtin_provider import build_builtin_registry
-from testcode.types import ToolAction
+from testcode.types import ToolAction, UserRequest
 
 
 def make_registry(*, max_output_bytes: int = 32_000):
@@ -26,6 +27,25 @@ def test_registry_rejects_unknown_tool_and_arguments(tmp_path):
     assert unknown.error_code == "unknown_tool"
     assert extra.error_code == "unknown_argument"
     assert missing.error_code == "missing_argument"
+
+
+def test_registry_archives_large_arguments_rejected_during_preflight(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    logger.start_run(UserRequest(prompt="inspect", cwd=str(tmp_path)))
+    registry = build_builtin_registry(logger=logger)
+    action = ToolAction(
+        name="file_info",
+        arguments={"path": ".", "extra": "x" * 4_000},
+    )
+
+    result = registry.execute(action, cwd=str(tmp_path))
+
+    assert result.error_code == "unknown_argument"
+    assert result.metadata["action_artifact_ref"]
+    assert Path(result.metadata["action_artifact_ref"]).exists()
+    result_event = next(event for event in logger.events if event.name == "tool.result")
+    assert result_event.payload["arguments_ref"]["artifact_ref"] == result.metadata["action_artifact_ref"]
+    assert not any(event.name == "tool.execute" for event in logger.events)
 
 
 def test_registry_validates_argument_types_and_number_bounds(tmp_path):

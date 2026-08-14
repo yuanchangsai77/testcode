@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - Windows support will need a platform l
 
 MEMBER_STATES = frozenset({"ready", "running", "blocked", "completed", "failed", "cancelled"})
 PUBLIC_ENTRY_KINDS = frozenset({"status", "finding", "blocker", "verification", "artifact"})
+MAX_PUBLIC_STATE_ENTRIES = 100
 
 
 @dataclass(slots=True)
@@ -321,6 +322,7 @@ class SessionClusterStore:
                 supersedes=str(metadata.get("supersedes", "")),
             )
             cluster.shared_state.append(entry)
+            cluster.shared_state = _compact_shared_state(cluster.shared_state)
             created.append(entry)
 
         self._update(cluster_id, mutate)
@@ -383,6 +385,7 @@ class SessionClusterStore:
                 supersedes=previous.entry_id if previous is not None else "",
             )
             cluster.shared_state.append(entry)
+            cluster.shared_state = _compact_shared_state(cluster.shared_state)
             created.append(entry)
             committed.append(True)
 
@@ -441,6 +444,26 @@ def _member(cluster: SessionCluster, session_id: str) -> ClusterMember:
         if member.session_id == session_id:
             return member
     raise ValueError("only cluster members may access public state")
+
+
+def _compact_shared_state(entries: list[SharedStateEntry]) -> list[SharedStateEntry]:
+    """Replace mutable projections while retaining independent delivery facts."""
+    selected: list[SharedStateEntry] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in reversed(entries):
+        if entry.lifecycle_state != "active":
+            key = (entry.author_session_id, entry.task_id, "terminal")
+        elif entry.kind in {"status", "blocker"}:
+            key = (entry.author_session_id, entry.task_id, entry.kind)
+        else:
+            key = (entry.entry_id, "", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(entry)
+        if len(selected) >= MAX_PUBLIC_STATE_ENTRIES:
+            break
+    return list(reversed(selected))
 
 
 def _normalize_messages(value: object) -> list[dict[str, str]]:
