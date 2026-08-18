@@ -21,6 +21,7 @@ from testcode.interaction.tui import (
 )
 from testcode.interaction.tui_events import TUIEvent, TUIEventKind, TUIEventQueue
 from testcode.interaction.tui_state import RunStatus, ToolStatus
+from testcode.types import ExecutionSummary
 
 
 def _plain(value: str) -> str:
@@ -128,7 +129,250 @@ def test_renderer_keeps_model_metadata_separate_from_activity():
     assert renderer.runtime_row(state) == ("class:runtime", "  gpt-5 · /repo")
 
 
-def test_tool_rows_use_colored_state_bullets():
+def test_renderer_shows_complete_pending_model_stream_instead_of_last_three_lines():
+    controller = TUIController()
+    controller.publish(TUIEvent(TUIEventKind.RUN_STARTED))
+    controller.publish(TUIEvent(TUIEventKind.MODEL_STARTED, entity_id="model-1"))
+    controller.publish(
+        TUIEvent(
+            TUIEventKind.MODEL_STREAM_DELTA,
+            entity_id="model-1",
+            payload={
+                "thinking": "checking",
+                "message": "first\nsecond\nthird\nfourth",
+            },
+        )
+    )
+
+    frame = _plain(TUIRenderer().render(controller.drain()))
+
+    assert "thinking:" in frame
+    assert "checking" in frame
+    assert "   first" in frame
+    assert "   second" in frame
+    assert "   third" in frame
+    assert "   fourth" in frame
+    assert "Receiving model stream" in frame
+
+
+def test_renderer_uses_terminal_height_for_sliding_stream_preview():
+    controller = TUIController()
+    controller.publish(TUIEvent(TUIEventKind.RUN_STARTED))
+    controller.publish(TUIEvent(TUIEventKind.RESIZED, payload={"width": 80, "height": 14}))
+    controller.publish(
+        TUIEvent(
+            TUIEventKind.MODEL_STREAM_DELTA,
+            entity_id="model-1",
+            payload={"message": "\n".join(f"line-{index}" for index in range(10))},
+        )
+    )
+
+    frame = _plain(TUIRenderer().render(controller.drain()))
+
+    assert "line-0" not in frame
+    assert "line-9" in frame
+    assert "   …" in frame
+
+
+def test_tui_stream_previews_incrementally_then_defers_final_answer_to_renderer(monkeypatch):
+    output = StringIO()
+    presenter = TUIConsolePresenter(output=output)
+    committed: list[str] = []
+    monkeypatch.setattr(presenter._surface, "commit", lambda rows: committed.extend(rows))
+
+    handle = presenter.model_started()
+    presenter.model_stream_delta(handle, "message", "您好！\n有什么可以")
+
+    state = presenter.controller.drain()
+    assert committed == []
+    assert state.model_stream_message == "您好！\n有什么可以"
+    assert "   您好！" in _plain(TUIRenderer().render(state))
+    assert "   有什么可以" in _plain(TUIRenderer().render(state))
+
+    presenter.model_stream_delta(handle, "message", "帮您的吗？")
+    presenter.model_response_ready(
+        handle,
+        "您好！\n有什么可以帮您的吗？",
+        True,
+    )
+    presenter.model_finished(handle)
+
+    assert committed == []
+    assert presenter._last_streamed_message == ""
+    presenter.show_summary(
+        ExecutionSummary(
+            final_message="## 问候\n\n**您好！** 有什么可以帮您的吗？",
+            tool_results=[],
+        )
+    )
+    rendered = _plain(output.getvalue())
+    assert "问候" in rendered
+    assert "您好！" in rendered
+    assert "**您好！**" not in rendered
+
+
+def test_tui_renders_complete_tool_round_markdown_but_not_protocol_placeholder(monkeypatch):
+    presenter = TUIConsolePresenter(output=StringIO())
+    committed: list[list[str]] = []
+    monkeypatch.setattr(presenter._surface, "commit", lambda rows: committed.append(rows))
+
+    handle = presenter.model_started()
+    presenter.model_stream_delta(handle, "message", "## 读取计划")
+    presenter.model_response_ready(handle, "## 读取计划\n\n- 架构文档", False)
+    presenter.model_finished(handle)
+    placeholder = presenter.model_started()
+    presenter.model_response_ready(placeholder, "Model requested tool calls.", False)
+    presenter.model_finished(placeholder)
+
+    assert len(committed) == 1
+    rendered = _plain("\n".join(committed[0]))
+    assert committed[0][0].strip() == ""
+    assert "读取计划" in rendered
+    assert "架构文档" in rendered
+    assert "##" not in rendered
+    assert "Model requested tool calls." not in rendered
+
+
+def test_tui_commits_model_turns_and_tools_in_causal_order(monkeypatch):
+    presenter = TUIConsolePresenter(output=StringIO())
+    committed: list[str] = []
+    monkeypatch.setattr(
+        presenter._surface,
+        "commit",
+        lambda rows: committed.append(_plain("\n".join(rows))),
+    )
+
+    first_model = presenter.model_started()
+    presenter.model_response_ready(first_model, "**第一轮**", False)
+    presenter.model_finished(first_model)
+    first_tool = presenter.tool_started("read_file")
+    presenter.tool_finished(
+        first_tool,
+        SimpleNamespace(name="read_file"),
+        SimpleNamespace(success=True, output="first.py", error_code=None),
+    )
+    second_model = presenter.model_started()
+    presenter.model_response_ready(second_model, "**第二轮**", False)
+    presenter.model_finished(second_model)
+    second_tool = presenter.tool_started("search_text")
+    presenter.tool_finished(
+        second_tool,
+        SimpleNamespace(name="search_text"),
+        SimpleNamespace(success=True, output="4 matches", error_code=None),
+    )
+
+    assert len(committed) == 4
+    assert committed[0].splitlines()[0].strip() == ""
+    assert "第一轮" in committed[0]
+    assert "read_file → first.py" in committed[1]
+    assert "第二轮" in committed[2]
+    assert "search_text → 4 matches" in committed[3]
+
+
+def test_final_markdown_has_a_blank_line_after_the_last_tool():
+    output = StringIO()
+    presenter = TUIConsolePresenter(output=output)
+    tool = presenter.tool_started("read_file")
+    presenter.tool_finished(
+        tool,
+        SimpleNamespace(name="read_file"),
+        SimpleNamespace(success=True, output="README.md", error_code=None),
+    )
+
+    presenter.show_summary(
+        ExecutionSummary(final_message="项目架构整理如下：", tool_results=[])
+    )
+
+    lines = _plain(output.getvalue()).splitlines()
+    tool_line = next(index for index, line in enumerate(lines) if "read_file → README.md" in line)
+    answer_line = next(index for index, line in enumerate(lines) if "项目架构整理如下：" in line)
+    assert answer_line >= tool_line + 2
+    assert all(not line.strip() for line in lines[tool_line + 1 : answer_line])
+
+
+def test_first_answer_reuses_prompt_separator_without_adding_a_second_blank_line():
+    output = StringIO()
+    presenter = TUIConsolePresenter(output=output)
+    presenter.show_start(SimpleNamespace(prompt="您好", cwd="/repo"))
+
+    presenter.show_summary(
+        ExecutionSummary(final_message="您好！请问有什么可以帮您的吗？", tool_results=[])
+    )
+
+    lines = _plain(output.getvalue()).splitlines()
+    prompt_line = next(index for index, line in enumerate(lines) if "testcode> 您好" in line)
+    answer_line = next(
+        index for index, line in enumerate(lines) if "您好！请问有什么可以帮您的吗？" in line
+    )
+    # One blank row belongs to the input box itself; exactly one fixed blank
+    # row remains between the bottom of that box and the answer.
+    assert answer_line == prompt_line + 3
+    assert all(not line.strip() for line in lines[prompt_line + 1 : answer_line])
+
+
+def test_stream_preview_adds_missing_separator_immediately_after_a_tool(monkeypatch):
+    presenter = TUIConsolePresenter(output=StringIO())
+    monkeypatch.setattr(presenter._surface, "commit", lambda _rows: None)
+    tool = presenter.tool_started("list_dir")
+    presenter.tool_finished(
+        tool,
+        SimpleNamespace(name="list_dir"),
+        SimpleNamespace(success=True, output="listed /repo", error_code=None),
+    )
+    model = presenter.model_started()
+    presenter.model_stream_delta(model, "message", "正在分析")
+
+    rows = presenter.renderer.render_rows(presenter.controller.drain())
+    message_index = next(index for index, (_style, text) in enumerate(rows) if "正在分析" in text)
+    assert message_index > 0
+    assert rows[message_index - 1][1] == ""
+
+
+def test_stream_preview_reuses_fixed_prompt_separator_without_adding_another():
+    presenter = TUIConsolePresenter(output=StringIO())
+    presenter.show_start(SimpleNamespace(prompt="看看", cwd="/repo"))
+    model = presenter.model_started()
+    presenter.model_stream_delta(model, "message", "正在查看")
+
+    state = presenter.controller.drain()
+    rows = presenter.renderer.render_rows(state)
+    message_index = next(index for index, (_style, text) in enumerate(rows) if "正在查看" in text)
+    assert state.model_stream_needs_separator is False
+    assert message_index == 0
+
+
+def test_failed_tool_transcript_is_committed_before_rendered_final_answer():
+    output = StringIO()
+    presenter = TUIConsolePresenter(output=output)
+    tool_handle = presenter.tool_started("toolbox_open")
+    presenter.tool_finished(
+        tool_handle,
+        SimpleNamespace(name="toolbox_open"),
+        SimpleNamespace(
+            name="toolbox_open",
+            success=False,
+            output="unknown toolbox",
+            error_code="capability_toolbox_unavailable",
+        ),
+    )
+    presenter.controller.drain()
+
+    final_handle = presenter.model_started()
+    presenter.model_stream_delta(final_handle, "message", "## 最终架构")
+    presenter.model_response_ready(final_handle, "## 最终架构", True)
+    presenter.model_finished(final_handle)
+    presenter.controller.drain()
+    presenter._flush_tool_transcript()
+    presenter.show_summary(
+        ExecutionSummary(final_message="## 最终架构", tool_results=[])
+    )
+
+    rendered = _plain(output.getvalue())
+    assert rendered.index("toolbox_open") < rendered.index("最终架构")
+    assert "## 最终架构" not in rendered
+
+
+def test_renderer_keeps_only_running_tools_in_transient_rows():
     controller = TUIController()
     controller.publish(TUIEvent(TUIEventKind.RUN_STARTED))
     controller.publish(
@@ -148,8 +392,40 @@ def test_tool_rows_use_colored_state_bullets():
     rows = TUIRenderer().render_rows(controller.drain())
 
     assert rows[0][0] == "class:tool.running"
-    assert rows[1][0] == "class:tool.succeeded"
-    assert all(text.startswith(" • ") for _style, text in rows[:2])
+    assert rows[0][1].startswith(" • read →")
+    assert all("test → passed" not in text for _style, text in rows)
+
+
+def test_tui_commits_each_terminal_tool_state_immediately(monkeypatch):
+    presenter = TUIConsolePresenter(output=StringIO())
+    committed: list[list[str]] = []
+    monkeypatch.setattr(
+        presenter._surface,
+        "commit",
+        lambda rows: committed.append([_plain(row) for row in rows]),
+    )
+
+    finished = presenter.tool_started("list_dir")
+    presenter.tool_finished(
+        finished,
+        SimpleNamespace(name="list_dir"),
+        SimpleNamespace(success=True, output="listed /repo", error_code=None),
+    )
+    aborted = presenter.tool_started("read_file")
+    presenter.tool_aborted(aborted)
+    presenter.tool_skipped(SimpleNamespace(name="write_file"), "not approved")
+
+    assert committed == [
+        [" • list_dir → listed /repo"],
+        [" • read_file → aborted"],
+        [" • write_file → not approved"],
+    ]
+    state = presenter.controller.drain()
+    assert all(tool.status != ToolStatus.RUNNING for tool in state.tools)
+    assert all(tool.name not in _plain(TUIRenderer().render(state)) for tool in state.tools)
+
+    presenter._flush_tool_transcript()
+    assert len(committed) == 3
 
 
 def test_composer_supports_unicode_multiline_cursor_and_history():

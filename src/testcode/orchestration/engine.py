@@ -211,6 +211,24 @@ class ExecutionEngine:
             progress_handle = None
             if self.progress_reporter:
                 progress_handle = self.progress_reporter.model_started()
+            stream_observer_setter = getattr(
+                self.model,
+                "set_natural_language_stream_observer",
+                None,
+            )
+            stream_reporter = getattr(self.progress_reporter, "model_stream_delta", None)
+            if callable(stream_observer_setter):
+                if callable(stream_reporter):
+                    stream_observer_setter(
+                        lambda delta: stream_reporter(
+                            progress_handle,
+                            delta.channel,
+                            delta.text,
+                        )
+                    )
+                else:
+                    stream_observer_setter(None)
+            reply = None
             try:
                 retry_count = 0
                 budget_problem = None
@@ -283,7 +301,20 @@ class ExecutionEngine:
                         if self._cancel_event.wait(retry_delay):
                             raise KeyboardInterrupt
             finally:
+                if callable(stream_observer_setter):
+                    stream_observer_setter(None)
                 if progress_handle is not None:
+                    response_ready = getattr(
+                        self.progress_reporter,
+                        "model_response_ready",
+                        None,
+                    )
+                    if callable(response_ready) and reply is not None:
+                        response_ready(
+                            progress_handle,
+                            reply.message,
+                            reply.done and not reply.actions,
+                        )
                     self.progress_reporter.model_finished(progress_handle)
             if budget_problem is not None:
                 return self._finish(self._budget_summary(session, budget_problem))

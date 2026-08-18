@@ -21,6 +21,10 @@ class ProgressReporter(Protocol):
     def model_finished(self, handle: Any) -> None:
         ...
 
+    def model_stream_delta(self, handle: Any, channel: str, text: str) -> None:
+        """Render a presentation-safe natural-language model delta."""
+        ...
+
     def model_retrying(
         self,
         handle: Any,

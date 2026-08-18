@@ -15,6 +15,7 @@ class TUIEventKind(StrEnum):
     RUN_FAILED = "run.failed"
     MODEL_STARTED = "model.started"
     MODEL_RETRYING = "model.retrying"
+    MODEL_STREAM_DELTA = "model.stream_delta"
     MODEL_FINISHED = "model.finished"
     TOOL_STARTED = "tool.started"
     TOOL_FINISHED = "tool.finished"
@@ -36,7 +37,12 @@ class TUIEvent:
 
     @property
     def coalesce_key(self) -> tuple[TUIEventKind, str | None] | None:
-        if self.kind in {TUIEventKind.TICK, TUIEventKind.RESIZED, TUIEventKind.MODEL_RETRYING}:
+        if self.kind in {
+            TUIEventKind.TICK,
+            TUIEventKind.RESIZED,
+            TUIEventKind.MODEL_RETRYING,
+            TUIEventKind.MODEL_STREAM_DELTA,
+        }:
             return self.kind, self.entity_id
         return None
 

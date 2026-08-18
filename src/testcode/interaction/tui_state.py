@@ -47,6 +47,9 @@ class TUIState:
     request_summary: str = ""
     run_started_at: float | None = None
     model_status: str = ""
+    model_stream_message: str = ""
+    model_stream_thinking: str = ""
+    model_stream_needs_separator: bool = False
     tools: tuple[ToolView, ...] = ()
     approval: ApprovalView | None = None
     terminal_width: int = 80
@@ -72,21 +75,56 @@ def reduce_tui_state(state: TUIState, event: TUIEvent) -> TUIState:
             request_summary=str(payload.get("prompt", "")),
             run_started_at=event.created_at,
             model_status="",
+            model_stream_message="",
+            model_stream_thinking="",
+            model_stream_needs_separator=False,
             tools=(),
             approval=None,
         )
     elif event.kind == TUIEventKind.RUN_CANCELLING:
         next_state = replace(state, run_status=RunStatus.CANCELLING)
     elif event.kind in {TUIEventKind.RUN_FINISHED, TUIEventKind.RUN_FAILED}:
-        next_state = replace(state, run_status=RunStatus.IDLE, model_status="", approval=None)
+        next_state = replace(
+            state,
+            run_status=RunStatus.IDLE,
+            model_status="",
+            model_stream_message="",
+            model_stream_thinking="",
+            model_stream_needs_separator=False,
+            approval=None,
+        )
     elif event.kind == TUIEventKind.MODEL_STARTED:
         msg = str(payload.get("message", "Model is thinking…"))
-        next_state = replace(state, model_status=msg)
+        next_state = replace(
+            state,
+            model_status=msg,
+            model_stream_message="",
+            model_stream_thinking="",
+            model_stream_needs_separator=bool(payload.get("needs_separator", False)),
+        )
 
     elif event.kind == TUIEventKind.MODEL_RETRYING:
-        next_state = replace(state, model_status=str(payload.get("message", "Retrying…")))
+        next_state = replace(
+            state,
+            model_status=str(payload.get("message", "Retrying…")),
+            model_stream_message="",
+            model_stream_thinking="",
+        )
+    elif event.kind == TUIEventKind.MODEL_STREAM_DELTA:
+        next_state = replace(
+            state,
+            model_stream_message=str(payload.get("message", state.model_stream_message)),
+            model_stream_thinking=str(payload.get("thinking", state.model_stream_thinking)),
+            model_status="Receiving model stream…",
+        )
     elif event.kind == TUIEventKind.MODEL_FINISHED:
-        next_state = replace(state, model_status="")
+        next_state = replace(
+            state,
+            model_status="",
+            model_stream_message="",
+            model_stream_thinking="",
+            model_stream_needs_separator=False,
+        )
     elif event.kind == TUIEventKind.TOOL_STARTED:
         tool = ToolView(tool_id=event.entity_id or "", name=str(payload.get("name", "tool")))
         next_state = replace(state, tools=state.tools + (tool,))

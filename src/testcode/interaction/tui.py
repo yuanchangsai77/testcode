@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import StringIO
 import json
 import os
 import re
@@ -110,14 +111,9 @@ class TUIRenderer:
         width = max(1, state.terminal_width)
         rows: list[tuple[str, str]] = []
 
-        for tool in state.tools[-6:]:
-            style = {
-                ToolStatus.RUNNING: "class:tool.running",
-                ToolStatus.SUCCEEDED: "class:tool.succeeded",
-                ToolStatus.FAILED: "class:tool.failed",
-                ToolStatus.ABORTED: "class:tool.failed",
-                ToolStatus.SKIPPED: "class:tool.skipped",
-            }[tool.status]
+        running_tools = [tool for tool in state.tools if tool.status == ToolStatus.RUNNING]
+        for tool in running_tools[-6:]:
+            style = "class:tool.running"
             rows.append((style, self._fit(f" • {tool.name} → {tool.summary}", width)))
 
         if state.approval is not None:
@@ -146,6 +142,33 @@ class TUIRenderer:
                 ]
             )
             return rows
+
+        has_model_stream = bool(state.model_stream_thinking or state.model_stream_message)
+        if has_model_stream and state.model_stream_needs_separator:
+            rows.append(("", ""))
+
+        stream_budget = max(state.terminal_height - len(rows) - 8, 4)
+        if state.model_stream_thinking:
+            all_thinking_lines = state.model_stream_thinking.splitlines() or [""]
+            thinking_budget = min(max(stream_budget // 3, 2), len(all_thinking_lines))
+            thinking_lines = all_thinking_lines[-thinking_budget:]
+            rows.append(("class:runtime", self._fit(" › thinking:", width)))
+            if len(all_thinking_lines) > len(thinking_lines):
+                rows.append(("class:runtime", self._fit("   …", width)))
+            rows.extend(
+                ("class:runtime", self._fit(f"   {line}", width))
+                for line in thinking_lines
+            )
+            stream_budget = max(stream_budget - len(thinking_lines) - 1, 2)
+        if state.model_stream_message:
+            all_message_lines = state.model_stream_message.splitlines() or [""]
+            message_lines = all_message_lines[-stream_budget:]
+            if len(all_message_lines) > len(message_lines):
+                rows.append(("", self._fit("   …", width)))
+            rows.extend(
+                ("", self._fit(f"   {line}", width))
+                for line in message_lines
+            )
 
         elapsed = state.elapsed(now)
         if state.run_status == RunStatus.CANCELLING:
@@ -405,6 +428,16 @@ class InlineTerminalSurface:
             self._clear_locked()
             self.output.flush()
 
+    def commit(self, rows: list[str]) -> None:
+        """Move stable rows into native scrollback without racing a redraw."""
+        if not rows:
+            return
+        with self._lock:
+            self._clear_locked()
+            for row in rows:
+                print(row, file=self.output)
+            self.output.flush()
+
     def _clear_locked(self) -> None:
         if not self._active:
             return
@@ -463,6 +496,10 @@ class TUIConsolePresenter(ConsolePresenter):
         self._approval_waiters: dict[str, tuple[threading.Event, list[bool]]] = {}
         self._approval_lock = threading.Lock()
         self._flushed_tool_ids: set[str] = set()
+        self._active_tool_names: dict[str, str] = {}
+        self._stable_tail_has_separator = False
+        self._tui_model_streams: dict[str, dict[str, list[str]]] = {}
+        self._tui_model_replies: dict[str, tuple[str, bool]] = {}
 
     def clear_screen(self) -> None:
         """Clear the terminal and redraw the TUI idle frame."""
@@ -499,6 +536,7 @@ class TUIConsolePresenter(ConsolePresenter):
             self._print(f"{background}  {line}\033[K{Ansi.RESET}")
         self._print(blank)
         self._print()
+        self._stable_tail_has_separator = True
 
     def show_start(self, request) -> None:
         self._pending_prompt = request.prompt
@@ -513,6 +551,7 @@ class TUIConsolePresenter(ConsolePresenter):
             self._print(f"{background}  {line}\033[K{Ansi.RESET}")
         self._print(blank)
         self._print()
+        self._stable_tail_has_separator = True
 
     def prompt_input(self, engine=None) -> str:
         self._show_worked_separator()
@@ -583,16 +622,81 @@ class TUIConsolePresenter(ConsolePresenter):
         super().show_interrupted()
 
     def model_started(self, message: str = "Model is thinking…") -> str:
+        self._last_streamed_thinking = ""
+        self._last_streamed_message = ""
         handle = f"model-{uuid4().hex}"
-        self._publish(TUIEvent(TUIEventKind.MODEL_STARTED, entity_id=handle, payload={"message": message}))
+        self._tui_model_streams[handle] = {"message": [], "thinking": []}
+        self._publish(
+            TUIEvent(
+                TUIEventKind.MODEL_STARTED,
+                entity_id=handle,
+                payload={
+                    "message": message,
+                    "needs_separator": not self._stable_tail_has_separator,
+                },
+            )
+        )
         return handle
 
+    def model_response_ready(self, handle: str, message: str, done: bool) -> None:
+        """Classify a validated reply before its transient preview is finalized."""
+        if handle in self._tui_model_streams:
+            self._tui_model_replies[handle] = (message, done)
 
     def model_finished(self, handle: str) -> None:
         self._publish(TUIEvent(TUIEventKind.MODEL_FINISHED, entity_id=handle))
+        stream = self._tui_model_streams.pop(handle, None)
+        reply = self._tui_model_replies.pop(handle, None)
+        if stream is None or reply is None:
+            return
+        thinking = "".join(stream["thinking"])
+        message, done = reply
+        if done:
+            # The complete final answer is rendered after the runtime surface and
+            # tool transcript have been committed. Do not suppress that render.
+            self._last_streamed_thinking = ""
+            self._last_streamed_message = ""
+            return
+        rows: list[str] = []
+        if thinking:
+            rows.append(f" {Ansi.GRAY}› thinking:{Ansi.RESET}")
+            rows.extend(
+                f"{Ansi.GRAY}   {line}{Ansi.RESET}"
+                for line in thinking.splitlines()
+            )
+        if message and message != "Model requested tool calls.":
+            rows.extend(self._render_stable_markdown_rows(message))
+        if rows:
+            self._surface.commit([*rows, ""])
+            self._stable_tail_has_separator = True
+
+    def model_stream_delta(self, handle: str, channel: str, text: str) -> None:
+        stream = self._tui_model_streams.get(handle)
+        if stream is None or channel not in stream or not text:
+            return
+        stream[channel].append(text)
+        self._publish(
+            TUIEvent(
+                TUIEventKind.MODEL_STREAM_DELTA,
+                entity_id=handle,
+                payload={
+                    "message": "".join(stream["message"])[-32_000:],
+                    "thinking": "".join(stream["thinking"])[-8_000:],
+                },
+            )
+        )
 
     def model_retrying(self, handle, retry, max_retries, status, delay_seconds) -> None:
+        had_partial = bool(
+            handle in self._tui_model_streams
+            and any(self._tui_model_streams[handle].values())
+        )
+        if handle in self._tui_model_streams:
+            self._tui_model_streams[handle] = {"message": [], "thinking": []}
+        self._tui_model_replies.pop(handle, None)
         msg = f"{status} — retrying {retry}/{max_retries} in {delay_seconds:g}s…" if delay_seconds > 0 else f"{status} — retrying {retry}/{max_retries}…"
+        if had_partial:
+            msg = f"Partial response discarded. {msg}"
         self._publish(
             TUIEvent(
                 TUIEventKind.MODEL_RETRYING,
@@ -605,25 +709,31 @@ class TUIConsolePresenter(ConsolePresenter):
 
     def tool_started(self, action_name: str) -> str:
         handle = f"tool-{uuid4().hex}"
+        self._active_tool_names[handle] = action_name
         self._publish(
             TUIEvent(TUIEventKind.TOOL_STARTED, entity_id=handle, payload={"name": action_name})
         )
         return handle
 
     def tool_finished(self, handle: str, action, result) -> None:
+        summary = self._summarize_tool_result(result)
+        status = ToolStatus.SUCCEEDED if result.success else ToolStatus.FAILED
+        name = self._active_tool_names.pop(handle, action.name)
         self._publish(
             TUIEvent(
                 TUIEventKind.TOOL_FINISHED,
                 entity_id=handle,
                 payload={
-                    "name": action.name,
+                    "name": name,
                     "success": result.success,
-                    "summary": self._summarize_tool_result(result),
+                    "summary": summary,
                 },
             )
         )
+        self._commit_tool_row(handle, name, status, summary)
 
     def tool_aborted(self, handle: str) -> None:
+        name = self._active_tool_names.pop(handle, "tool")
         self._publish(
             TUIEvent(
                 TUIEventKind.TOOL_ABORTED,
@@ -631,15 +741,18 @@ class TUIConsolePresenter(ConsolePresenter):
                 payload={"summary": "aborted"},
             )
         )
+        self._commit_tool_row(handle, name, ToolStatus.ABORTED, "aborted")
 
     def tool_skipped(self, action, reason: str) -> None:
+        handle = f"tool-{uuid4().hex}"
         self._publish(
             TUIEvent(
                 TUIEventKind.TOOL_SKIPPED,
-                entity_id=f"tool-{uuid4().hex}",
+                entity_id=handle,
                 payload={"name": action.name, "summary": reason},
             )
         )
+        self._commit_tool_row(handle, action.name, ToolStatus.SKIPPED, reason)
 
     def confirm_tool_action(self, action, reason: str) -> bool:
         if not self._runtime_active:
@@ -952,9 +1065,56 @@ class TUIConsolePresenter(ConsolePresenter):
             }[tool.status]
             self._print(self.renderer.ansi_row(style, f" • {tool.name} → {tool.summary}"))
             self._flushed_tool_ids.add(tool.tool_id)
+            self._stable_tail_has_separator = False
             flushed_any = True
         if flushed_any:
             self._print()
+
+    def _commit_tool_row(
+        self,
+        handle: str,
+        name: str,
+        status: ToolStatus,
+        summary: str,
+    ) -> None:
+        if handle in self._flushed_tool_ids:
+            return
+        style = {
+            ToolStatus.RUNNING: "class:tool.running",
+            ToolStatus.SUCCEEDED: "class:tool.succeeded",
+            ToolStatus.FAILED: "class:tool.failed",
+            ToolStatus.ABORTED: "class:tool.failed",
+            ToolStatus.SKIPPED: "class:tool.skipped",
+        }[status]
+        row = self.renderer.ansi_row(style, f" • {name} → {summary}")
+        self._surface.commit([row])
+        self._flushed_tool_ids.add(handle)
+        self._stable_tail_has_separator = False
+
+    def _markdown_renderable(self, text: str, *, top_padding: int | None = None):
+        if top_padding is None:
+            top_padding = 0 if self._stable_tail_has_separator else 1
+        self._stable_tail_has_separator = False
+        return super()._markdown_renderable(text, top_padding=top_padding)
+
+    def _render_stable_markdown_rows(self, text: str) -> list[str]:
+        """Render a validated model turn off-screen before an atomic commit."""
+        try:
+            from rich.console import Console
+
+            buffer = StringIO()
+            output_is_terminal = bool(
+                getattr(self._output, "isatty", lambda: False)()
+            )
+            console = Console(
+                file=buffer,
+                width=max(_terminal_size(self._output).columns, 1),
+                force_terminal=output_is_terminal,
+            )
+            console.print(self._markdown_renderable(text))
+            return buffer.getvalue().rstrip("\n").splitlines()
+        except ImportError:
+            return [f"   {line}" for line in text.splitlines()]
 
     def _publish(self, event: TUIEvent) -> None:
         self.controller.publish(event)

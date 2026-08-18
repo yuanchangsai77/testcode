@@ -20,6 +20,9 @@ class ConsolePresenter:
         self._session = None
         self._engine = None
         self._resumed = False
+        self._active_model_streams: dict[int, dict[str, object]] = {}
+        self._last_streamed_message = ""
+        self._last_streamed_thinking = ""
 
     def _print(self, value: str = "") -> None:
         print(value, file=getattr(self, "_output", sys.stdout))
@@ -35,27 +38,39 @@ class ConsolePresenter:
 
     def show_summary(self, summary: ExecutionSummary) -> None:
         thinking = self._extract_thinking(summary.final_message)
+        streamed_thinking = self._last_streamed_thinking.strip()
         
         GRAY = "\033[90m"
         RESET = "\033[0m"
         
-        if thinking:
+        if thinking and thinking.strip() != streamed_thinking:
             self._print(f"\n {GRAY}› thinking:{RESET}")
             indented_thinking = "\n".join(f"   {line}" for line in thinking.splitlines())
             self._print(f"{GRAY}{indented_thinking}{RESET}")
             
         response_text = self._display_text(summary.final_message)
+        streamed_message = self._display_text(self._last_streamed_message)
+        self._last_streamed_message = ""
+        self._last_streamed_thinking = ""
+        if streamed_message and response_text == streamed_message:
+            return
         try:
             from rich.console import Console
-            from rich.markdown import Markdown
-            from rich.padding import Padding
 
             console = Console(file=getattr(self, "_output", sys.stdout))
-            console.print(Padding(Markdown(response_text), (0, 0, 0, 3)))
+            console.print(self._markdown_renderable(response_text))
             self._print()
         except ImportError:
             indented_response = "\n".join(f"   {line}" for line in response_text.splitlines())
             self._print(f"{indented_response}\n")
+
+    @staticmethod
+    def _markdown_renderable(text: str, *, top_padding: int = 1):
+        """Build the shared Markdown presentation used by stable model output."""
+        from rich.markdown import Markdown
+        from rich.padding import Padding
+
+        return Padding(Markdown(text), (top_padding, 0, 0, 3))
 
     def _summarize_tool_result(self, result: ToolResult) -> str:
         if self.tool_result_summarizer is not None:
@@ -350,11 +365,55 @@ class ConsolePresenter:
         self.clear_running_status_bar(0)
 
     def model_started(self, message: str = "Model is thinking...") -> Spinner:
-        return self.show_thinking_start(message=message)
+        self._last_streamed_message = ""
+        self._last_streamed_thinking = ""
+        handle = self.show_thinking_start(message=message)
+        self._active_model_streams[id(handle)] = {
+            "started": False,
+            "channel": "",
+            "message": [],
+            "thinking": [],
+        }
+        return handle
 
 
     def model_finished(self, handle: Spinner) -> None:
+        state = self._active_model_streams.pop(id(handle), None)
+        if state and state.get("started"):
+            out = getattr(self, "_output", sys.stdout)
+            out.write("\033[0m\n")
+            out.flush()
+            self._last_streamed_message = "".join(state["message"])
+            self._last_streamed_thinking = "".join(state["thinking"])
+            self.clear_running_status_bar(0)
+            return
         self.show_thinking_end(handle)
+
+    def model_stream_delta(self, handle: Spinner, channel: str, text: str) -> None:
+        if not text:
+            return
+        state = self._active_model_streams.get(id(handle))
+        if state is None:
+            return
+        out = getattr(self, "_output", sys.stdout)
+        if not state["started"]:
+            handle.stop()
+            state["started"] = True
+            out.write("\r\033[K")
+        if state["channel"] != channel:
+            if state["channel"]:
+                out.write("\033[0m\n")
+            if channel == "thinking":
+                out.write("\n \033[90m› thinking:\n   ")
+            else:
+                out.write("\n\033[0m   ")
+            state["channel"] = channel
+        rendered = text.replace("\n", "\n   ")
+        out.write(rendered)
+        out.flush()
+        bucket = state[channel]
+        if isinstance(bucket, list):
+            bucket.append(text)
 
     def model_retrying(
         self,
@@ -364,6 +423,18 @@ class ConsolePresenter:
         status: str,
         delay_seconds: float,
     ) -> None:
+        stream_state = self._active_model_streams.get(id(handle))
+        if stream_state and stream_state.get("started"):
+            out = getattr(self, "_output", sys.stdout)
+            out.write(
+                "\033[0m\n"
+                " [The partial response above was interrupted and was not accepted.]\n"
+            )
+            out.flush()
+            stream_state.update(
+                {"started": False, "channel": "", "message": [], "thinking": []}
+            )
+            handle.start()
         if delay_seconds > 0:
             msg = f"{status} — retrying {retry}/{max_retries} in {delay_seconds:g}s..."
         else:

@@ -31,6 +31,31 @@ def test_presenter_cleans_protocol_tags_only_for_display(capsys):
     assert 'tool="shell_exec"' not in output
 
 
+def test_presenter_streams_natural_language_and_does_not_repeat_final(monkeypatch, capsys):
+    presenter = ConsolePresenter()
+
+    class FakeSpinner:
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(presenter, "show_thinking_start", lambda **_kwargs: FakeSpinner())
+    handle = presenter.model_started()
+    presenter.model_stream_delta(handle, "thinking", "checking")
+    presenter.model_stream_delta(handle, "message", "final answer")
+    presenter.model_finished(handle)
+    presenter.show_summary(
+        ExecutionSummary(
+            final_message="<think>checking</think>final answer",
+            tool_results=[],
+        )
+    )
+
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", capsys.readouterr().out)
+    assert output.count("checking") == 1
+    assert output.count("final answer") == 1
+    assert "   final answer" in output
+
+
 def test_presenter_uses_tool_result_summarizer():
     presenter = ConsolePresenter(tool_result_summarizer=lambda result: f"summary for {result.name}")
     
@@ -486,6 +511,31 @@ def test_presenter_shows_model_timeout_retry_progress(capsys):
 
     assert spinner.message == "Model request timed out — retrying 3/7 in 1.5s..."
     assert "retrying 3/7" in capsys.readouterr().out
+
+
+def test_presenter_marks_visible_partial_response_discarded_before_retry(monkeypatch, capsys):
+    presenter = ConsolePresenter()
+
+    class FakeSpinner:
+        message = ""
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def update_message(self, message):
+            self.message = message
+
+    monkeypatch.setattr(presenter, "show_thinking_start", lambda **_kwargs: FakeSpinner())
+    handle = presenter.model_started()
+    presenter.model_stream_delta(handle, "message", "unfinished answer")
+    presenter.model_retrying(handle, 1, 7, "Model stream idle", 0.5)
+
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", capsys.readouterr().out)
+    assert "unfinished answer" in output
+    assert "partial response above was interrupted and was not accepted" in output
 
 
 def test_spinner_escape_listener_interrupts_on_escape(monkeypatch):

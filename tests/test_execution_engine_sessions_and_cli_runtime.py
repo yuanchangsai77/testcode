@@ -6,6 +6,7 @@ from testcode.app import create_app
 from testcode.interaction.cli import CLI
 from testcode.interaction.presenter import ConsolePresenter
 from testcode.model.types import ModelConnectionError, ModelTimeoutError
+from testcode.model.streaming import NaturalLanguageDelta
 from testcode.observability.logger import InMemoryLogger
 from testcode.orchestration.engine import ExecutionEngine
 from testcode.orchestration.session import SessionContext
@@ -39,6 +40,61 @@ def test_scaffold_runs_end_to_end(tmp_path, monkeypatch):
     assert "scaffold is ready" in summary.final_message
     assert summary.tool_results
     assert summary.tool_results[0].success is True
+
+
+def test_engine_routes_only_model_natural_language_stream_to_progress_reporter(tmp_path):
+    class StreamingModel:
+        observer = None
+
+        def set_natural_language_stream_observer(self, observer):
+            self.observer = observer
+
+        def respond(self, _session):
+            assert self.observer is not None
+            self.observer(NaturalLanguageDelta("thinking", "checking"))
+            self.observer(NaturalLanguageDelta("message", "complete answer"))
+            return ModelReply(message="complete answer", done=True)
+
+    class Reporter:
+        def __init__(self):
+            self.deltas = []
+            self.lifecycle = []
+
+        def model_started(self, _message=""):
+            return "model-1"
+
+        def model_stream_delta(self, handle, channel, text):
+            self.deltas.append((handle, channel, text))
+
+        def model_response_ready(self, handle, message, done):
+            self.lifecycle.append(("ready", handle, message, done))
+
+        def model_finished(self, handle):
+            self.lifecycle.append(("finished", handle))
+
+    logger = InMemoryLogger()
+    model = StreamingModel()
+    reporter = Reporter()
+    engine = ExecutionEngine(
+        model=model,
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+        progress_reporter=reporter,
+    )
+
+    summary = engine.execute(UserRequest(prompt="answer", cwd=str(tmp_path)))
+
+    assert summary.final_message == "complete answer"
+    assert reporter.deltas == [
+        ("model-1", "thinking", "checking"),
+        ("model-1", "message", "complete answer"),
+    ]
+    assert reporter.lifecycle == [
+        ("ready", "model-1", "complete answer", True),
+        ("finished", "model-1"),
+    ]
+    assert model.observer is None
 
 
 def test_run_returns_message_when_model_request_fails(tmp_path, monkeypatch):
