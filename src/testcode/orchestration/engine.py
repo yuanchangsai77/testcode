@@ -833,11 +833,15 @@ class ExecutionEngine:
     def _unresolved_results(self, results: list[ToolResult]) -> list[ToolResult]:
         later_successes: set[str] = set()
         unresolved: list[ToolResult] = []
+        advisory_error_codes = {
+            "progress_required",
+            "capability_toolbox_unavailable",
+        }
         for result in reversed(results):
             if result.success:
                 later_successes.add(self._result_identity(result))
                 continue
-            if result.error_code == "progress_required":
+            if result.error_code in advisory_error_codes:
                 continue
             if self._result_identity(result) in later_successes:
                 continue

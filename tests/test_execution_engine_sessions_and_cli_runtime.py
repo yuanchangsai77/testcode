@@ -1917,6 +1917,35 @@ def test_progress_guard_is_advisory_when_model_legitimately_finishes():
     assert summary.outcome == "completed"
 
 
+def test_unavailable_optional_toolbox_remains_traceable_without_blocking_final_answer():
+    logger = InMemoryLogger()
+    engine = ExecutionEngine(
+        model=object(),
+        tools=build_builtin_registry(logger),
+        guardrails=Guardrails(policy=DefaultPolicy(mode="auto"), logger=logger),
+        logger=logger,
+    )
+
+    summary = engine._finish(
+        ExecutionSummary(
+            "Architecture answer grounded in already collected project evidence.",
+            [
+                ToolResult("read_file", True, "architecture"),
+                ToolResult(
+                    "toolbox_open",
+                    False,
+                    "unknown toolbox id",
+                    "capability_toolbox_unavailable",
+                ),
+            ],
+        )
+    )
+
+    assert summary.outcome == "completed"
+    assert summary.blockers == []
+    assert summary.tool_results[-1].error_code == "capability_toolbox_unavailable"
+
+
 def test_blocked_write_does_not_reset_completed_read_context(tmp_path):
     target = tmp_path / "config.py"
     target.write_text("API_KEY = None\n", encoding="utf-8")
