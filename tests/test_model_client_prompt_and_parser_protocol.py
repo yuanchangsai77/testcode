@@ -145,13 +145,19 @@ def test_create_model_client_reads_timeout_from_env(monkeypatch):
 
 
 def test_openai_client_accepts_config_object():
-    config = ModelClientConfig(base_url="http://127.0.0.1:3000", model="custom-model", timeout=3.5)
+    config = ModelClientConfig(
+        base_url="http://127.0.0.1:3000",
+        model="custom-model",
+        timeout=3.5,
+        stream_max_seconds=45,
+    )
 
     client = OpenAICompatibleModelClient(config=config)
 
     assert client.base_url == "http://127.0.0.1:3000"
     assert client.model == "custom-model"
     assert client.timeout == 3.5
+    assert client.stream_max_seconds == 45
 
 
 def test_loopback_model_requests_use_proxy_free_opener(monkeypatch):
@@ -174,6 +180,213 @@ def test_loopback_model_requests_use_proxy_free_opener(monkeypatch):
     assert direct_calls == [(request.full_url, 4)]
 
 
+def test_post_json_correlates_gateway_attempt_and_declares_timeout(monkeypatch):
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        timeout=2.5,
+    )
+    captured = {}
+
+    class FakeResponse:
+        headers = {"X-Client-Request-ID": "attempt-123"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+    def open_url(request, **_kwargs):
+        captured.update({key.lower(): value for key, value in request.header_items()})
+        return FakeResponse()
+
+    monkeypatch.setattr(client, "_open_url", open_url)
+
+    data = client._post_json(
+        "http://127.0.0.1:3000/v1/chat/completions",
+        {"messages": []},
+        request_id="attempt-123",
+    )
+
+    assert data["choices"][0]["message"]["content"] == "ok"
+    assert captured["x-client-request-id"] == "attempt-123"
+    assert captured["x-client-timeout-ms"] == "2500"
+
+
+def test_post_json_rejects_mismatched_gateway_request_id(monkeypatch):
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+
+    class FakeResponse:
+        headers = {"X-Client-Request-ID": "wrong-attempt"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(client, "_open_url", lambda *_args, **_kwargs: FakeResponse())
+
+    with pytest.raises(ModelConnectionError, match="mismatched X-Client-Request-ID"):
+        client._post_json(
+            "http://127.0.0.1:3000/v1/chat/completions",
+            {"messages": []},
+            request_id="attempt-123",
+        )
+
+
+def test_post_json_does_not_treat_provider_request_id_as_gateway_echo(monkeypatch):
+    client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000")
+
+    class FakeResponse:
+        headers = {"X-Request-ID": "provider-owned-request-id"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+    monkeypatch.setattr(client, "_open_url", lambda *_args, **_kwargs: FakeResponse())
+
+    data = client._post_json(
+        "http://127.0.0.1:3000/v1/chat/completions",
+        {"messages": []},
+        request_id="client-owned-attempt",
+    )
+
+    assert data["choices"][0]["message"]["content"] == "ok"
+
+
+def test_post_json_consumes_sse_deltas_and_reassembles_tool_calls(monkeypatch):
+    deltas = []
+    natural_deltas = []
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        stream=True,
+        logger=logger,
+        on_stream_delta=deltas.append,
+        on_natural_language_delta=natural_deltas.append,
+    )
+    captured = {}
+    stream_chunks = [
+            b'data: {"id":"chat-1","model":"local","choices":[{"delta":{"role":"assistant","content":"{\\"message\\":\\"hel"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"lo\\",\\"done\\":false,\\"actions\\":[]}","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_","arguments":"{\\"pa"}}]}}]}\n\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"file","arguments":"th\\":\\"README.md\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"total_tokens":7}}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+    reads = 0
+
+    class FakeResponse:
+        headers = {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "X-Client-Request-ID": "stream-attempt",
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read1(self, _size):
+            nonlocal reads
+            reads += 1
+            if reads > len(stream_chunks):
+                raise AssertionError("client read past the SSE [DONE] marker")
+            return stream_chunks[reads - 1]
+
+    def open_url(request, **_kwargs):
+        captured.update({key.lower(): value for key, value in request.header_items()})
+        return FakeResponse()
+
+    monkeypatch.setattr(client, "_open_url", open_url)
+    data = client._post_json(
+        "http://127.0.0.1:3000/v1/chat/completions",
+        {"messages": [], "stream": True},
+        request_id="stream-attempt",
+    )
+
+    message = data["choices"][0]["message"]
+    assert deltas == ['{"message":"hel', 'lo","done":false,"actions":[]}']
+    assert [(delta.channel, delta.text) for delta in natural_deltas] == [
+        ("message", "hel"),
+        ("message", "lo"),
+    ]
+    assert message["content"] == '{"message":"hello","done":false,"actions":[]}'
+    assert message["tool_calls"][0]["function"] == {
+        "name": "read_file",
+        "arguments": '{"path":"README.md"}',
+    }
+    assert data["choices"][0]["finish_reason"] == "tool_calls"
+    assert data["usage"] == {"total_tokens": 7}
+    assert captured["accept"] == "text/event-stream"
+    assert captured["x-client-timeout-ms"] == "900000"
+    assert captured["x-client-idle-timeout-ms"] == "60000"
+    assert [event.name for event in logger.events] == [
+        "model.stream_started",
+        "model.stream_first_event",
+        "model.stream_complete",
+    ]
+    assert logger.events[-1].payload["visible_message_chars"] == 5
+    assert logger.events[-1].payload["natural_language_format"] == "json"
+    assert logger.events[-1].payload["tool_call_count"] == 1
+    assert logger.events[-1].payload["first_event_after_ms"] is not None
+    assert logger.events[-1].payload["last_event_after_ms"] is not None
+
+
+def test_post_json_streams_plain_content_without_exposing_native_tool_calls(monkeypatch):
+    natural_deltas = []
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        stream=True,
+        logger=logger,
+        on_natural_language_delta=natural_deltas.append,
+    )
+    stream_chunks = iter(
+        [
+            b'data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"world","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+    )
+
+    class FakeResponse:
+        headers = {
+            "Content-Type": "text/event-stream",
+            "X-Client-Request-ID": "plain-stream",
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read1(self, _size):
+            return next(stream_chunks)
+
+    monkeypatch.setattr(client, "_open_url", lambda *_args, **_kwargs: FakeResponse())
+    data = client._post_json(
+        "http://127.0.0.1:3000/v1/chat/completions",
+        {"messages": [], "stream": True},
+        request_id="plain-stream",
+    )
+
+    assert "".join(delta.text for delta in natural_deltas) == "Hello world"
+    assert data["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert logger.events[-1].payload["natural_language_format"] == "plain"
+    assert logger.events[-1].payload["visible_message_chars"] == 11
+
+
 def test_response_read_enforces_total_deadline(monkeypatch):
     client = OpenAICompatibleModelClient(base_url="http://127.0.0.1:3000", timeout=1)
 
@@ -184,8 +397,110 @@ def test_response_read_enforces_total_deadline(monkeypatch):
     times = iter([0.0, 0.6, 1.1])
     monkeypatch.setattr("testcode.model.client.time.monotonic", lambda: next(times))
 
-    with pytest.raises(TimeoutError, match="deadline exceeded"):
+    with pytest.raises(TimeoutError, match="response_total timeout exceeded"):
         client._read_response(SlowResponse(), deadline=1.0)
+
+
+def test_active_sse_refreshes_idle_window_past_ordinary_request_timeout(monkeypatch):
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        timeout=1,
+        stream_max_seconds=10,
+    )
+    chunks = iter([b"one", b"two", b""])
+    socket_timeouts = []
+
+    class FakeSocket:
+        def settimeout(self, value):
+            socket_timeouts.append(value)
+
+    class Raw:
+        _sock = FakeSocket()
+
+    class FP:
+        raw = Raw()
+
+    class ActiveResponse:
+        fp = FP()
+
+        def read1(self, _size):
+            return next(chunks)
+
+    times = iter([0.0, 1.2, 2.4])
+    monkeypatch.setattr("testcode.model.client.time.monotonic", lambda: next(times))
+
+    result = b"".join(
+        client._iter_response_chunks(
+            ActiveResponse(),
+            deadline=10.0,
+            idle_timeout=1.0,
+        )
+    )
+
+    assert result == b"onetwo"
+    assert socket_timeouts == [1.0, 1.0, 1.0]
+
+
+def test_sse_idle_timeout_records_partial_stream_as_aborted(monkeypatch):
+    logger = InMemoryLogger()
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        timeout=2,
+        stream_max_seconds=20,
+        logger=logger,
+    )
+
+    class IdleResponse:
+        headers = {
+            "Content-Type": "text/event-stream",
+            "X-Client-Request-ID": "idle-attempt",
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read1(self, _size):
+            raise TimeoutError("socket idle")
+
+    monkeypatch.setattr(client, "_open_url", lambda *_args, **_kwargs: IdleResponse())
+
+    with pytest.raises(ModelTimeoutError, match="stream_idle"):
+        client._post_json(
+            "http://127.0.0.1:3000/v1/chat/completions",
+            {"messages": [], "stream": True},
+            request_id="idle-attempt",
+        )
+
+    names = [event.name for event in logger.events]
+    assert names == ["model.stream_started", "model.stream_aborted", "model.timeout"]
+    assert logger.events[-1].payload["timeout_kind"] == "stream_idle"
+    assert logger.events[-2].payload["event_count"] == 0
+
+
+def test_sse_total_limit_is_distinct_from_idle_timeout(monkeypatch):
+    client = OpenAICompatibleModelClient(
+        base_url="http://127.0.0.1:3000",
+        timeout=2,
+        stream_max_seconds=10,
+    )
+
+    class ResponseNearTotalLimit:
+        def read1(self, _size):
+            raise TimeoutError("total limit reached")
+
+    monkeypatch.setattr("testcode.model.client.time.monotonic", lambda: 9.5)
+
+    with pytest.raises(TimeoutError, match="stream_total timeout exceeded after 10 seconds"):
+        next(
+            client._iter_response_chunks(
+                ResponseNearTotalLimit(),
+                deadline=10,
+                idle_timeout=2,
+            )
+        )
 
 
 def test_create_model_client_uses_stub_without_base_url(monkeypatch):
@@ -233,6 +548,9 @@ def test_build_messages_keeps_tool_definitions_in_stable_system_prefix():
     user = str(messages[3]["content"])
 
     assert "Available tools:" in system
+    assert "general-purpose agent runtime" in system
+    assert "not your identity" in system
+    assert "testcode is the orchestration" not in system
     assert "- patch: Apply a unified diff." in system
     assert "- read_file: Read a workspace file." in system
     assert "argument path: File path." in system
@@ -467,7 +785,7 @@ def test_respond_sends_native_tool_schemas_and_parses_tool_calls(monkeypatch):
     )
     captured = {}
 
-    def fake_post_json(_url, payload):
+    def fake_post_json(_url, payload, **_kwargs):
         captured.update(payload)
         return {
             "choices": [

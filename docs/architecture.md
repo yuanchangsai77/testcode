@@ -203,6 +203,7 @@ Responsibilities:
 - invoke the model provider
 - parse structured actions from model output
 - support provider replacement through a small `respond(session)` protocol boundary
+- correlate every transport attempt with a unique request id and a declared client timeout
 
 Core files:
 
@@ -226,6 +227,12 @@ Important boundaries:
 - Prompt construction is accessed through `ModelPromptBuilder`.
 - Reply parsing is accessed through `ModelReplyParser`.
 - `OpenAICompatibleModelClient` coordinates those collaborators but does not expose parser or prompt compatibility methods.
+- The model client depends on a replaceable model-access endpoint, which may be a direct provider, compatible gateway,
+  or local inference framework. Transport implementations own protocol conversion, cancellation propagation, and
+  diagnostics while treating valid model content as opaque. See
+  [模型传输接口契约](reference/model-transport-contract.md).
+- JSON and SSE are interchangeable model transport modes. The synchronous orchestration boundary still receives one
+  validated `ModelReply`; optional stream observers may consume deltas without driving tools from partial output.
 
 ### 3.4 Tool Execution Layer
 

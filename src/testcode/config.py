@@ -18,6 +18,7 @@ MAX_MODEL_ATTEMPTS = 2_000
 MAX_CONSECUTIVE_MODEL_TIMEOUTS = 50
 MAX_RUN_SECONDS = 86_400.0
 MAX_PROMPT_CONTEXT_CHARS = 2_000_000
+MAX_MODEL_STREAM_SECONDS = 86_400.0
 MAX_SUBAGENT_MODEL_TIMEOUT_SECONDS = 300.0
 MAX_MCP_TOOLS_PER_SERVER = 1_024
 MAX_ACTIVE_CAPABILITIES = 32
@@ -58,6 +59,8 @@ class RuntimeConfig:
     model_base_url: str = ""
     model_name: str = "gpt-5.4"
     model_timeout: float = 60.0
+    model_stream_max_seconds: float = 900.0
+    model_stream: bool = False
     mode: str = "confirm"
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     model_retry: ModelRetryConfig = ModelRetryConfig()
@@ -96,6 +99,11 @@ def load_runtime_config(mode: str | None = None, cwd: str | Path | None = None) 
         model_base_url=os.getenv("TESTCODE_MODEL_BASE_URL", "").strip(),
         model_name=os.getenv("TESTCODE_MODEL_NAME", "gpt-5.4").strip() or "gpt-5.4",
         model_timeout=_float_env("TESTCODE_MODEL_TIMEOUT", 60.0),
+        model_stream_max_seconds=min(
+            MAX_MODEL_STREAM_SECONDS,
+            _float_env("TESTCODE_MODEL_STREAM_MAX_SECONDS", 900.0),
+        ),
+        model_stream=_bool_env("TESTCODE_MODEL_STREAM", False),
         mode=mode or os.getenv("TESTCODE_MODE", "confirm").strip() or "confirm",
         mcp_servers=load_mcp_server_configs(cwd=cwd),
         model_retry=tuning[0],
@@ -237,3 +245,14 @@ def _float_env(name: str, default: float) -> float:
         return default
 
     return value if value > 0 else default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name, "").strip().lower()
+    if not raw_value:
+        return default
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return default

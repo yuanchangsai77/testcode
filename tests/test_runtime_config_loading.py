@@ -37,6 +37,7 @@ MALFORMED
 
 def test_load_runtime_config_defaults_and_timeout_fallbacks(monkeypatch):
     monkeypatch.delenv("TESTCODE_MODEL_BASE_URL", raising=False)
+    monkeypatch.delenv("TESTCODE_MODEL_STREAM_MAX_SECONDS", raising=False)
     monkeypatch.setenv("TESTCODE_MODEL_NAME", " ")
     monkeypatch.setenv("TESTCODE_MODEL_TIMEOUT", "not-a-number")
     monkeypatch.setenv("TESTCODE_MODE", "")
@@ -46,6 +47,7 @@ def test_load_runtime_config_defaults_and_timeout_fallbacks(monkeypatch):
     assert config.model_base_url == ""
     assert config.model_name == "gpt-5.4"
     assert config.model_timeout == 60.0
+    assert config.model_stream_max_seconds == 900.0
     assert config.mode == "confirm"
     assert config.orchestration.subagent_model_timeout == 120.0
 
@@ -54,6 +56,20 @@ def test_load_runtime_config_defaults_and_timeout_fallbacks(monkeypatch):
 
     monkeypatch.setenv("TESTCODE_MODEL_TIMEOUT", "2.5")
     assert load_runtime_config().model_timeout == 2.5
+
+    monkeypatch.setenv("TESTCODE_MODEL_STREAM_MAX_SECONDS", "1200")
+    assert load_runtime_config().model_stream_max_seconds == 1200.0
+
+
+def test_load_runtime_config_parses_optional_model_stream(monkeypatch):
+    monkeypatch.delenv("TESTCODE_MODEL_STREAM", raising=False)
+    assert load_runtime_config().model_stream is False
+
+    monkeypatch.setenv("TESTCODE_MODEL_STREAM", "true")
+    assert load_runtime_config().model_stream is True
+
+    monkeypatch.setenv("TESTCODE_MODEL_STREAM", "invalid")
+    assert load_runtime_config().model_stream is False
 
 
 def test_load_runtime_config_parses_project_mcp_servers(tmp_path, monkeypatch):

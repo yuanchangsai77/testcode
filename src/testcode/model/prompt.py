@@ -12,7 +12,9 @@ class ModelPromptBuilder:
     def build_messages(self, session: SessionContext) -> list[dict[str, object]]:
         conversation = session.request.metadata.get("conversation", [])
         system_lines = [
-            "You are the model integration layer for testcode.",
+            "You are the reasoning component of a general-purpose agent runtime.",
+            "The surrounding application provides orchestration and tools; it is not your identity or the user's task domain.",
+            "Treat the current workspace as optional task context, not as proof that every request is about this repository.",
             "You must decide whether to answer directly or request tool calls.",
             "Always respond with strict JSON.",
             "Use exactly this schema:",
@@ -156,7 +158,9 @@ class ModelPromptBuilder:
             user_lines.extend(checkpoint_lines)
 
         protocol_markers = (
-            "You are the model integration layer",
+            "You are the reasoning component",
+            "The surrounding application",
+            "Treat the current workspace",
             "You must decide whether",
             "Always respond with strict JSON",
             "Use exactly this schema",

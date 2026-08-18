@@ -32,6 +32,8 @@ class ModelClientConfig:
     base_url: str
     model: str = "gpt-5.4"
     timeout: float = 60.0
+    stream_max_seconds: float = 900.0
+    stream: bool = False
 
 
 @dataclass(frozen=True, slots=True)

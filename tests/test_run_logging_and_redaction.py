@@ -74,6 +74,33 @@ def test_logger_compacts_runtime_model_reply_without_archiving_body(tmp_path):
     assert not (logger.run_dir / "artifacts").exists()
 
 
+def test_model_response_and_parsed_reply_keep_transport_correlation(tmp_path):
+    logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
+    logger.record(
+        "model.response",
+        {
+            "_transport_request_id": "attempt-1",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"content": "opaque result"},
+                }
+            ],
+        },
+    )
+    logger.record(
+        "model.parsed_reply",
+        {"request_id": "attempt-1", "message": "result", "done": True, "actions": []},
+    )
+
+    response, parsed = logger.events
+    assert response.payload["request_id"] == "attempt-1"
+    assert response.payload["choices"][0]["content_chars"] == len("opaque result")
+    assert len(response.payload["choices"][0]["content_sha256"]) == 64
+    assert parsed.payload["request_id"] == "attempt-1"
+
+
 def test_logger_externalizes_large_event_values_to_run_artifact(tmp_path):
     logger = InMemoryLogger(base_dir=str(tmp_path / "runs"))
     request = UserRequest(prompt="write report", cwd=str(tmp_path))

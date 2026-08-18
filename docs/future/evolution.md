@@ -26,7 +26,7 @@
 
 ### 阶段 1：Model Plane 正式集成
 
-- API Control Board 与 `testcode` 的工具循环契约测试。
+- 任意兼容 Model Plane 实现与 Agent Runtime 的工具循环契约测试。
 - 网关凭据配置、强制认证和回环/非回环监听策略。
 - 错误分类、重试、用量和 trace。
 - 本地访问显式验证代理变量绕过。

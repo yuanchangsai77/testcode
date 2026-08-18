@@ -156,6 +156,8 @@ Start your OpenAI-compatible endpoint and configure the `.env` file in the
 TESTCODE_MODEL_BASE_URL=http://127.0.0.1:3000
 TESTCODE_MODEL_NAME=gpt-5.4
 TESTCODE_MODEL_TIMEOUT=60
+TESTCODE_MODEL_STREAM_MAX_SECONDS=900
+TESTCODE_MODEL_STREAM=false
 TESTCODE_MODE=confirm
 ```
 
@@ -165,7 +167,14 @@ Behavior:
   target workspace's `.env` is not loaded automatically
 - If `TESTCODE_MODEL_BASE_URL` is still not set, `testcode` keeps using `StubModelClient`
 - If `TESTCODE_MODEL_BASE_URL` is set, `testcode` sends requests to `POST /v1/chat/completions`
-- `TESTCODE_MODEL_TIMEOUT` controls the model request timeout in seconds and defaults to 60
+- `TESTCODE_MODEL_TIMEOUT` defaults to 60 seconds. It is the total timeout for JSON responses and the connection,
+  first-byte, and inactivity timeout for SSE; active SSE traffic refreshes the inactivity window.
+- `TESTCODE_MODEL_STREAM_MAX_SECONDS` is the independent SSE wall-clock safety limit and defaults to 900 seconds.
+- `TESTCODE_MODEL_STREAM=true` enables OpenAI-compatible SSE transport. Deltas may be observed as they arrive,
+  and interactive terminals render only projected natural-language fields as they arrive. Tool calls remain buffered;
+  the orchestration loop receives one fully assembled and validated reply.
+- `python -m testcode --stream` enables the same behavior for one invocation; `--no-stream` overrides an enabled
+  environment setting.
 - `TESTCODE_MODE` controls tool safety and defaults to `confirm`
 - The configured endpoint remains responsible for its upstream credentials and provider-specific authentication
 - The real-model path now supports tool-call loops: the model can request built-in tools, receive tool results, and continue until it produces a final answer

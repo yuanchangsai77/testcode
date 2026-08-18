@@ -106,11 +106,19 @@ read_timeout = 300
 TESTCODE_MODEL_BASE_URL=http://127.0.0.1:3000
 TESTCODE_MODEL_NAME=gpt-5.4
 TESTCODE_MODEL_TIMEOUT=60
+TESTCODE_MODEL_STREAM_MAX_SECONDS=900
+TESTCODE_MODEL_STREAM=false
 TESTCODE_MODE=confirm
 ```
 
-当模型地址是 `localhost` 或 loopback IP 时，模型客户端始终绕过环境代理，并把
-`TESTCODE_MODEL_TIMEOUT` 作为整个 HTTP 请求的总截止时间，而不只是单次 socket 操作的超时。
+当模型地址是 `localhost` 或 loopback IP 时，模型客户端始终绕过环境代理。普通 JSON 响应把
+`TESTCODE_MODEL_TIMEOUT` 作为请求总时限；SSE 用它限制建连、首包以及流开始后的最大无数据间隔，
+每收到传输块都会刷新空闲计时。`TESTCODE_MODEL_STREAM_MAX_SECONDS` 是独立的流总时长安全上限，默认
+900 秒，持续有数据的长回复不会再被 60 秒空闲时限误杀。
+`TESTCODE_MODEL_STREAM=true` 启用 OpenAI-compatible SSE 传输；模型客户端逐块接收并组装文本与工具调用，
+交互终端只投影完整协议中的自然语言字段。工具名称、参数和动作不会增量展示，编排层仍只消费通过完整
+协议校验后的单次回复。默认关闭以兼容不支持流式的直接模型端点。
+命令行可用 `--stream` 对本次进程启用，也可用 `--no-stream` 覆盖环境配置。
 
 `TESTCODE_MODE` 可选值为 `readonly`、`confirm`、`auto`。MCP 的敏感值应通过系统环境变量提供，例如 `AMAP_MCP_KEY`。
 

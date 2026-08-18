@@ -65,6 +65,22 @@ def test_main_once_dispatches_prompt_to_app_run(monkeypatch, tmp_path):
     assert fake.runs[0].cwd == str(tmp_path)
 
 
+def test_main_stream_flag_overrides_model_transport_for_one_invocation(monkeypatch, tmp_path):
+    fake = FakeApp()
+    created = []
+    monkeypatch.setattr(sys, "argv", ["testcode", "--once", "--stream", "inspect"])
+    monkeypatch.setattr(
+        app_module,
+        "create_app",
+        lambda **kwargs: created.append(kwargs) or fake,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    app_module.main()
+
+    assert created[0]["model_stream"] is True
+
+
 def test_main_once_passes_context_paths_to_request_metadata(monkeypatch, tmp_path):
     fake = FakeApp()
     monkeypatch.setattr(

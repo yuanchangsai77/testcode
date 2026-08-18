@@ -45,6 +45,10 @@ class InMemoryLogger:
             self._model_request_count += 1
             return {
                 "url": payload.get("url", ""),
+                "request_id": payload.get("request_id", ""),
+                "client_timeout_ms": payload.get("client_timeout_ms", 0),
+                "client_idle_timeout_ms": payload.get("client_idle_timeout_ms", 0),
+                "stream": bool(payload.get("stream", False)),
                 "model": payload.get("model", ""),
                 "message_count": len(messages) if isinstance(messages, list) else 0,
                 "tools": list(payload.get("tools", [])) if isinstance(payload.get("tools"), list) else [],
@@ -55,16 +59,23 @@ class InMemoryLogger:
         if name == "model.response":
             usage = payload.get("usage", {})
             choices = payload.get("choices", [])
+            provider_payload = {
+                key: value for key, value in payload.items()
+                if not str(key).startswith("_transport_")
+            }
             return {
+                "request_id": payload.get("_transport_request_id", ""),
                 "response_fingerprint": self._artifact_envelope(
-                    "model-response", payload, persist=False
+                    "model-response", provider_payload, persist=False
                 ),
                 "choice_count": len(choices) if isinstance(choices, list) else 0,
+                "choices": self._model_choice_summaries(choices),
                 "usage": dict(usage) if isinstance(usage, dict) else {},
             }
         if name == "model.parsed_reply":
             actions = payload.get("actions", [])
             return {
+                "request_id": payload.get("request_id", ""),
                 "message": self._compact_text(str(payload.get("message", "")), 320),
                 "done": bool(payload.get("done", False)),
                 "actions": [
@@ -149,6 +160,37 @@ class InMemoryLogger:
                 "checkpoint_ref": self._artifact_envelope("terminal-checkpoint", checkpoint),
             }
         return payload
+
+    def _model_choice_summaries(self, choices: object) -> list[dict[str, object]]:
+        if not isinstance(choices, list):
+            return []
+        summaries: list[dict[str, object]] = []
+        for choice in choices[:4]:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message", {})
+            if not isinstance(message, dict):
+                message = {}
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                content = ""
+            tool_calls = message.get("tool_calls", [])
+            summaries.append(
+                {
+                    "index": choice.get("index"),
+                    "finish_reason": choice.get("finish_reason"),
+                    "content_chars": len(content),
+                    "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "tool_names": [
+                        str(item.get("function", {}).get("name", ""))
+                        for item in tool_calls
+                        if isinstance(item, dict)
+                        and isinstance(item.get("function"), dict)
+                        and item["function"].get("name")
+                    ] if isinstance(tool_calls, list) else [],
+                }
+            )
+        return summaries
 
     def _artifact_envelope(
         self,

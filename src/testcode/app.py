@@ -55,6 +55,7 @@ def create_model_client(
     config=None,
     *,
     timeout: float | None = None,
+    stream: bool | None = None,
 ) -> StubModelClient | OpenAICompatibleModelClient:
     config = config or load_runtime_config()
     if not config.model_base_url:
@@ -64,6 +65,8 @@ def create_model_client(
         base_url=config.model_base_url,
         model=config.model_name,
         timeout=config.model_timeout if timeout is None else timeout,
+        stream_max_seconds=config.model_stream_max_seconds,
+        stream=config.model_stream if stream is None else stream,
     )
     return OpenAICompatibleModelClient(
         config=model_config,
@@ -79,6 +82,7 @@ def create_app(
     interactive: bool = False,
     background: bool = False,
     subagent_grant: SubagentExecutionGrant | None = None,
+    model_stream: bool | None = None,
 ) -> CLI:
     root = Path(workspace_root or os.getcwd()).resolve()
     config = load_runtime_config(mode=mode, cwd=root)
@@ -204,6 +208,7 @@ def create_app(
         logger,
         config=config,
         timeout=config.orchestration.subagent_model_timeout if background else None,
+        stream=model_stream,
     )
     presenter_type = TUIConsolePresenter if interactive and should_use_tui() else ConsolePresenter
     presenter = presenter_type(tool_result_summarizer=tools.summarize_result)
@@ -302,13 +307,22 @@ def main() -> None:
             default=[],
             help="Add a workspace file, directory, or glob as explicit context for this run.",
         )
+        parser.add_argument(
+            "--stream",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Stream presentation-safe model text while buffering tool calls.",
+        )
         args = parser.parse_args()
 
         interactive = not args.once and not args.list
+        app_kwargs = {"mode": args.mode}
+        if args.stream is not None:
+            app_kwargs["model_stream"] = args.stream
         if interactive:
-            app = create_app(mode=args.mode, interactive=True)
+            app = create_app(interactive=True, **app_kwargs)
         else:
-            app = create_app(mode=args.mode)
+            app = create_app(**app_kwargs)
         initial_prompt = " ".join(args.prompt).strip() or None
 
         resume_requested = args.resume is not None
@@ -341,9 +355,9 @@ def main() -> None:
                 reset_state()
             session_id = resumed_session.session_id if resumed_session is not None else None
             if interactive:
-                app = create_app(mode=args.mode, workspace_root=cwd, interactive=True)
+                app = create_app(workspace_root=cwd, interactive=True, **app_kwargs)
             else:
-                app = create_app(mode=args.mode, workspace_root=cwd)
+                app = create_app(workspace_root=cwd, **app_kwargs)
             if session_id is not None:
                 resumed_session = app.load_session(session_id) or resumed_session
 
